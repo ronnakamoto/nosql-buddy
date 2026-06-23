@@ -109,31 +109,13 @@ pub async fn audit_record_event(
     collection: String,
     payload: String,
 ) -> AppResult<u64> {
-    use ark_bn254::Fr;
-    use ark_ff::PrimeField;
-
-    // Hash the payload into a field element. We use a simple hash-to-field
-    // by taking the first 31 bytes of SHA-256 and interpreting as a field element.
-    let hash = sha256_hash(&payload);
-    let mut bytes = [0u8; 32];
-    bytes[..31].copy_from_slice(&hash[..31]);
-    // Ensure it fits in the field (mask the top bit).
-    bytes[31] &= 0x0F;
-    let leaf = Fr::from_be_bytes_mod_order(&bytes);
+    // The leaf is derived from the raw payload string. The same payload
+    // is stored on disk so replay can recompute and verify the leaf.
+    let leaf = crate::audit::leaf_from_payload(&operation, &database, &collection, &payload);
 
     state
         .audit_log
-        .record(&operation, &database, &collection, leaf)
-}
-
-fn sha256_hash(input: &str) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    let result = hasher.finalize();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&result);
-    out
+        .record(&operation, &database, &collection, &payload, leaf)
 }
 
 #[cfg(test)]

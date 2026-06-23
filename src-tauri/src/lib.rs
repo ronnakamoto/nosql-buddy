@@ -218,6 +218,34 @@ pub fn run() {
                 let _ = app.emit("menu-action", event.id().0.clone());
             });
 
+            // Wire audit log persistence: replay any existing JSONL log
+            // from <app_data_dir>/audit/events.jsonl and append to it on
+            // every subsequent record(). This must happen before any
+            // audit event is recorded (no commands run between manage()
+            // and setup(), so the in-memory log is still empty here).
+            // If the data dir can't be resolved or the log is corrupt,
+            // we log the error and continue with a non-persistent log
+            // rather than bricking the app — the user can still use the
+            // tool, they just won't have audit history across restarts.
+            let data_dir = app.path().app_data_dir();
+            match &data_dir {
+                Ok(dir) => {
+                    if let Err(e) = app.state::<AppState>().audit_log.set_persistence_dir(dir) {
+                        tracing::error!(
+                            error = %e,
+                            data_dir = %dir.display(),
+                            "failed to initialize audit log persistence; audit events will not survive restart"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "could not resolve app data dir; audit log persistence disabled"
+                    );
+                }
+            }
+
             // System tray: quick "Show/Hide NoSQLBuddy" + Quit.
             let tray_menu = tauri::menu::MenuBuilder::new(app)
                 .item(

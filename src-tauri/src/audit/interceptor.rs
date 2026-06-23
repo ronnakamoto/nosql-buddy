@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use crate::audit::AuditLog;
+use crate::audit::{leaf_from_payload, AuditLog};
 use crate::error::AppResult;
 
 /// Record an insert operation in the audit log.
@@ -18,17 +18,9 @@ pub fn record_insert(
     collection: &str,
     document_json: &str,
 ) -> AppResult<u64> {
-    use ark_bn254::Fr;
-    use ark_ff::PrimeField;
-
     let payload = format!("insert|{}|{}|{}", database, collection, document_json);
-    let hash = sha256_hash(&payload);
-    let mut bytes = [0u8; 32];
-    bytes[..31].copy_from_slice(&hash[..31]);
-    bytes[31] &= 0x0F;
-    let leaf = Fr::from_be_bytes_mod_order(&bytes);
-
-    audit.record("insert", database, collection, leaf)
+    let leaf = leaf_from_payload("insert", database, collection, &payload);
+    audit.record("insert", database, collection, &payload, leaf)
 }
 
 /// Record an update operation in the audit log.
@@ -39,17 +31,9 @@ pub fn record_update(
     filter_json: &str,
     update_json: &str,
 ) -> AppResult<u64> {
-    use ark_bn254::Fr;
-    use ark_ff::PrimeField;
-
     let payload = format!("update|{}|{}|{}|{}", database, collection, filter_json, update_json);
-    let hash = sha256_hash(&payload);
-    let mut bytes = [0u8; 32];
-    bytes[..31].copy_from_slice(&hash[..31]);
-    bytes[31] &= 0x0F;
-    let leaf = Fr::from_be_bytes_mod_order(&bytes);
-
-    audit.record("update", database, collection, leaf)
+    let leaf = leaf_from_payload("update", database, collection, &payload);
+    audit.record("update", database, collection, &payload, leaf)
 }
 
 /// Record a delete operation in the audit log.
@@ -59,27 +43,9 @@ pub fn record_delete(
     collection: &str,
     filter_json: &str,
 ) -> AppResult<u64> {
-    use ark_bn254::Fr;
-    use ark_ff::PrimeField;
-
     let payload = format!("delete|{}|{}|{}", database, collection, filter_json);
-    let hash = sha256_hash(&payload);
-    let mut bytes = [0u8; 32];
-    bytes[..31].copy_from_slice(&hash[..31]);
-    bytes[31] &= 0x0F;
-    let leaf = Fr::from_be_bytes_mod_order(&bytes);
-
-    audit.record("delete", database, collection, leaf)
-}
-
-fn sha256_hash(input: &str) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    let result = hasher.finalize();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&result);
-    out
+    let leaf = leaf_from_payload("delete", database, collection, &payload);
+    audit.record("delete", database, collection, &payload, leaf)
 }
 
 #[cfg(test)]
