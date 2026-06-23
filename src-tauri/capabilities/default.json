@@ -1,0 +1,43 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "NoSQLBuddy main window capabilities (minimal, scoped).",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "core:event:default",
+    "core:webview:default",
+    "core:app:default",
+    "dialog:default",
+    "fs:allow-read-text-file",
+    "fs:allow-write-text-file",
+    "fs:allow-exists",
+    "fs:allow-mkdir",
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        "$DOCUMENT/*",
+        "$DOWNLOAD/*",
+        "$DESKTOP/*",
+        "$HOME/*",
+        "$APPCONFIG/*",
+        "$APPDATA/*"
+      ]
+    },
+    "fs:default",
+    "notification:default",
+    "os:allow-platform",
+    "os:allow-version",
+    "os:allow-arch",
+    "os:allow-locale",
+    "store:default",
+    "window-state:default",
+    "log:default",
+    "shell:allow-open"
+  ]
+}
