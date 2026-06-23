@@ -488,6 +488,7 @@ export type CompletionKind =
   | { kind: "collections" }
   | { kind: "methods"; collection: string }
   | { kind: "fields"; collection: string }
+  | { kind: "operators"; method: string }
   | { kind: "databases" }
   | { kind: "globals" }
   | { kind: "none" };

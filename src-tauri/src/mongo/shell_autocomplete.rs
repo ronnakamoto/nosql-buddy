@@ -20,6 +20,10 @@ pub enum CompletionKind {
     /// Inside a method call's argument list, after a `{` or `,`
     /// — suggest field names from the collection's schema.
     Fields { collection: String },
+    /// Inside a method call's argument object, when the partial
+    /// token starts with `$` — suggest MongoDB operator names
+    /// (query or update operators, depending on the method).
+    Operators { method: String },
     /// After `use ` — suggest database names.
     Databases,
     /// Typing a bare identifier at statement start — suggest
@@ -71,7 +75,59 @@ pub const COLLECTION_METHODS: &[&str] = &[
     "renameCollection",
     "drop",
     "dropDatabase",
+    "findOneAndUpdate",
+    "findOneAndDelete",
+    "findOneAndReplace",
+    "bulkWrite",
     "help",
+];
+
+/// Common MongoDB query operators, suggested inside filter documents
+/// for read/delete/count methods. Sorted for stable, readable dropdowns.
+pub const QUERY_OPERATORS: &[&str] = &[
+    "$and",
+    "$or",
+    "$nor",
+    "$not",
+    "$eq",
+    "$ne",
+    "$gt",
+    "$gte",
+    "$lt",
+    "$lte",
+    "$in",
+    "$nin",
+    "$exists",
+    "$type",
+    "$regex",
+    "$mod",
+    "$size",
+    "$all",
+    "$elemMatch",
+    "$text",
+    "$where",
+    "$expr",
+    "$jsonSchema",
+];
+
+/// Common MongoDB update operators, suggested inside update documents
+/// for updateOne/updateMany/findOneAndUpdate update ops.
+pub const UPDATE_OPERATORS: &[&str] = &[
+    "$set",
+    "$unset",
+    "$inc",
+    "$dec",
+    "$mul",
+    "$rename",
+    "$min",
+    "$max",
+    "$currentDate",
+    "$push",
+    "$pop",
+    "$pull",
+    "$pullAll",
+    "$addToSet",
+    "$setOnInsert",
 ];
 
 /// The canonical list of global utility functions the shell
@@ -215,6 +271,16 @@ fn detect_db_context(text: &str) -> Option<CompletionKind> {
             return None;
         }
         if is_in_field_context(after_paren) {
+            // If the partial token being typed starts with `$`,
+            // the user is typing a MongoDB operator name (e.g.
+            // `$gt`, `$set`) rather than a field name — offer
+            // operator completions instead of field names.
+            let partial = partial_token(text);
+            if partial.starts_with('$') {
+                return Some(CompletionKind::Operators {
+                    method: method_name.to_string(),
+                });
+            }
             return Some(CompletionKind::Fields {
                 collection: collection.to_string(),
             });
@@ -427,12 +493,15 @@ pub fn filter_by_prefix<'a>(
 /// Extract the partial token being typed at the end of
 /// `text_before_cursor`. For `db.us`, this returns `us`. For
 /// `db.users.findO`, returns `findO`. For `db.users.find(`,
-/// returns `` (empty).
+/// returns `` (empty). For `db.users.find({ $gt`, returns `$gt`
+/// (the `$` is included so operator-name completions can match).
 pub fn partial_token(text_before_cursor: &str) -> String {
     // Walk backwards from the end, collecting identifier chars.
+    // `$` is included so MongoDB operator prefixes (`$gt`, `$set`)
+    // are captured for operator-context detection and filtering.
     let mut chars: Vec<char> = Vec::new();
     for c in text_before_cursor.chars().rev() {
-        if c.is_alphanumeric() || c == '_' {
+        if c.is_alphanumeric() || c == '_' || c == '$' {
             chars.push(c);
         } else {
             break;
@@ -705,6 +774,70 @@ mod tests {
             assert!(
                 GLOBAL_FUNCTIONS.contains(&f),
                 "GLOBAL_FUNCTIONS missing: {f}"
+            );
+        }
+    }
+
+    // --- Operator context tests ---
+
+    #[test]
+    fn autocomplete_offers_operators_when_partial_starts_with_dollar() {
+        assert_eq!(
+            autocomplete_context("db.users.find({ $"),
+            CompletionKind::Operators {
+                method: "find".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn autocomplete_offers_fields_when_partial_does_not_start_with_dollar() {
+        assert_eq!(
+            autocomplete_context("db.users.find({ na"),
+            CompletionKind::Fields {
+                collection: "users".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn autocomplete_operators_for_update_method() {
+        assert_eq!(
+            autocomplete_context("db.users.updateOne({ $s"),
+            CompletionKind::Operators {
+                method: "updateOne".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn autocomplete_operators_inside_nested_object() {
+        // The `$` is inside a nested `{`, still field/operator
+        // context — operators should be offered.
+        assert_eq!(
+            autocomplete_context("db.users.find({ a: { $"),
+            CompletionKind::Operators {
+                method: "find".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn query_operator_list_includes_common_ops() {
+        for op in ["$gt", "$or", "$elemMatch", "$expr"] {
+            assert!(
+                QUERY_OPERATORS.contains(&op),
+                "QUERY_OPERATORS missing: {op}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_operator_list_includes_common_ops() {
+        for op in ["$set", "$inc", "$push", "$unset"] {
+            assert!(
+                UPDATE_OPERATORS.contains(&op),
+                "UPDATE_OPERATORS missing: {op}"
             );
         }
     }

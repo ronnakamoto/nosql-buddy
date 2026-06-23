@@ -575,18 +575,62 @@ db methods:
 ";
 
 fn install_db_stub(ctx: &mut Context) {
-    // `db.help()` is bound to a hidden global that we
-    // expose through a Proxy on `db`. Easiest: just install a
-    // function `db` that returns itself, and let JS do
-    // `db.runCommand(...)` which the source transformer
-    // rewrites to `__call_db_no_coll("runCommand", [...])`.
-    // For `db.coll.method(...)`, the transformer rewrites to
-    // `__call_db("coll", "method", [...])`.
-    // `db` itself is just an empty object; access goes
-    // through the source transformer which rewrites
-    // `db.coll.method(...)` to `__call_db(...)`. `help()`
-    // and `__db_help()` are exposed as global functions.
+    // `db` is a plain object. `db.coll.method(...)` is rewritten by
+    // the source transformer to `__call_db("coll", "method", ...)`,
+    // and `db.runCommand(...)` to `__run_command(...)`, so `db` never
+    // needs real collection properties. We DO attach a `help` method
+    // so `db.help()` works (the transformer leaves `db.help()` alone
+    // since it has only one dot, and without this method JS would
+    // throw "db.help is not a function"). `db.runCommand` is also
+    // attached as a real function for robustness in case a future
+    // caller bypasses the transformer.
     let obj = boa_engine::object::JsObject::default(ctx.intrinsics());
+
+    // db.help() → print the database-methods help text.
+    let help_fn: JsValue = NativeFunction::from_fn_ptr(|_this, _args, _ctx| {
+        push_output(ShellOutput::Text {
+            value: DB_HELP_TEXT.to_string(),
+        });
+        Ok(JsValue::undefined())
+    })
+    .to_js_function(ctx.realm())
+    .into();
+    obj.set(js_string!("help"), help_fn, false, ctx)
+        .expect("db.help set");
+
+    // db.runCommand(cmd) → dispatch via __run_command. This is a
+    // fallback; the source transformer normally rewrites
+    // `db.runCommand(...)` to `__run_command(...)` before boa sees it.
+    let run_command_fn: JsValue = NativeFunction::from_fn_ptr(|_this, args, ctx| {
+        let cmd = jsvalue_to_bson(args.get_or_undefined(0), ctx)
+            .map_err(|e| JsError::from_native(JsNativeError::typ().with_message(e.to_string())))?;
+        let cmd_doc = match cmd {
+            bson::Bson::Document(d) => d,
+            bson::Bson::Null => Document::new(),
+            other => doc! { "value": other },
+        };
+        let active_db = SHELL_ACTIVE_DB.with(|c| c.borrow().clone());
+        let result = with_entry(|entry| {
+            let database = entry.client.database(&active_db);
+            runtime_block_on(async move {
+                database
+                    .run_command(cmd_doc)
+                    .await
+                    .map_err(|e| AppError::Mongo(e.to_string()))
+            })
+        });
+        match result {
+            Ok(doc) => bson_to_js(bson::Bson::Document(doc), ctx),
+            Err(e) => Err(JsError::from_native(
+                JsNativeError::typ().with_message(e.to_string()),
+            )),
+        }
+    })
+    .to_js_function(ctx.realm())
+    .into();
+    obj.set(js_string!("runCommand"), run_command_fn, false, ctx)
+        .expect("db.runCommand set");
+
     ctx.register_global_property(js_string!("db"), obj, Attribute::all())
         .expect("register db");
 }
@@ -620,47 +664,163 @@ fn preprocess_use(script: &str) -> (Option<String>, String) {
 
 // ---------- Source transformer ----------
 //
-// Rewrites the leading call site of each statement so that
-// `db.<coll>.<method>(<args>)` becomes
-// `__call_db("<coll>", "<method>", [<args>])` and
-// `db.runCommand(<args>)` becomes
-// `__run_command([<args>])`. We only match the first
-// `db.<...>(<...>)` in each top-level statement to keep the
-// transformation predictable; chained methods like
-// `db.coll.find({}).toArray()` are NOT rewritten (chained
-// calls aren't supported in this version of the shell).
+// Rewrites call sites so that
+//   `db.<coll>.<method>(<args>)` → `__call_db("<coll>", "<method>", <args>)`
+//   `db.runCommand(<args>)`      → `__run_command(<args>)`
+// The original argument list is preserved verbatim after the opening
+// paren, so the closing `)` of the original call also closes the
+// rewritten call (no balanced-paren matching needed).
 //
-// The transformer is deliberately regex-based: the full
-// alternative is a JS AST transform which boa_engine exposes
-// via its public API but is overkill for the subset we need.
+// The scanner is string/comment-aware: patterns inside string literals
+// (`"db.foo.bar("`), line comments (`// ...`), and block comments
+// (`/* ... */`) are left untouched. This avoids the previous
+// regex-based transformer's known limitation of rewriting `db.foo.bar(`
+// text that appeared inside a string literal.
+//
+// Chained methods like `db.coll.find({}).toArray()` are still rewritten
+// at the leading call site only; the trailing `.toArray()` is handled
+// by attaching a `toArray` per-instance function to the array returned
+// by `find`/`aggregate` (see `dispatch_sync`).
 
-fn transform_source(src: &str) -> String {
-    // First: handle `db.runCommand(...)` (no collection
-    // namespace). This MUST run before the `db.X.Y(` rewrite
-    // so it doesn't get re-matched.
-    let s = transform_run_command(src);
-    // Then: rewrite `db.<coll>.<method>(` →
-    // `__call_db("<coll>", "<method>", `. The original
-    // argument list is preserved verbatim after the opening
-    // paren. The host function is variadic: it takes the
-    // collection + method names as the first two args and
-    // then forwards the rest as positional method args.
-    // This avoids the regex-balanced-paren problem because
-    // the closing `)` of the original call also closes the
-    // `__call_db(...)` call.
-    let re = regex::Regex::new(
-        r"\bdb\.([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*\(",
-    )
-    .unwrap();
-    let s = re.replace_all(&s, |caps: &regex::Captures| {
-        format!("__call_db(\"{}\", \"{}\", ", &caps[1], &caps[2])
-    });
-    s.into_owned()
+static CALL_DB_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+static RUN_COMMAND_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+
+fn call_db_re() -> &'static regex::Regex {
+    CALL_DB_RE.get_or_init(|| {
+        regex::Regex::new(r"\bdb\.([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+            .unwrap()
+    })
 }
 
-fn transform_run_command(src: &str) -> String {
-    let re = regex::Regex::new(r"\bdb\.runCommand\s*\(").unwrap();
-    re.replace_all(src, "__run_command(").into_owned()
+fn run_command_re() -> &'static regex::Regex {
+    RUN_COMMAND_RE
+        .get_or_init(|| regex::Regex::new(r"\bdb\.runCommand\s*\(").unwrap())
+}
+
+fn transform_source(src: &str) -> String {
+    let chars: Vec<(usize, char)> = src.char_indices().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(src.len());
+    let mut k = 0usize;
+    let mut in_string: Option<char> = None;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    while k < n {
+        let (i, c) = chars[k];
+        if in_line_comment {
+            out.push(c);
+            if c == '\n' {
+                in_line_comment = false;
+            }
+            k += 1;
+            continue;
+        }
+        if in_block_comment {
+            out.push(c);
+            if c == '*' && k + 1 < n && chars[k + 1].1 == '/' {
+                out.push('/');
+                k += 2;
+                in_block_comment = false;
+                continue;
+            }
+            k += 1;
+            continue;
+        }
+        if let Some(quote) = in_string {
+            out.push(c);
+            if c == '\\' && k + 1 < n {
+                // Escaped char: copy the next char verbatim so an
+                // escaped quote doesn't end the string.
+                out.push(chars[k + 1].1);
+                k += 2;
+                continue;
+            }
+            if c == quote {
+                in_string = None;
+            }
+            k += 1;
+            continue;
+        }
+        // Not inside a string or comment — watch for comment starts.
+        if c == '/' && k + 1 < n && chars[k + 1].1 == '/' {
+            in_line_comment = true;
+            out.push('/');
+            out.push('/');
+            k += 2;
+            continue;
+        }
+        if c == '/' && k + 1 < n && chars[k + 1].1 == '*' {
+            in_block_comment = true;
+            out.push('/');
+            out.push('*');
+            k += 2;
+            continue;
+        }
+        if c == '"' || c == '\'' || c == '`' {
+            in_string = Some(c);
+            out.push(c);
+            k += 1;
+            continue;
+        }
+        // Try to match a `db.` call pattern here. Only when `db` is a
+        // standalone word (preceded by a non-identifier char / start).
+        if c == 'd'
+            && k + 1 < n
+            && chars[k + 1].1 == 'b'
+            && is_word_boundary_before(&chars, k)
+        {
+            let rest = &src[i..];
+            if let Some((consumed_chars, replacement)) = try_match_db_pattern(rest) {
+                out.push_str(&replacement);
+                k += consumed_chars;
+                continue;
+            }
+        }
+        out.push(c);
+        k += 1;
+    }
+    out
+}
+
+/// Match `db.runCommand(` or `db.<coll>.<method>(` at the start of
+/// `rest`. Returns the number of chars consumed (the full matched
+/// prefix, including the opening paren) and the replacement text that
+/// should replace it.
+fn try_match_db_pattern(rest: &str) -> Option<(usize, String)> {
+    // runCommand first — it has no collection namespace and must win
+    // over the `db.X.Y(` form.
+    if let Some(caps) = run_command_re().captures(rest) {
+        let m = caps.get(0).unwrap();
+        if m.start() == 0 {
+            let consumed_chars = rest[..m.end()].chars().count();
+            return Some((consumed_chars, "__run_command(".to_string()));
+        }
+    }
+    if let Some(caps) = call_db_re().captures(rest) {
+        let m = caps.get(0).unwrap();
+        if m.start() == 0 {
+            let coll = caps[1].to_string();
+            let method = caps[2].to_string();
+            let consumed_chars = rest[..m.end()].chars().count();
+            return Some((
+                consumed_chars,
+                format!("__call_db(\"{coll}\", \"{method}\", "),
+            ));
+        }
+    }
+    None
+}
+
+/// True when the char before position `k` is not an identifier
+/// character (or `k` is at the start of the text), so `db` at `k` is a
+/// standalone word rather than the tail of a larger identifier like
+/// `mydb`.
+fn is_word_boundary_before(chars: &[(usize, char)], k: usize) -> bool {
+    if k == 0 {
+        return true;
+    }
+    let p = chars[k - 1].1;
+    !p.is_alphanumeric() && p != '_' && p != '$'
 }
 
 // ---------- Sync dispatch over the current-thread runtime ----------
@@ -709,6 +869,7 @@ fn dispatch_sync(
                 let js = bson_to_js(bson::Bson::Document(d.clone()), ctx)?;
                 arr.set(i, js, false, ctx)?;
             }
+            attach_cursor_methods(&arr, ctx)?;
             Ok(arr.into())
         }
         "findOne" => {
@@ -790,6 +951,7 @@ fn dispatch_sync(
                 let js = bson_to_js(bson::Bson::Document(d.clone()), ctx)?;
                 arr.set(i, js, false, ctx)?;
             }
+            attach_cursor_methods(&arr, ctx)?;
             Ok(arr.into())
         }
         "distinct" => {
@@ -1117,6 +1279,253 @@ fn dispatch_sync(
             });
             Ok(JsValue::undefined())
         }
+        "findOneAndUpdate" => {
+            // mongosh form: db.coll.findOneAndUpdate(filter, update, options?).
+            // Returns the document (before modification by default, or
+            // after when returnNewDocument: true / returnDocument: "after").
+            let filter = doc_arg(&args, 0).unwrap_or_default();
+            let update = args.get(1).ok_or_else(|| {
+                js_err("findOneAndUpdate(filter, update, options?) requires an update document".to_string())
+            })?;
+            let update_mods = bson_to_update_mods(update)?;
+            let opts = doc_arg(&args, 2);
+            let result = runtime_block_on(async move {
+                let coll = entry.client.database(db).collection::<Document>(coll);
+                let mut a = coll.find_one_and_update(filter, update_mods);
+                if let Some(o) = &opts {
+                    if let Some(rd) = extract_return_document(o) {
+                        a = a.return_document(rd);
+                    }
+                    if let Ok(true) = o.get_bool("upsert") {
+                        a = a.upsert(true);
+                    }
+                    if let Ok(sort) = o.get_document("sort") {
+                        a = a.sort(sort.clone());
+                    }
+                    if let Ok(proj) = o.get_document("projection") {
+                        a = a.projection(proj.clone());
+                    }
+                    if let Ok(af) = o.get_array("arrayFilters") {
+                        let afs: Vec<Document> = af
+                            .iter()
+                            .filter_map(|b| match b {
+                                bson::Bson::Document(d) => Some(d.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        a = a.array_filters(afs);
+                    }
+                }
+                a.await.map_err(|e| AppError::Mongo(e.to_string()))
+            })
+            .map_err(|e| js_err(e.to_string()))?;
+            SHELL_LAST_COLLECTION.with(|c| *c.borrow_mut() = Some(coll.to_string()));
+            push_output(ShellOutput::Text {
+                value: format!(
+                    "findOneAndUpdate: {}",
+                    if result.is_some() { "matched 1" } else { "matched 0" }
+                ),
+            });
+            match result {
+                Some(d) => bson_to_js(bson::Bson::Document(d), ctx),
+                None => Ok(JsValue::null()),
+            }
+        }
+        "findOneAndDelete" => {
+            // mongosh form: db.coll.findOneAndDelete(filter, options?).
+            // Returns the deleted document or null.
+            let filter = doc_arg(&args, 0).unwrap_or_default();
+            let opts = doc_arg(&args, 1);
+            let result = runtime_block_on(async move {
+                let coll = entry.client.database(db).collection::<Document>(coll);
+                let mut a = coll.find_one_and_delete(filter);
+                if let Some(o) = &opts {
+                    if let Ok(sort) = o.get_document("sort") {
+                        a = a.sort(sort.clone());
+                    }
+                    if let Ok(proj) = o.get_document("projection") {
+                        a = a.projection(proj.clone());
+                    }
+                }
+                a.await.map_err(|e| AppError::Mongo(e.to_string()))
+            })
+            .map_err(|e| js_err(e.to_string()))?;
+            SHELL_LAST_COLLECTION.with(|c| *c.borrow_mut() = Some(coll.to_string()));
+            push_output(ShellOutput::Text {
+                value: format!(
+                    "findOneAndDelete: {}",
+                    if result.is_some() { "deleted 1" } else { "matched 0" }
+                ),
+            });
+            match result {
+                Some(d) => bson_to_js(bson::Bson::Document(d), ctx),
+                None => Ok(JsValue::null()),
+            }
+        }
+        "findOneAndReplace" => {
+            // mongosh form: db.coll.findOneAndReplace(filter, replacement, options?).
+            // Returns the document (before by default).
+            let filter = doc_arg(&args, 0).unwrap_or_default();
+            let replacement = doc_arg(&args, 1).ok_or_else(|| {
+                js_err("findOneAndReplace(filter, replacement, options?) requires a replacement document".to_string())
+            })?;
+            let opts = doc_arg(&args, 2);
+            let result = runtime_block_on(async move {
+                let coll = entry.client.database(db).collection::<Document>(coll);
+                let mut a = coll.find_one_and_replace(filter, replacement);
+                if let Some(o) = &opts {
+                    if let Some(rd) = extract_return_document(o) {
+                        a = a.return_document(rd);
+                    }
+                    if let Ok(true) = o.get_bool("upsert") {
+                        a = a.upsert(true);
+                    }
+                    if let Ok(sort) = o.get_document("sort") {
+                        a = a.sort(sort.clone());
+                    }
+                    if let Ok(proj) = o.get_document("projection") {
+                        a = a.projection(proj.clone());
+                    }
+                }
+                a.await.map_err(|e| AppError::Mongo(e.to_string()))
+            })
+            .map_err(|e| js_err(e.to_string()))?;
+            SHELL_LAST_COLLECTION.with(|c| *c.borrow_mut() = Some(coll.to_string()));
+            push_output(ShellOutput::Text {
+                value: format!(
+                    "findOneAndReplace: {}",
+                    if result.is_some() { "matched 1" } else { "matched 0" }
+                ),
+            });
+            match result {
+                Some(d) => bson_to_js(bson::Bson::Document(d), ctx),
+                None => Ok(JsValue::null()),
+            }
+        }
+        "bulkWrite" => {
+            // mongosh form: db.coll.bulkWrite([ {insertOne: {document: {...}}},
+            // {updateOne: {filter, update, upsert?}}, {deleteMany: {filter}}, ... ]).
+            // The modern driver's client.bulk_write requires MongoDB 8.0+, so
+            // we emulate by dispatching each operation through the existing
+            // per-method logic. Ordered by default: stop on first error.
+            let ops = match args.first() {
+                Some(bson::Bson::Array(v)) => v.clone(),
+                _ => return Err(js_err("bulkWrite requires an array of operation documents".to_string())),
+            };
+            let mut inserted = 0u64;
+            let mut matched = 0u64;
+            let mut modified = 0u64;
+            let mut deleted = 0u64;
+            let mut upserted = 0u64;
+            for op in ops {
+                let op_doc = match op {
+                    bson::Bson::Document(d) => d,
+                    _ => continue,
+                };
+                // Each op document has exactly one top-level key naming the
+                // operation kind; its value is the payload document.
+                let (kind, payload) = match op_doc.iter().next() {
+                    Some((k, v)) => (k.as_str(), v.clone()),
+                    None => continue,
+                };
+                let payload_doc = match payload {
+                    bson::Bson::Document(d) => d,
+                    _ => return Err(js_err(format!("bulkWrite: {kind} payload must be a document"))),
+                };
+                match kind {
+                    "insertOne" => {
+                        let doc = payload_doc
+                            .get_document("document")
+                            .map_err(|e| js_err(format!("bulkWrite insertOne: {e}")))?
+                            .clone();
+                        runtime_block_on(async move {
+                            entry
+                                .client
+                                .database(db)
+                                .collection::<Document>(coll)
+                                .insert_one(doc)
+                                .await
+                                .map_err(|e| AppError::Mongo(e.to_string()))
+                        })
+                        .map_err(|e| js_err(e.to_string()))?;
+                        inserted += 1;
+                    }
+                    "updateOne" | "updateMany" => {
+                        let filter = payload_doc.get_document("filter").cloned().unwrap_or_default();
+                        let update = payload_doc
+                            .get("update")
+                            .cloned()
+                            .ok_or_else(|| js_err("bulkWrite update: missing update".to_string()))?;
+                        let update_mods = bson_to_update_mods(&update)?;
+                        let multi = kind == "updateMany";
+                        let upsert = payload_doc.get_bool("upsert").unwrap_or(false);
+                        let res = runtime_block_on(async move {
+                            let c = entry.client.database(db).collection::<Document>(coll);
+                            let a = if multi {
+                                c.update_many(filter, update_mods)
+                            } else {
+                                c.update_one(filter, update_mods)
+                            };
+                            a.upsert(upsert)
+                                .await
+                                .map_err(|e| AppError::Mongo(e.to_string()))
+                        })
+                        .map_err(|e| js_err(e.to_string()))?;
+                        matched += res.matched_count;
+                        modified += res.modified_count;
+                        if res.upserted_id.is_some() {
+                            upserted += 1;
+                        }
+                    }
+                    "replaceOne" => {
+                        let filter = payload_doc.get_document("filter").cloned().unwrap_or_default();
+                        let replacement = payload_doc
+                            .get_document("replacement")
+                            .cloned()
+                            .map_err(|e| js_err(format!("bulkWrite replaceOne: {e}")))?;
+                        let upsert = payload_doc.get_bool("upsert").unwrap_or(false);
+                        let res = runtime_block_on(async move {
+                            entry
+                                .client
+                                .database(db)
+                                .collection::<Document>(coll)
+                                .replace_one(filter, replacement)
+                                .upsert(upsert)
+                                .await
+                                .map_err(|e| AppError::Mongo(e.to_string()))
+                        })
+                        .map_err(|e| js_err(e.to_string()))?;
+                        matched += res.matched_count;
+                        modified += res.modified_count;
+                        if res.upserted_id.is_some() {
+                            upserted += 1;
+                        }
+                    }
+                    "deleteOne" | "deleteMany" => {
+                        let filter = payload_doc.get_document("filter").cloned().unwrap_or_default();
+                        let multi = kind == "deleteMany";
+                        let res = runtime_block_on(async move {
+                            let c = entry.client.database(db).collection::<Document>(coll);
+                            let r = if multi {
+                                c.delete_many(filter).await
+                            } else {
+                                c.delete_one(filter).await
+                            };
+                            r.map_err(|e| AppError::Mongo(e.to_string()))
+                        })
+                        .map_err(|e| js_err(e.to_string()))?;
+                        deleted += res.deleted_count;
+                    }
+                    other => return Err(js_err(format!("bulkWrite: unsupported operation '{other}'"))),
+                }
+            }
+            push_output(ShellOutput::Text {
+                value: format!(
+                    "bulkWrite: inserted {inserted} · matched {matched} · modified {modified} · deleted {deleted} · upserted {upserted}"
+                ),
+            });
+            Ok(JsValue::undefined())
+        }
         "help" => {
             push_output(ShellOutput::Text {
                 value: COLL_HELP_TEXT.to_string(),
@@ -1126,6 +1535,73 @@ fn dispatch_sync(
         other => return Err(js_err(format!("db.{coll}.{other}: not implemented"))),
     };
     result
+}
+
+/// Extract a BSON document argument at the given positional index.
+fn doc_arg(args: &[bson::Bson], idx: usize) -> Option<Document> {
+    args.get(idx).and_then(|b| match b {
+        bson::Bson::Document(d) => Some(d.clone()),
+        _ => None,
+    })
+}
+
+/// Convert a BSON value into the driver's `UpdateModifications` enum,
+/// accepting either an update document (`{$set: ...}`) or an aggregation
+/// pipeline (an array of stage documents).
+fn bson_to_update_mods(value: &bson::Bson) -> JsResult<mongodb::options::UpdateModifications> {
+    match value {
+        bson::Bson::Document(d) => Ok(mongodb::options::UpdateModifications::Document(d.clone())),
+        bson::Bson::Array(arr) => {
+            let pipeline: Vec<Document> = arr
+                .iter()
+                .filter_map(|b| match b {
+                    bson::Bson::Document(d) => Some(d.clone()),
+                    _ => None,
+                })
+                .collect();
+            Ok(mongodb::options::UpdateModifications::Pipeline(pipeline))
+        }
+        other => Err(js_err(format!(
+            "expected update document or pipeline array, got {other:?}"
+        ))),
+    }
+}
+
+/// Read the `returnNewDocument` (bool) or `returnDocument` ("before"/"after")
+/// option from a mongosh-style options document and map it to the driver's
+/// `ReturnDocument` enum. Returns None when neither option is present.
+fn extract_return_document(opts: &Document) -> Option<mongodb::options::ReturnDocument> {
+    use mongodb::options::ReturnDocument;
+    if let Ok(true) = opts.get_bool("returnNewDocument") {
+        return Some(ReturnDocument::After);
+    }
+    if let Ok(s) = opts.get_str("returnDocument") {
+        return match s {
+            "after" | "After" => Some(ReturnDocument::After),
+            "before" | "Before" => Some(ReturnDocument::Before),
+            _ => None,
+        };
+    }
+    None
+}
+
+/// Attach mongo-cursor helper methods to the JsArray returned by `find` /
+/// `aggregate` so chained calls like `db.x.find({}).toArray()` work. The
+/// array already supports `forEach` / `map` / `filter` / `sort` / `length`
+/// via `Array.prototype`; we only need to add the mongo-specific `toArray`
+/// (a no-op that returns the array itself, since `find`/`aggregate` already
+/// materialise up to 50 docs). `this`-bound so it returns whichever array
+/// it's called on.
+///
+/// This is safe for JSON/BSON serialisation: both `js_to_json` and
+/// `jsvalue_to_bson` serialise arrays by indexed access (`arr.get(i)` for
+/// `i in 0..len`), so the `toArray` own property never leaks into output.
+fn attach_cursor_methods(arr: &JsArray, ctx: &mut Context) -> JsResult<()> {
+    let to_array: JsValue = NativeFunction::from_fn_ptr(|this, _args, _ctx| Ok(this.clone()))
+        .to_js_function(ctx.realm())
+        .into();
+    arr.set(js_string!("toArray"), to_array, false, ctx)?;
+    Ok(())
 }
 
 const COLL_HELP_TEXT: &str = "
@@ -1146,6 +1622,10 @@ db.<coll> methods:
   dropIndex(name)
   rename(newName)
   drop()
+  findOneAndUpdate(filter, update, options?)
+  findOneAndDelete(filter, options?)
+  findOneAndReplace(filter, replacement, options?)
+  bulkWrite([op, ...])
   help()
 ";
 
@@ -1539,6 +2019,131 @@ mod tests {
         );
     }
 
+    /// The transformer must NOT rewrite `db.foo.bar(` text that
+    /// appears inside a string literal, line comment, or block
+    /// comment. This is the fix for the known regex-transformer
+    /// limitation.
+    #[test]
+    fn transform_source_skips_strings_and_comments() {
+        // Inside a double-quoted string.
+        let src = "print(\"db.foo.bar() is just text\"); db.users.find()";
+        let out = transform_source(src);
+        assert!(
+            out.contains("db.foo.bar() is just text"),
+            "string literal should be preserved verbatim, got: {out}"
+        );
+        assert!(
+            out.contains("__call_db(\"users\", \"find\", "),
+            "real call after the string should still be rewritten, got: {out}"
+        );
+
+        // Inside a single-quoted string with an escaped quote.
+        let src2 = "var s = 'db.x.y(\\'q\\')'; db.users.find()";
+        let out2 = transform_source(src2);
+        assert!(
+            out2.contains("db.x.y(\\'q\\')"),
+            "single-quoted string with escaped quote should be preserved, got: {out2}"
+        );
+
+        // Inside a line comment.
+        let src3 = "// db.foo.drop()\ndb.users.find()";
+        let out3 = transform_source(src3);
+        assert!(
+            out3.contains("// db.foo.drop()"),
+            "line comment should be preserved, got: {out3}"
+        );
+
+        // Inside a block comment.
+        let src4 = "/* db.foo.drop() */ db.users.find()";
+        let out4 = transform_source(src4);
+        assert!(
+            out4.contains("/* db.foo.drop() */"),
+            "block comment should be preserved, got: {out4}"
+        );
+    }
+
+    /// `db.help()` has only one dot, so the call-db regex (which
+    /// requires `db.X.Y(`) never matched it. Previously this left
+    /// `db.help()` as a call on the empty `db` object → TypeError.
+    /// The transformer must leave `db.help()` alone (it's handled by
+    /// the real `help` method attached to `db`), and must not misroute
+    /// it as `db.<coll>.help`.
+    #[test]
+    fn transform_source_leaves_db_help_alone() {
+        let src = "db.help()";
+        let out = transform_source(src);
+        assert_eq!(
+            out, "db.help()",
+            "db.help() should not be rewritten by the transformer, got: {out}"
+        );
+    }
+
+    /// `db` followed by a non-identifier (e.g. `db;` or `var x = db`)
+    /// must not be rewritten, and `mydb.foo.bar(` (where `db` is the
+    /// tail of a larger identifier) must not be rewritten either.
+    #[test]
+    fn transform_source_respects_word_boundaries() {
+        let src = "var x = mydb.foo.bar(); db.users.find()";
+        let out = transform_source(src);
+        assert!(
+            out.contains("mydb.foo.bar()"),
+            "mydb.foo.bar() should NOT be rewritten (db is not a standalone word), got: {out}"
+        );
+        assert!(
+            out.contains("__call_db(\"users\", \"find\", "),
+            "db.users.find() should be rewritten, got: {out}"
+        );
+    }
+
+    /// `db.help()` must resolve to a real function on the `db` object
+    /// and push the database-methods help text, rather than throwing
+    /// "db.help is not a function". This exercises `install_host` +
+    /// `install_db_stub` end-to-end without a Mongo connection.
+    #[test]
+    fn db_help_is_callable_and_prints_help() {
+        let mut ctx = Context::default();
+        install_host(&mut ctx);
+        let result = ctx.eval(Source::from_bytes(b"db.help()"));
+        assert!(result.is_ok(), "db.help() should not throw: {:?}", result.err());
+        let outputs = take_outputs();
+        let text: String = outputs
+            .iter()
+            .filter_map(|o| match o {
+                ShellOutput::Text { value } => Some(value.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            text.contains("db methods:"),
+            "db.help() should print the db-methods help text, got: {text}"
+        );
+    }
+
+    /// `find` / `aggregate` return a JsArray with a per-instance `toArray`
+    /// method so chained calls like `db.x.find({}).toArray()` work. We
+    /// can't run a real `find` without Mongo, but we can build a JsArray
+    /// the same way `dispatch_sync` does and confirm `toArray` round-trips
+    /// the array (returns the same length and elements). This pins the
+    /// `attach_cursor_methods` contract.
+    #[test]
+    fn cursor_to_array_returns_the_underlying_array() {
+        let mut ctx = Context::default();
+        let arr = JsArray::new(&mut ctx);
+        arr.set(0, JsValue::from(1), false, &mut ctx).unwrap();
+        arr.set(1, JsValue::from(2), false, &mut ctx).unwrap();
+        attach_cursor_methods(&arr, &mut ctx).unwrap();
+        // Expose the array as a global so we can call `.toArray()` on it.
+        ctx.register_global_property(js_string!("arr"), arr.clone(), Attribute::all())
+            .unwrap();
+        let result = ctx.eval(Source::from_bytes(b"arr.toArray().length"));
+        assert!(result.is_ok(), "arr.toArray() should not throw: {:?}", result.err());
+        let len = result.unwrap().as_number().unwrap();
+        assert_eq!(len as i64, 2, "toArray() should return the 2-element array");
+        // Confirm the elements round-trip.
+        let first = ctx.eval(Source::from_bytes(b"arr.toArray()[0]")).unwrap();
+        assert_eq!(first.as_number().unwrap() as i64, 1);
+    }
+
     /// `jsvalue_to_bson` must convert a JS array of objects
     /// into a `Bson::Array` of `Bson::Document`s, so that
     /// `insertMany([{a:1},{a:2}])` extracts correctly. This
@@ -1617,11 +2222,94 @@ mod tests {
             "dropIndex",
             "rename",
             "drop()",
+            "findOneAndUpdate",
+            "findOneAndDelete",
+            "findOneAndReplace",
+            "bulkWrite",
         ] {
             assert!(
                 COLL_HELP_TEXT.contains(m),
                 "COLL_HELP_TEXT missing method: {m}"
             );
         }
+    }
+
+    /// The source transformer must rewrite the find-and-modify and
+    /// bulkWrite call sites just like the other write methods, so
+    /// they reach `dispatch_sync` instead of erroring out.
+    #[test]
+    fn transform_source_rewrites_find_and_modify_methods() {
+        for m in [
+            "findOneAndUpdate",
+            "findOneAndDelete",
+            "findOneAndReplace",
+            "bulkWrite",
+        ] {
+            let src = format!("db.users.{m}({{a:1}}, {{b:2}})");
+            let out = transform_source(&src);
+            assert!(
+                out.contains(&format!("__call_db(\"users\", \"{m}\", ")),
+                "transform_source did not rewrite db.users.{m}(...) → __call_db(...): got {out}"
+            );
+        }
+    }
+
+    /// `bson_to_update_mods` must accept an aggregation pipeline
+    /// (an array of stage documents) as the update argument, since
+    /// `findOneAndUpdate` and `bulkWrite` update operations support
+    /// pipeline updates. This exercises the path without a live Mongo
+    /// connection.
+    #[test]
+    fn bson_to_update_mods_converts_pipeline() {
+        let mut ctx = Context::default();
+        let js = ctx
+            .eval(Source::from_bytes(b"[{$addFields: {a: 1}}, {$project: {a: 1}}]"))
+            .unwrap();
+        let mods = bson_to_update_mods(&jsvalue_to_bson(&js, &mut ctx).unwrap()).unwrap();
+        match mods {
+            mongodb::options::UpdateModifications::Pipeline(v) => {
+                assert_eq!(v.len(), 2);
+                assert!(v[0].contains_key("$addFields"));
+            }
+            other => panic!("expected Pipeline, got {other:?}"),
+        }
+    }
+
+    /// `bson_to_update_mods` must accept a plain update document
+    /// (`{$set: ...}`) and return the `Document` variant.
+    #[test]
+    fn bson_to_update_mods_converts_document() {
+        let mut ctx = Context::default();
+        let js = ctx
+            .eval(Source::from_bytes(b"({$set: {a: 1}})"))
+            .unwrap();
+        let mods = bson_to_update_mods(&jsvalue_to_bson(&js, &mut ctx).unwrap()).unwrap();
+        match mods {
+            mongodb::options::UpdateModifications::Document(d) => {
+                assert!(d.contains_key("$set"));
+            }
+            other => panic!("expected Document, got {other:?}"),
+        }
+    }
+
+    /// `extract_return_document` must map both mongosh forms —
+    /// `returnNewDocument: true` (boolean) and
+    /// `returnDocument: "after"` (string) — to `ReturnDocument::After`,
+    /// and leave the default (no option) as None.
+    #[test]
+    fn extract_return_document_maps_both_forms() {
+        use mongodb::options::ReturnDocument;
+        let new_doc = bson::doc! { "returnNewDocument": true };
+        assert!(matches!(
+            extract_return_document(&new_doc),
+            Some(ReturnDocument::After)
+        ));
+        let str_doc = bson::doc! { "returnDocument": "before" };
+        assert!(matches!(
+            extract_return_document(&str_doc),
+            Some(ReturnDocument::Before)
+        ));
+        let none_doc = bson::doc! { "upsert": true };
+        assert!(extract_return_document(&none_doc).is_none());
     }
 }

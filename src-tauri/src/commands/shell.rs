@@ -16,7 +16,7 @@ use crate::mongo::schema::compute_schema_report;
 use crate::mongo::shell::ShellResponse;
 use crate::mongo::shell_autocomplete::{
     autocomplete_context, filter_by_prefix, partial_token, AutocompleteResponse, CompletionKind,
-    COLLECTION_METHODS, GLOBAL_FUNCTIONS,
+    COLLECTION_METHODS, GLOBAL_FUNCTIONS, QUERY_OPERATORS, UPDATE_OPERATORS,
 };
 use crate::state::AppState;
 use futures_util::TryStreamExt;
@@ -140,7 +140,7 @@ pub async fn shell_autocomplete(
                 .database(&active_db)
                 .collection::<bson::Document>(collection);
             let cursor = coll
-                .aggregate(vec![bson::doc! { "$sample": { "size": 50_i64 } }])
+                .aggregate(vec![bson::doc! { "$sample": { "size": 100_i64 } }])
                 .await
                 .map_err(|e| AppError::Mongo(e.to_string()))?;
             let docs: Vec<bson::Document> = cursor
@@ -153,6 +153,24 @@ pub async fn shell_autocomplete(
                 .into_iter()
                 .map(|mut item| {
                     item.detail = "field".to_string();
+                    item
+                })
+                .collect()
+        }
+        CompletionKind::Operators { method } => {
+            // Operator names are static — no Mongo call needed.
+            // Update-operator methods get update operators; all
+            // other methods (find, findOne, delete*, count*,
+            // distinct, etc.) default to query operators since
+            // filter documents are the more common context.
+            let ops: &[&str] = match method.as_str() {
+                "updateOne" | "updateMany" | "findOneAndUpdate" => UPDATE_OPERATORS,
+                _ => QUERY_OPERATORS,
+            };
+            filter_by_prefix(ops.iter().copied(), &prefix)
+                .into_iter()
+                .map(|mut item| {
+                    item.detail = "operator".to_string();
                     item
                 })
                 .collect()
