@@ -418,6 +418,23 @@ pub async fn create_index(
         .options(Some(options))
         .build();
     coll.create_index(model).await?;
+    let _ = crate::audit::interceptor::record_create_index(
+        &state.audit_log,
+        &request.database,
+        &request.collection,
+        &request.key_json,
+        &serde_json::to_string(&serde_json::json!({
+            "name": request.name,
+            "unique": request.unique,
+            "sparse": request.sparse,
+            "hidden": request.hidden,
+            "ttlSeconds": request.ttl_seconds,
+            "partialFilterExpression": request.partial_filter_expression_json,
+            "collation": request.collation,
+            "wildcardProjection": request.wildcard_projection_json,
+        }))
+        .unwrap_or_default(),
+    );
     Ok(request.name)
 }
 
@@ -431,7 +448,13 @@ pub async fn drop_index(
 ) -> AppResult<()> {
     let entry = state.clients.get(&connection_id).await?;
     let coll = entry.client.database(&database).collection::<Document>(&collection);
-    coll.drop_index(name).await?;
+    coll.drop_index(&name).await?;
+    let _ = crate::audit::interceptor::record_drop_index(
+        &state.audit_log,
+        &database,
+        &collection,
+        &name,
+    );
     Ok(())
 }
 

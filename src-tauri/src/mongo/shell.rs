@@ -61,6 +61,8 @@ use boa_engine::{
     JsArgs, JsError, JsNativeError, JsResult, JsValue, Source,
 };
 
+use crate::audit::interceptor;
+use crate::audit::AuditLog;
 use crate::error::{AppError, AppResult};
 use crate::mongo::client_registry::ClientEntry;
 
@@ -135,6 +137,7 @@ thread_local! {
     static SHELL_ACTIVE_DB: RefCell<String> = const { RefCell::new(String::new()) };
     static SHELL_LAST_PIPELINE: RefCell<Vec<JsonValue>> = const { RefCell::new(Vec::new()) };
     static SHELL_LAST_COLLECTION: RefCell<Option<String>> = const { RefCell::new(None) };
+    static SHELL_AUDIT_LOG: RefCell<Option<Arc<AuditLog>>> = const { RefCell::new(None) };
 }
 
 fn push_output(o: ShellOutput) {
@@ -147,6 +150,24 @@ fn take_outputs() -> Vec<ShellOutput> {
 
 fn set_entry(e: Arc<ClientEntry>) {
     SHELL_ENTRY.with(|c| *c.borrow_mut() = Some(e));
+}
+
+fn set_audit_log(log: Arc<AuditLog>) {
+    SHELL_AUDIT_LOG.with(|c| *c.borrow_mut() = Some(log));
+}
+
+/// Run a closure with the current audit log, if one is set.
+/// Audit failures are logged and swallowed — a failed audit
+/// recording must never break the user's shell operation.
+fn try_audit<F>(f: F)
+where
+    F: FnOnce(&Arc<AuditLog>),
+{
+    SHELL_AUDIT_LOG.with(|c| {
+        if let Some(ref audit) = *c.borrow() {
+            f(audit);
+        }
+    });
 }
 
 
@@ -169,6 +190,7 @@ enum ShellMessage {
         entry: Arc<ClientEntry>,
         script: String,
         active_db: String,
+        audit_log: Option<Arc<AuditLog>>,
         respond: Sender<AppResult<ShellResponse>>,
     },
     Shutdown,
@@ -201,6 +223,7 @@ impl Shell {
         entry: Arc<ClientEntry>,
         script: String,
         active_db: String,
+        audit_log: Option<Arc<AuditLog>>,
     ) -> AppResult<ShellResponse> {
         let (resp_tx, resp_rx) = channel::<AppResult<ShellResponse>>();
         self.sender
@@ -208,6 +231,7 @@ impl Shell {
                 entry,
                 script,
                 active_db,
+                audit_log,
                 respond: resp_tx,
             })
             .map_err(|_| AppError::Validation("shell thread is dead".into()))?;
@@ -253,6 +277,7 @@ fn run_shell_thread(rx: Receiver<ShellMessage>, initial_db: String) {
                 entry,
                 script,
                 active_db,
+                audit_log,
                 respond,
             } => {
                 // Enter the per-thread runtime so the
@@ -270,6 +295,9 @@ fn run_shell_thread(rx: Receiver<ShellMessage>, initial_db: String) {
                 // thread-locals are per-thread and the native
                 // host functions run on the shell thread.
                 set_entry(entry);
+                if let Some(log) = audit_log {
+                    set_audit_log(log);
+                }
                 SHELL_ACTIVE_DB.with(|c| *c.borrow_mut() = active_db.clone());
                 SHELL_OUTPUT.with(|b| b.borrow_mut().clear());
                 SHELL_LAST_PIPELINE.with(|b| b.borrow_mut().clear());
@@ -988,6 +1016,7 @@ fn dispatch_sync(
                 bson::Bson::Document(d) => Some(d.clone()),
                 _ => None,
             }).ok_or_else(|| js_err("insertOne requires a document".to_string()))?;
+            let doc_for_audit = doc_arg.clone();
             let res = runtime_block_on(async move {
                 entry
                     .client
@@ -998,6 +1027,11 @@ fn dispatch_sync(
                     .map_err(|e| AppError::Mongo(e.to_string()))
             })
             .map_err(|e| js_err(e.to_string()))?;
+            try_audit(|audit| {
+                if let Ok(json) = serde_json::to_string(&doc_for_audit) {
+                    let _ = interceptor::record_insert(audit, db, coll, &json);
+                }
+            });
             push_output(ShellOutput::Text {
                 value: format!(
                     "Inserted 1 document (id: {})",
@@ -1024,6 +1058,7 @@ fn dispatch_sync(
             if docs.is_empty() {
                 return Err(js_err("insertMany requires a non-empty array of documents".to_string()));
             }
+            let docs_for_audit = docs.clone();
             let res = runtime_block_on(async move {
                 entry
                     .client
@@ -1034,6 +1069,13 @@ fn dispatch_sync(
                     .map_err(|e| AppError::Mongo(e.to_string()))
             })
             .map_err(|e| js_err(e.to_string()))?;
+            try_audit(|audit| {
+                for doc in &docs_for_audit {
+                    if let Ok(json) = serde_json::to_string(doc) {
+                        let _ = interceptor::record_insert(audit, db, coll, &json);
+                    }
+                }
+            });
             push_output(ShellOutput::Text {
                 value: format!(
                     "Inserted {} document{}",
@@ -1056,6 +1098,8 @@ fn dispatch_sync(
                 "db.{coll}.{method}(filter, update) requires an update document"
             )))?;
             let multi = method == "updateMany";
+            let filter_for_audit = filter.clone();
+            let update_for_audit = update.clone();
             let res = runtime_block_on(async move {
                 let coll_handle = entry
                     .client
@@ -1069,6 +1113,14 @@ fn dispatch_sync(
                 .map_err(|e| AppError::Mongo(e.to_string()))
             })
             .map_err(|e| js_err(e.to_string()))?;
+            try_audit(|audit| {
+                if let (Ok(fj), Ok(uj)) = (
+                    serde_json::to_string(&filter_for_audit),
+                    serde_json::to_string(&update_for_audit),
+                ) {
+                    let _ = interceptor::record_update(audit, db, coll, &fj, &uj);
+                }
+            });
             push_output(ShellOutput::Text {
                 value: format!(
                     "Matched {} · Modified {}{}",
@@ -1092,6 +1144,8 @@ fn dispatch_sync(
                 bson::Bson::Document(d) => Some(d.clone()),
                 _ => None,
             }).ok_or_else(|| js_err("replaceOne(filter, doc) requires a replacement document".to_string()))?;
+            let filter_for_audit = filter.clone();
+            let repl_for_audit = replacement.clone();
             let res = runtime_block_on(async move {
                 entry
                     .client
@@ -1102,6 +1156,14 @@ fn dispatch_sync(
                     .map_err(|e| AppError::Mongo(e.to_string()))
             })
             .map_err(|e| js_err(e.to_string()))?;
+            try_audit(|audit| {
+                if let (Ok(fj), Ok(rj)) = (
+                    serde_json::to_string(&filter_for_audit),
+                    serde_json::to_string(&repl_for_audit),
+                ) {
+                    let _ = interceptor::record_update(audit, db, coll, &fj, &rj);
+                }
+            });
             push_output(ShellOutput::Text {
                 value: format!(
                     "Matched {} · Modified {}{}",
@@ -1121,6 +1183,7 @@ fn dispatch_sync(
                 _ => None,
             }).unwrap_or_default();
             let multi = method == "deleteMany";
+            let filter_for_audit = filter.clone();
             let res = runtime_block_on(async move {
                 let coll_handle = entry
                     .client
@@ -1134,6 +1197,11 @@ fn dispatch_sync(
                 .map_err(|e| AppError::Mongo(e.to_string()))
             })
             .map_err(|e| js_err(e.to_string()))?;
+            try_audit(|audit| {
+                if let Ok(fj) = serde_json::to_string(&filter_for_audit) {
+                    let _ = interceptor::record_delete(audit, db, coll, &fj);
+                }
+            });
             push_output(ShellOutput::Text {
                 value: format!("Deleted {} document{}", res.deleted_count, if res.deleted_count == 1 { "" } else { "s" }),
             });
@@ -1150,6 +1218,9 @@ fn dispatch_sync(
                     .map_err(|e| AppError::Mongo(e.to_string()))
             })
             .map_err(|e| js_err(e.to_string()))?;
+            try_audit(|audit| {
+                let _ = interceptor::record_drop_collection(audit, db, coll);
+            });
             push_output(ShellOutput::Text {
                 value: format!("Dropped collection {}.{}", db, coll),
             });
@@ -1188,6 +1259,8 @@ fn dispatch_sync(
                     options.expire_after = Some(std::time::Duration::from_secs(v as u64));
                 }
             }
+            let keys_for_audit = keys_doc.clone();
+            let opts_for_audit = args.get(1).cloned().unwrap_or(bson::Bson::Null);
             let index_model = mongodb::IndexModel::builder()
                 .keys(keys_doc)
                 .options(Some(options))
@@ -1202,6 +1275,14 @@ fn dispatch_sync(
                     .map_err(|e| AppError::Mongo(e.to_string()))
             })
             .map_err(|e| js_err(e.to_string()))?;
+            try_audit(|audit| {
+                if let (Ok(kj), Ok(oj)) = (
+                    serde_json::to_string(&keys_for_audit),
+                    serde_json::to_string(&opts_for_audit),
+                ) {
+                    let _ = interceptor::record_create_index(audit, db, coll, &kj, &oj);
+                }
+            });
             push_output(ShellOutput::Text {
                 value: format!("Created index '{}'", res.index_name),
             });
@@ -1226,6 +1307,9 @@ fn dispatch_sync(
                     .map_err(|e| AppError::Mongo(e.to_string()))
             })
             .map_err(|e| js_err(e.to_string()))?;
+            try_audit(|audit| {
+                let _ = interceptor::record_drop_index(audit, db, coll, &name_for_output);
+            });
             push_output(ShellOutput::Text {
                 value: format!("Dropped index '{}'", name_for_output),
             });
@@ -1241,6 +1325,7 @@ fn dispatch_sync(
                 _ => return Err(js_err("rename(newName) requires the new collection name as a string".to_string())),
             };
             let new_name_for_output = new_name.clone();
+            let new_name_for_audit = new_name.clone();
             let from_ns = format!("{}.{}", db, coll);
             let to_ns = format!("{}.{}", db, new_name);
             runtime_block_on(async move {
@@ -1255,6 +1340,9 @@ fn dispatch_sync(
                     .map_err(|e| AppError::Mongo(e.to_string()))
             })
             .map_err(|e| js_err(e.to_string()))?;
+            try_audit(|audit| {
+                let _ = interceptor::record_rename_collection(audit, db, coll, &new_name_for_audit);
+            });
             push_output(ShellOutput::Text {
                 value: format!("Renamed {}.{} → {}.{}", db, coll, db, new_name_for_output),
             });
@@ -1274,6 +1362,9 @@ fn dispatch_sync(
                     .map_err(|e| AppError::Mongo(e.to_string()))
             })
             .map_err(|e| js_err(e.to_string()))?;
+            try_audit(|audit| {
+                let _ = interceptor::record_drop_database(audit, db);
+            });
             push_output(ShellOutput::Text {
                 value: format!("Dropped database {}", db),
             });
@@ -1289,6 +1380,8 @@ fn dispatch_sync(
             })?;
             let update_mods = bson_to_update_mods(update)?;
             let opts = doc_arg(&args, 2);
+            let filter_for_audit = filter.clone();
+            let update_for_audit = update.clone();
             let result = runtime_block_on(async move {
                 let coll = entry.client.database(db).collection::<Document>(coll);
                 let mut a = coll.find_one_and_update(filter, update_mods);
@@ -1319,6 +1412,14 @@ fn dispatch_sync(
                 a.await.map_err(|e| AppError::Mongo(e.to_string()))
             })
             .map_err(|e| js_err(e.to_string()))?;
+            try_audit(|audit| {
+                if let (Ok(fj), Ok(uj)) = (
+                    serde_json::to_string(&filter_for_audit),
+                    serde_json::to_string(&update_for_audit),
+                ) {
+                    let _ = interceptor::record_update(audit, db, coll, &fj, &uj);
+                }
+            });
             SHELL_LAST_COLLECTION.with(|c| *c.borrow_mut() = Some(coll.to_string()));
             push_output(ShellOutput::Text {
                 value: format!(
@@ -1336,6 +1437,7 @@ fn dispatch_sync(
             // Returns the deleted document or null.
             let filter = doc_arg(&args, 0).unwrap_or_default();
             let opts = doc_arg(&args, 1);
+            let filter_for_audit = filter.clone();
             let result = runtime_block_on(async move {
                 let coll = entry.client.database(db).collection::<Document>(coll);
                 let mut a = coll.find_one_and_delete(filter);
@@ -1350,6 +1452,11 @@ fn dispatch_sync(
                 a.await.map_err(|e| AppError::Mongo(e.to_string()))
             })
             .map_err(|e| js_err(e.to_string()))?;
+            try_audit(|audit| {
+                if let Ok(fj) = serde_json::to_string(&filter_for_audit) {
+                    let _ = interceptor::record_delete(audit, db, coll, &fj);
+                }
+            });
             SHELL_LAST_COLLECTION.with(|c| *c.borrow_mut() = Some(coll.to_string()));
             push_output(ShellOutput::Text {
                 value: format!(
@@ -1370,6 +1477,8 @@ fn dispatch_sync(
                 js_err("findOneAndReplace(filter, replacement, options?) requires a replacement document".to_string())
             })?;
             let opts = doc_arg(&args, 2);
+            let filter_for_audit = filter.clone();
+            let repl_for_audit = replacement.clone();
             let result = runtime_block_on(async move {
                 let coll = entry.client.database(db).collection::<Document>(coll);
                 let mut a = coll.find_one_and_replace(filter, replacement);
@@ -1390,6 +1499,14 @@ fn dispatch_sync(
                 a.await.map_err(|e| AppError::Mongo(e.to_string()))
             })
             .map_err(|e| js_err(e.to_string()))?;
+            try_audit(|audit| {
+                if let (Ok(fj), Ok(rj)) = (
+                    serde_json::to_string(&filter_for_audit),
+                    serde_json::to_string(&repl_for_audit),
+                ) {
+                    let _ = interceptor::record_update(audit, db, coll, &fj, &rj);
+                }
+            });
             SHELL_LAST_COLLECTION.with(|c| *c.borrow_mut() = Some(coll.to_string()));
             push_output(ShellOutput::Text {
                 value: format!(
@@ -1438,6 +1555,7 @@ fn dispatch_sync(
                             .get_document("document")
                             .map_err(|e| js_err(format!("bulkWrite insertOne: {e}")))?
                             .clone();
+                        let doc_for_audit = doc.clone();
                         runtime_block_on(async move {
                             entry
                                 .client
@@ -1448,6 +1566,11 @@ fn dispatch_sync(
                                 .map_err(|e| AppError::Mongo(e.to_string()))
                         })
                         .map_err(|e| js_err(e.to_string()))?;
+                        try_audit(|audit| {
+                            if let Ok(json) = serde_json::to_string(&doc_for_audit) {
+                                let _ = interceptor::record_insert(audit, db, coll, &json);
+                            }
+                        });
                         inserted += 1;
                     }
                     "updateOne" | "updateMany" => {
@@ -1459,6 +1582,8 @@ fn dispatch_sync(
                         let update_mods = bson_to_update_mods(&update)?;
                         let multi = kind == "updateMany";
                         let upsert = payload_doc.get_bool("upsert").unwrap_or(false);
+                        let filter_for_audit = filter.clone();
+                        let update_for_audit = update.clone();
                         let res = runtime_block_on(async move {
                             let c = entry.client.database(db).collection::<Document>(coll);
                             let a = if multi {
@@ -1471,6 +1596,14 @@ fn dispatch_sync(
                                 .map_err(|e| AppError::Mongo(e.to_string()))
                         })
                         .map_err(|e| js_err(e.to_string()))?;
+                        try_audit(|audit| {
+                            if let (Ok(fj), Ok(uj)) = (
+                                serde_json::to_string(&filter_for_audit),
+                                serde_json::to_string(&update_for_audit),
+                            ) {
+                                let _ = interceptor::record_update(audit, db, coll, &fj, &uj);
+                            }
+                        });
                         matched += res.matched_count;
                         modified += res.modified_count;
                         if res.upserted_id.is_some() {
@@ -1484,6 +1617,8 @@ fn dispatch_sync(
                             .cloned()
                             .map_err(|e| js_err(format!("bulkWrite replaceOne: {e}")))?;
                         let upsert = payload_doc.get_bool("upsert").unwrap_or(false);
+                        let filter_for_audit = filter.clone();
+                        let repl_for_audit = replacement.clone();
                         let res = runtime_block_on(async move {
                             entry
                                 .client
@@ -1495,6 +1630,14 @@ fn dispatch_sync(
                                 .map_err(|e| AppError::Mongo(e.to_string()))
                         })
                         .map_err(|e| js_err(e.to_string()))?;
+                        try_audit(|audit| {
+                            if let (Ok(fj), Ok(rj)) = (
+                                serde_json::to_string(&filter_for_audit),
+                                serde_json::to_string(&repl_for_audit),
+                            ) {
+                                let _ = interceptor::record_update(audit, db, coll, &fj, &rj);
+                            }
+                        });
                         matched += res.matched_count;
                         modified += res.modified_count;
                         if res.upserted_id.is_some() {
@@ -1504,6 +1647,7 @@ fn dispatch_sync(
                     "deleteOne" | "deleteMany" => {
                         let filter = payload_doc.get_document("filter").cloned().unwrap_or_default();
                         let multi = kind == "deleteMany";
+                        let filter_for_audit = filter.clone();
                         let res = runtime_block_on(async move {
                             let c = entry.client.database(db).collection::<Document>(coll);
                             let r = if multi {
@@ -1514,6 +1658,11 @@ fn dispatch_sync(
                             r.map_err(|e| AppError::Mongo(e.to_string()))
                         })
                         .map_err(|e| js_err(e.to_string()))?;
+                        try_audit(|audit| {
+                            if let Ok(fj) = serde_json::to_string(&filter_for_audit) {
+                                let _ = interceptor::record_delete(audit, db, coll, &fj);
+                            }
+                        });
                         deleted += res.deleted_count;
                     }
                     other => return Err(js_err(format!("bulkWrite: unsupported operation '{other}'"))),
@@ -1908,11 +2057,13 @@ mod tests {
             std::sync::Arc<ClientEntry>,
             String,
             String,
+            Option<std::sync::Arc<crate::audit::AuditLog>>,
             std::sync::mpsc::Sender<AppResult<ShellResponse>>,
-        ) -> ShellMessage = |entry, script, active_db, respond| ShellMessage::Eval {
+        ) -> ShellMessage = |entry, script, active_db, audit_log, respond| ShellMessage::Eval {
             entry,
             script,
             active_db,
+            audit_log,
             respond,
         };
     }

@@ -56,6 +56,7 @@ pub async fn eval_shell(
             entry,
             request.script,
             request.active_database.unwrap_or(initial_db),
+            Some(state.audit_log.clone()),
         )
         .await
 }
