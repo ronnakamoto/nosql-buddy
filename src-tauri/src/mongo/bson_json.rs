@@ -239,4 +239,55 @@ mod tests {
             .expect("array");
         assert!(arr.iter().all(|v| matches!(v, Bson::DateTime(_))));
     }
+
+    /// Regression guard for the silent-update bug: `find_documents`
+    /// returns `_id` in *display* form (`{ _idDisplay: "hex" }`), and
+    /// sending that back as a filter must NOT parse as an ObjectId —
+    /// otherwise a display-form `_id` would silently match nothing.
+    /// The frontend reconstructs `{ $oid: "hex" }` before sending; this
+    /// test pins both halves of that contract at the backend boundary.
+    #[test]
+    fn display_form_id_does_not_parse_as_objectid_but_reconstructed_does() {
+        let oid = bson::oid::ObjectId::new();
+        let hex = oid.to_hex();
+        let doc = doc! { "_id": oid, "n": 1i32 };
+
+        // What `find_documents` actually returns to the frontend.
+        let display = doc_to_display_json(&doc).expect("display");
+        let id_display = display.get("_id").expect("_id present");
+        assert_eq!(
+            id_display.get("_idDisplay").and_then(|v| v.as_str()),
+            Some(hex.as_str()),
+            "display form should expose _idDisplay"
+        );
+        assert!(
+            id_display.get("$oid").is_none(),
+            "display form must NOT retain $oid (that's the whole point of simplify_for_display)"
+        );
+
+        // Sending the display form back as a filter parses to a
+        // subdocument, NOT an ObjectId — this is the bug, and it must
+        // stay detectable so the frontend's reconstruction stays
+        // necessary.
+        let display_filter = format!(r#"{{"_id":{{"_idDisplay":"{hex}"}}}}"#);
+        let parsed_display = parse_filter(&display_filter).expect("parse display filter");
+        let parsed_display_id = parsed_display.get("_id").expect("_id");
+        assert!(
+            matches!(parsed_display_id, Bson::Document(_)),
+            "display-form _id must parse as a subdocument, not an ObjectId — \
+             otherwise the round-trip bug would be invisible"
+        );
+
+        // The reconstructed extended-JSON form the frontend now sends
+        // must parse back to the original ObjectId.
+        let reconstructed = format!(r#"{{"_id":{{"$oid":"{hex}"}}}}"#);
+        let parsed = parse_filter(&reconstructed).expect("parse reconstructed filter");
+        let parsed_id = parsed.get("_id").expect("_id");
+        match parsed_id {
+            Bson::ObjectId(parsed_oid) => {
+                assert_eq!(parsed_oid, &oid, "reconstructed $oid must equal original");
+            }
+            other => panic!("expected ObjectId, got {other:?}"),
+        }
+    }
 }

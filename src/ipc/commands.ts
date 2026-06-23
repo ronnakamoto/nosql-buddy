@@ -326,6 +326,14 @@ export interface UpdateRequest {
   multi: boolean;
 }
 
+/** Result of an update operation. `matchedCount` distinguishes a true
+ * no-match (filter missed — e.g. an `_id` round-trip bug) from a no-op
+ * match (doc matched, value unchanged, `modifiedCount` 0). */
+export interface UpdateResult {
+  matchedCount: number;
+  modifiedCount: number;
+}
+
 export interface PreviewRequest {
   connectionId: string;
   database: string;
@@ -478,7 +486,7 @@ const commands = {
   insertDocument: (request: InsertRequest) =>
     invoke<string>("insert_document", { request }),
   updateDocuments: (request: UpdateRequest) =>
-    invoke<number>("update_documents", { request }),
+    invoke<UpdateResult>("update_documents", { request }),
   deleteDocuments: (
     connectionId: string,
     database: string,

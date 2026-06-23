@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import commands, { type DocumentPage, type SqlLanguage } from "../ipc/commands";
 import { ResultsTable, type ResultsViewMode } from "../components/ResultsTable";
+import { toFilterId } from "../components/resultsDisplay";
 import { InsertDocumentModal } from "../components/InsertDocumentModal";
 import { QueryHistoryPanel } from "../components/QueryHistoryPanel";
 import { AggregationEditor } from "./AggregationEditor";
@@ -363,7 +364,7 @@ export function QueryTab({
   }
 
   function handleDeleteRow(rowIdx: number, doc: Record<string, unknown>) {
-    const docId = doc._id;
+    const docId = toFilterId(doc);
     if (docId === undefined) {
       setError("Cannot delete a document without an `_id`.");
       return;
@@ -382,6 +383,12 @@ export function QueryTab({
         collection,
         JSON.stringify({ _id: docId }),
       );
+      if (count === 0) {
+        setError(
+          "Delete matched 0 documents — the `_id` did not round-trip. Nothing was removed.",
+        );
+        return;
+      }
       setPage((prev) => {
         if (!prev) return prev;
         const docs = prev.documents.slice();

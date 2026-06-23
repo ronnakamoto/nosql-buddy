@@ -77,6 +77,48 @@ export function displayValue(value: unknown): string {
 }
 
 /**
+ * Convert a row's `_id` value back into MongoDB Extended JSON form so
+ * it round-trips through the backend's `parse_filter` as the correct
+ * BSON type.
+ *
+ * `find_documents` serializes results via `doc_to_display_json`, which
+ * rewrites `{ "$oid": "hex" }` into `{ "_idDisplay": "hex" }` (and
+ * similarly for `$date`, `$numberDecimal`, `$binary`). If we send that
+ * display form back as a filter `{ _id: { _idDisplay: "hex" } }`, the
+ * backend parses it as a subdocument — which never matches the real
+ * ObjectId, so updates/deletes silently affect 0 documents.
+ *
+ * This helper reconstructs the extended-JSON shape from the display
+ * form. Values that are already in extended JSON (or are plain
+ * scalars) pass through unchanged.
+ */
+export function toFilterId(row: Record<string, unknown>): unknown {
+  const id = row._id;
+  if (id === null || typeof id !== "object" || Array.isArray(id)) {
+    return id;
+  }
+  const obj = id as Record<string, unknown>;
+  if (typeof obj._idDisplay === "string") {
+    return { $oid: obj._idDisplay };
+  }
+  if (typeof obj._dateDisplay === "string") {
+    const ms = Date.parse(obj._dateDisplay);
+    if (!Number.isNaN(ms)) {
+      return { $date: { $numberLong: String(ms) } };
+    }
+  }
+  if (obj._decimalDisplay !== undefined) {
+    const s = String(obj._decimalDisplay);
+    return { $numberDecimal: s };
+  }
+  if (typeof obj._binaryDisplay === "string") {
+    return { $binary: { base64: obj._binaryDisplay, subType: "00" } };
+  }
+  // Already extended JSON (e.g. `{ $oid: ... }`) or a plain subdocument _id.
+  return obj;
+}
+
+/**
  * Walk a row by a dotted path and return the value at that path, or
  * `undefined` if any intermediate key is missing.
  */

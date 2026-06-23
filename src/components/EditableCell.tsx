@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import commands from "../ipc/commands";
-import { detectKind, displayValue, getByPath, kindClassName } from "./resultsDisplay";
+import { detectKind, displayValue, getByPath, kindClassName, toFilterId } from "./resultsDisplay";
 
 export interface EditableCellProps {
   /** The original row this cell belongs to. Used to derive `_id`. */
@@ -130,7 +130,7 @@ export function EditableCell({
     }
     setSaving(true);
     try {
-      await commands.updateDocuments({
+      const result = await commands.updateDocuments({
         connectionId,
         database,
         collection,
@@ -138,6 +138,17 @@ export function EditableCell({
         updateJson: JSON.stringify({ $set: { [fieldPath]: parsed.value } }),
         multi: false,
       });
+      if (result.matchedCount === 0) {
+        // No document matched the filter. The most common cause is the
+        // `_id` not round-tripping through display JSON; `toFilterId`
+        // handles the known cases, so reaching here means a type we
+        // don't reconstruct yet. Surface it loudly rather than silently
+        // showing a false "Saved" toast.
+        onError(
+          "No document matched the filter — the `_id` may not have round-tripped. Nothing was saved.",
+        );
+        return;
+      }
       onSaved(parsed.value);
       setEditing(false);
     } catch (e) {
@@ -183,16 +194,18 @@ function parseDraft(
 }
 
 /**
- * Read the document's `_id`. We try the raw value first (the JSON
- * shape returned by Mongo's `find`), then fall back to the `_idDisplay`
- * helper that the backend serializes for ObjectIds.
+ * Read the document's `_id` and reconstruct it into MongoDB Extended
+ * JSON form so it round-trips through the backend filter parser.
+ *
+ * `find_documents` returns `_id` in *display* form (e.g.
+ * `{ _idDisplay: "hex" }` for ObjectIds) — sending that back as a
+ * filter would match nothing. `toFilterId` rebuilds `{ $oid: "hex" }`
+ * (and analogous forms for Date/Decimal/Binary) so the update filter
+ * actually targets the right document.
  */
 function readId(row: Record<string, unknown>): unknown {
-  const raw = row._id;
-  if (raw !== undefined) return raw;
-  const display = (raw as { _idDisplay?: unknown } | undefined)?._idDisplay;
-  if (display !== undefined) return display;
-  return undefined;
+  if (row._id === undefined) return undefined;
+  return toFilterId(row);
 }
 
 function describeError(e: unknown): string {

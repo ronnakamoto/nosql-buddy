@@ -639,7 +639,7 @@ pub struct UpdateRequest {
 pub async fn update_documents(
     request: UpdateRequest,
     state: State<'_, AppState>,
-) -> AppResult<u64> {
+) -> AppResult<UpdateResult> {
     let entry = state.clients.get(&request.connection_id).await?;
     let filter = parse_optional_doc(Some(&request.filter_json))?.unwrap_or_default();
     let update = parse_optional_doc(Some(&request.update_json))?.ok_or_else(|| {
@@ -661,7 +661,21 @@ pub async fn update_documents(
         &request.update_json,
     );
 
-    Ok(res.modified_count)
+    Ok(UpdateResult {
+        matched_count: res.matched_count,
+        modified_count: res.modified_count,
+    })
+}
+
+/// Result of an update operation, distinguishing documents that matched
+/// the filter from those that were actually modified. `matched_count`
+/// lets the frontend tell a true no-match (filter missed — likely a
+/// round-trip bug) from a no-op match (doc matched, value unchanged).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateResult {
+    pub matched_count: u64,
+    pub modified_count: u64,
 }
 
 #[tauri::command]
