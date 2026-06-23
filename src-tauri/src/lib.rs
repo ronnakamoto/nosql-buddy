@@ -202,6 +202,7 @@ pub fn run() {
             commands::sql::translate_sql,
             commands::driver_code::generate_pipeline_code,
             commands::shell::eval_shell,
+            commands::shell::shell_autocomplete,
         ])
         .setup(|app| {
             // Native menu (macOS menu bar + Windows/Linux in-window).

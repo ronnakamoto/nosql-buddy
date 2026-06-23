@@ -11,6 +11,7 @@ pub mod query_code;
 pub mod redaction;
 pub mod schema;
 pub mod shell;
+pub mod shell_autocomplete;
 pub mod sql_to_mongo;
 pub mod types;
 pub mod vqb;

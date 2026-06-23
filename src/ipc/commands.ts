@@ -454,6 +454,12 @@ const commands = {
     activeDatabase?: string;
     fallbackDatabase?: string;
   }) => invoke<ShellResponse>("eval_shell", { request }),
+  shellAutocomplete: (request: {
+    connectionId: string;
+    textBeforeCursor: string;
+    activeDatabase?: string;
+    fallbackDatabase?: string;
+  }) => invoke<AutocompleteResponse>("shell_autocomplete", { request }),
 };
 
 /** One output line from the mongo shell. */
@@ -476,6 +482,24 @@ export interface ShellResponse {
   lastDatabase: string | null;
   activeDatabase: string;
   executionMs: number;
+}
+
+export type CompletionKind =
+  | { kind: "collections" }
+  | { kind: "methods"; collection: string }
+  | { kind: "fields"; collection: string }
+  | { kind: "databases" }
+  | { kind: "globals" }
+  | { kind: "none" };
+
+export interface CompletionItem {
+  label: string;
+  detail: string;
+}
+
+export interface AutocompleteResponse {
+  kind: CompletionKind;
+  items: CompletionItem[];
 }
 
 export default commands;

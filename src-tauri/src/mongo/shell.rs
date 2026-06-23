@@ -847,10 +847,275 @@ fn dispatch_sync(
             });
             Ok(JsValue::undefined())
         }
-        "updateOne" | "updateMany" | "deleteOne" | "deleteMany" | "drop" => {
-            return Err(js_err(format!(
-                "db.{coll}.{method}: not yet implemented in the boa shell (this branch is under active development)"
-            )));
+        "insertMany" => {
+            // First arg: array of documents.
+            let docs: Vec<Document> = match args.first() {
+                Some(bson::Bson::Array(v)) => v
+                    .iter()
+                    .filter_map(|b| match b {
+                        bson::Bson::Document(d) => Some(d.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            if docs.is_empty() {
+                return Err(js_err("insertMany requires a non-empty array of documents".to_string()));
+            }
+            let res = runtime_block_on(async move {
+                entry
+                    .client
+                    .database(db)
+                    .collection::<Document>(coll)
+                    .insert_many(docs)
+                    .await
+                    .map_err(|e| AppError::Mongo(e.to_string()))
+            })
+            .map_err(|e| js_err(e.to_string()))?;
+            push_output(ShellOutput::Text {
+                value: format!(
+                    "Inserted {} document{}",
+                    res.inserted_ids.len(),
+                    if res.inserted_ids.len() == 1 { "" } else { "s" }
+                ),
+            });
+            Ok(JsValue::undefined())
+        }
+        "updateOne" | "updateMany" => {
+            // Args: filter, update, (options).
+            let filter = args.first().and_then(|b| match b {
+                bson::Bson::Document(d) => Some(d.clone()),
+                _ => None,
+            }).unwrap_or_default();
+            let update = args.get(1).and_then(|b| match b {
+                bson::Bson::Document(d) => Some(d.clone()),
+                _ => None,
+            }).ok_or_else(|| js_err(format!(
+                "db.{coll}.{method}(filter, update) requires an update document"
+            )))?;
+            let multi = method == "updateMany";
+            let res = runtime_block_on(async move {
+                let coll_handle = entry
+                    .client
+                    .database(db)
+                    .collection::<Document>(coll);
+                if multi {
+                    coll_handle.update_many(filter, update).await
+                } else {
+                    coll_handle.update_one(filter, update).await
+                }
+                .map_err(|e| AppError::Mongo(e.to_string()))
+            })
+            .map_err(|e| js_err(e.to_string()))?;
+            push_output(ShellOutput::Text {
+                value: format!(
+                    "Matched {} · Modified {}{}",
+                    res.matched_count,
+                    res.modified_count,
+                    res.upserted_id
+                        .as_ref()
+                        .map(|id| format!(" · Upserted id: {}", id))
+                        .unwrap_or_default()
+                ),
+            });
+            Ok(JsValue::undefined())
+        }
+        "replaceOne" => {
+            // Args: filter, replacement, (options).
+            let filter = args.first().and_then(|b| match b {
+                bson::Bson::Document(d) => Some(d.clone()),
+                _ => None,
+            }).unwrap_or_default();
+            let replacement = args.get(1).and_then(|b| match b {
+                bson::Bson::Document(d) => Some(d.clone()),
+                _ => None,
+            }).ok_or_else(|| js_err("replaceOne(filter, doc) requires a replacement document".to_string()))?;
+            let res = runtime_block_on(async move {
+                entry
+                    .client
+                    .database(db)
+                    .collection::<Document>(coll)
+                    .replace_one(filter, replacement)
+                    .await
+                    .map_err(|e| AppError::Mongo(e.to_string()))
+            })
+            .map_err(|e| js_err(e.to_string()))?;
+            push_output(ShellOutput::Text {
+                value: format!(
+                    "Matched {} · Modified {}{}",
+                    res.matched_count,
+                    res.modified_count,
+                    res.upserted_id
+                        .as_ref()
+                        .map(|id| format!(" · Upserted id: {}", id))
+                        .unwrap_or_default()
+                ),
+            });
+            Ok(JsValue::undefined())
+        }
+        "deleteOne" | "deleteMany" => {
+            let filter = args.first().and_then(|b| match b {
+                bson::Bson::Document(d) => Some(d.clone()),
+                _ => None,
+            }).unwrap_or_default();
+            let multi = method == "deleteMany";
+            let res = runtime_block_on(async move {
+                let coll_handle = entry
+                    .client
+                    .database(db)
+                    .collection::<Document>(coll);
+                if multi {
+                    coll_handle.delete_many(filter).await
+                } else {
+                    coll_handle.delete_one(filter).await
+                }
+                .map_err(|e| AppError::Mongo(e.to_string()))
+            })
+            .map_err(|e| js_err(e.to_string()))?;
+            push_output(ShellOutput::Text {
+                value: format!("Deleted {} document{}", res.deleted_count, if res.deleted_count == 1 { "" } else { "s" }),
+            });
+            Ok(JsValue::undefined())
+        }
+        "drop" => {
+            runtime_block_on(async move {
+                entry
+                    .client
+                    .database(db)
+                    .collection::<Document>(coll)
+                    .drop()
+                    .await
+                    .map_err(|e| AppError::Mongo(e.to_string()))
+            })
+            .map_err(|e| js_err(e.to_string()))?;
+            push_output(ShellOutput::Text {
+                value: format!("Dropped collection {}.{}", db, coll),
+            });
+            Ok(JsValue::undefined())
+        }
+        "createIndex" => {
+            // mongosh form: db.coll.createIndex(keys, options).
+            // keys may be a document (e.g. {a: 1, b: -1}) or a
+            // string for text indexes. We accept both.
+            let keys_doc = match args.first().cloned() {
+                Some(bson::Bson::Document(d)) => d,
+                Some(bson::Bson::String(s)) => doc! { s.as_str(): "text" },
+                _ => Document::new(),
+            };
+            // Optional second arg: options document. We honor
+            // name, unique, sparse, hidden, expireAfterSeconds
+            // as flat fields (mongosh-style).
+            let mut options = mongodb::options::IndexOptions::builder().build();
+            if let Some(opts) = args.get(1).and_then(|b| match b {
+                bson::Bson::Document(d) => Some(d.clone()),
+                _ => None,
+            }) {
+                if let Ok(name) = opts.get_str("name") {
+                    options.name = Some(name.to_string());
+                }
+                if let Ok(v) = opts.get_bool("unique") {
+                    options.unique = Some(v);
+                }
+                if let Ok(v) = opts.get_bool("sparse") {
+                    options.sparse = Some(v);
+                }
+                if let Ok(v) = opts.get_bool("hidden") {
+                    options.hidden = Some(v);
+                }
+                if let Ok(v) = opts.get_i64("expireAfterSeconds") {
+                    options.expire_after = Some(std::time::Duration::from_secs(v as u64));
+                }
+            }
+            let index_model = mongodb::IndexModel::builder()
+                .keys(keys_doc)
+                .options(Some(options))
+                .build();
+            let res = runtime_block_on(async move {
+                entry
+                    .client
+                    .database(db)
+                    .collection::<Document>(coll)
+                    .create_index(index_model)
+                    .await
+                    .map_err(|e| AppError::Mongo(e.to_string()))
+            })
+            .map_err(|e| js_err(e.to_string()))?;
+            push_output(ShellOutput::Text {
+                value: format!("Created index '{}'", res.index_name),
+            });
+            Ok(JsValue::undefined())
+        }
+        "dropIndex" => {
+            // mongosh form: db.coll.dropIndex(name) or
+            // db.coll.dropIndex(keysDoc). We support the name
+            // form; keysDoc would require a lookup.
+            let name = match args.first() {
+                Some(bson::Bson::String(s)) => s.clone(),
+                _ => return Err(js_err("dropIndex(name) requires the index name as a string".to_string())),
+            };
+            let name_for_output = name.clone();
+            runtime_block_on(async move {
+                entry
+                    .client
+                    .database(db)
+                    .collection::<Document>(coll)
+                    .drop_index(name)
+                    .await
+                    .map_err(|e| AppError::Mongo(e.to_string()))
+            })
+            .map_err(|e| js_err(e.to_string()))?;
+            push_output(ShellOutput::Text {
+                value: format!("Dropped index '{}'", name_for_output),
+            });
+            Ok(JsValue::undefined())
+        }
+        "rename" | "renameCollection" => {
+            // mongosh form: db.coll.renameCollection(newName, dropTarget?).
+            // The driver doesn't expose rename on Collection, so
+            // we dispatch via the admin command:
+            //   { renameCollection: "db.old", to: "db.new" }
+            let new_name = match args.first() {
+                Some(bson::Bson::String(s)) => s.clone(),
+                _ => return Err(js_err("rename(newName) requires the new collection name as a string".to_string())),
+            };
+            let new_name_for_output = new_name.clone();
+            let from_ns = format!("{}.{}", db, coll);
+            let to_ns = format!("{}.{}", db, new_name);
+            runtime_block_on(async move {
+                entry
+                    .client
+                    .database("admin")
+                    .run_command(doc! {
+                        "renameCollection": from_ns,
+                        "to": to_ns,
+                    })
+                    .await
+                    .map_err(|e| AppError::Mongo(e.to_string()))
+            })
+            .map_err(|e| js_err(e.to_string()))?;
+            push_output(ShellOutput::Text {
+                value: format!("Renamed {}.{} → {}.{}", db, coll, db, new_name_for_output),
+            });
+            Ok(JsValue::undefined())
+        }
+        "dropDatabase" => {
+            // mongosh form: db.dropDatabase(). The transformer
+            // would route this as db.<coll>.dropDatabase which is
+            // wrong; we handle it here for safety but the
+            // canonical path is via runCommand.
+            runtime_block_on(async move {
+                entry
+                    .client
+                    .database(db)
+                    .drop()
+                    .await
+                    .map_err(|e| AppError::Mongo(e.to_string()))
+            })
+            .map_err(|e| js_err(e.to_string()))?;
+            push_output(ShellOutput::Text {
+                value: format!("Dropped database {}", db),
+            });
+            Ok(JsValue::undefined())
         }
         "help" => {
             push_output(ShellOutput::Text {
@@ -871,6 +1136,16 @@ db.<coll> methods:
   aggregate(pipeline)
   distinct(field, filter?)
   insertOne(doc)
+  insertMany([doc, ...])
+  updateOne(filter, update)
+  updateMany(filter, update)
+  replaceOne(filter, doc)
+  deleteOne(filter)
+  deleteMany(filter)
+  createIndex(keys, options?)
+  dropIndex(name)
+  rename(newName)
+  drop()
   help()
 ";
 
@@ -1201,5 +1476,152 @@ mod tests {
         // And `block_on` should work.
         let result = handle.block_on(async { 42u32 });
         assert_eq!(result, 42);
+    }
+
+    /// The source transformer must rewrite write-method call
+    /// sites the same way it rewrites read-method call sites.
+    /// This test pins the contract for every write method we
+    /// added in this change. If a method name is misspelled in
+    /// the dispatch table but the transformer doesn't match it,
+    /// the user gets a confusing "not implemented" error.
+    #[test]
+    fn transform_source_rewrites_write_methods() {
+        let methods = [
+            "insertMany",
+            "updateOne",
+            "updateMany",
+            "replaceOne",
+            "deleteOne",
+            "deleteMany",
+            "createIndex",
+            "dropIndex",
+            "rename",
+            "renameCollection",
+            "drop",
+            "dropDatabase",
+        ];
+        for m in methods {
+            let src = format!("db.users.{m}({{a:1}}, {{b:2}})");
+            let out = transform_source(&src);
+            assert!(
+                out.contains(&format!("__call_db(\"users\", \"{m}\", ")),
+                "transform_source did not rewrite db.users.{m}(...) → __call_db(...): got {out}"
+            );
+        }
+    }
+
+    /// The source transformer must rewrite `db.runCommand(...)`
+    /// before the `db.X.Y(...)` rewrite runs, so that
+    /// `db.runCommand({renameCollection: ...})` is not
+    /// misrouted as a collection call.
+    #[test]
+    fn transform_source_preserves_run_command() {
+        let src = "db.runCommand({ping: 1})";
+        let out = transform_source(src);
+        assert!(
+            out.contains("__run_command(") && !out.contains("__call_db(\"runCommand\""),
+            "db.runCommand(...) should become __run_command(...), got: {out}"
+        );
+    }
+
+    /// `db.coll.createIndex("text")` (string keys for a text
+    /// index) is a valid mongosh form. The transformer must
+    /// still rewrite it; the dispatch converts the string to
+    /// `{ field: "text" }`. This test only checks the
+    /// transformer, not the dispatch (which needs Mongo).
+    #[test]
+    fn transform_source_rewrites_create_index_with_string_keys() {
+        let src = "db.articles.createIndex(\"text\")";
+        let out = transform_source(src);
+        assert!(
+            out.contains("__call_db(\"articles\", \"createIndex\", "),
+            "createIndex with string keys should be rewritten, got: {out}"
+        );
+    }
+
+    /// `jsvalue_to_bson` must convert a JS array of objects
+    /// into a `Bson::Array` of `Bson::Document`s, so that
+    /// `insertMany([{a:1},{a:2}])` extracts correctly. This
+    /// exercises the argument extraction path without a live
+    /// Mongo connection.
+    #[test]
+    fn jsvalue_to_bson_converts_array_of_objects() {
+        let mut ctx = Context::default();
+        let js = ctx
+            .eval(Source::from_bytes(b"[{a: 1}, {a: 2}]"))
+            .unwrap();
+        let bson = jsvalue_to_bson(&js, &mut ctx).unwrap();
+        match bson {
+            bson::Bson::Array(arr) => {
+                assert_eq!(arr.len(), 2);
+                assert!(matches!(arr[0], bson::Bson::Document(_)));
+                assert!(matches!(arr[1], bson::Bson::Document(_)));
+            }
+            other => panic!("expected Bson::Array, got {other:?}"),
+        }
+    }
+
+    /// `jsvalue_to_bson` must convert a JS object with
+    /// `$set` key into a BSON document, so that
+    /// `updateOne(filter, {$set: {a: 1}})` extracts the
+    /// update document correctly.
+    #[test]
+    fn jsvalue_to_bson_converts_update_document() {
+        let mut ctx = Context::default();
+        let js = ctx
+            .eval(Source::from_bytes(b"({$set: {a: 1}})"))
+            .unwrap();
+        let bson = jsvalue_to_bson(&js, &mut ctx).unwrap();
+        match bson {
+            bson::Bson::Document(d) => {
+                assert!(d.contains_key("$set"));
+            }
+            other => panic!("expected Bson::Document, got {other:?}"),
+        }
+    }
+
+    /// `jsvalue_to_bson` must convert a JS options object
+    /// with `unique: true, sparse: true` into a BSON document
+    /// so `createIndex(keys, {unique: true})` extracts the
+    /// options correctly.
+    #[test]
+    fn jsvalue_to_bson_converts_index_options() {
+        let mut ctx = Context::default();
+        let js = ctx
+            .eval(Source::from_bytes(b"({unique: true, sparse: true, name: \"idx_a\"})"))
+            .unwrap();
+        let bson = jsvalue_to_bson(&js, &mut ctx).unwrap();
+        match bson {
+            bson::Bson::Document(d) => {
+                assert!(d.get_bool("unique").unwrap());
+                assert!(d.get_bool("sparse").unwrap());
+                assert_eq!(d.get_str("name").unwrap(), "idx_a");
+            }
+            other => panic!("expected Bson::Document, got {other:?}"),
+        }
+    }
+
+    /// The `COLL_HELP_TEXT` must list every write method we
+    /// added. If a method is wired in dispatch but missing
+    /// from help, users won't discover it.
+    #[test]
+    fn coll_help_text_lists_all_write_methods() {
+        for m in [
+            "insertMany",
+            "updateOne",
+            "updateMany",
+            "replaceOne",
+            "deleteOne",
+            "deleteMany",
+            "createIndex",
+            "dropIndex",
+            "rename",
+            "drop()",
+        ] {
+            assert!(
+                COLL_HELP_TEXT.contains(m),
+                "COLL_HELP_TEXT missing method: {m}"
+            );
+        }
     }
 }
