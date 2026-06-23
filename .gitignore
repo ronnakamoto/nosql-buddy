@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+.yarn/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build output
+dist/
+build/
+out/
+
+# Rust
+src-tauri/target/
+# Cargo.lock should be committed for binary applications, so do NOT ignore it.
+
+# Tauri generated
+src-tauri/gen/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Playwright
+test-results/
+playwright-report/
+screenshots/
+
+# Env
+.env
+.env.local
+.env.*.local
+.env.*
+
+# MCP / local tool configs that may contain secrets
+*.mcp.json
+
+# Misc
+*.tmp
+*.temp

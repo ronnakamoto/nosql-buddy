@@ -1,0 +1,761 @@
+import { useEffect, useMemo, useState } from "react";
+import commands, { type DocumentPage, type SqlLanguage } from "../ipc/commands";
+import { ResultsTable, type ResultsViewMode } from "../components/ResultsTable";
+import { InsertDocumentModal } from "../components/InsertDocumentModal";
+import { QueryHistoryPanel } from "../components/QueryHistoryPanel";
+import { AggregationEditor } from "./AggregationEditor";
+import { VisualQueryBuilder } from "./VisualQueryBuilder";
+import { pushHistory, type QueryMode, fileExtension, fileFilter } from "./queryHistory";
+import { save, open } from "@tauri-apps/plugin-dialog";
+import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
+
+export interface QueryTabProps {
+  connectionId: string;
+  database: string;
+  collection: string;
+  /** Profile metadata for the active connection. Used by the
+   *  driver-code panel inside the AggregationEditor to embed the
+   *  user's real Mongo URI. Optional because legacy code paths
+   *  may not have it on hand (e.g. unit tests). */
+  profile?: { id: string; name: string; authMechanism: string } | null;
+  onClose: () => void;
+  onResult?: (page: DocumentPage | null) => void;
+  /**
+   * Called when the user clicks "Open in Aggregation Editor". The
+   * pipeline is the translated aggregation pipeline (an array of
+   * stage objects). The host (App.tsx) is expected to open a new tab
+   * in aggregation mode and pre-populate it with this pipeline.
+   */
+  onOpenInAggregationEditor?: (pipeline: unknown[]) => void;
+}
+
+type Mode = "find" | "aggregate" | "sql";
+
+const SQL_LANGUAGES: SqlLanguage[] = [
+  "node-js",
+  "python",
+  "java",
+  "c-sharp",
+  "ruby",
+  "shell",
+];
+const SQL_LANGUAGE_LABELS: Record<SqlLanguage, string> = {
+  "node-js": "JavaScript (Node.js)",
+  python: "Python",
+  java: "Java",
+  "c-sharp": "C#",
+  ruby: "Ruby",
+  shell: "mongo shell",
+};
+
+const DEFAULT_FILTER = "{}";
+const DEFAULT_PIPELINE = "[\n  { \"$match\": {} },\n  { \"$limit\": 50 }\n]";
+
+/**
+ * Set `value` at `path` (dotted) on a copy of `target`. Creates
+ * intermediate objects when missing. Used to mirror a saved edit
+ * into the local results cache so the user sees the new value
+ * without a full re-run.
+ */
+function applyPath(target: Record<string, unknown>, path: string, value: unknown): void {
+  const parts = path.split(".");
+  if (parts.length === 1) {
+    target[path] = value;
+    return;
+  }
+  let cursor: Record<string, unknown> = target;
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    const key = parts[i];
+    const next = cursor[key];
+    if (next === null || typeof next !== "object" || Array.isArray(next)) {
+      const fresh: Record<string, unknown> = {};
+      cursor[key] = fresh;
+      cursor = fresh;
+    } else {
+      const cloned: Record<string, unknown> = { ...(next as Record<string, unknown>) };
+      cursor[key] = cloned;
+      cursor = cloned;
+    }
+  }
+  cursor[parts[parts.length - 1]] = value;
+}
+
+/**
+ * Parse a user-typed pipeline JSON string into an array of stages for
+ * the AggregationEditor. Returns an empty array on parse failure so
+ * the editor falls back to its default stages.
+ */
+function parsePipeline(text: string): unknown[] {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) return parsed;
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+export function QueryTab({
+  connectionId,
+  database,
+  collection,
+  profile,
+  onClose,
+  onResult,
+  onOpenInAggregationEditor,
+}: QueryTabProps) {
+  const [mode, setMode] = useState<Mode>("find");
+  const [filterText, setFilterText] = useState(DEFAULT_FILTER);
+  const [filterEditor, setFilterEditor] = useState<"json" | "visual">("json");
+  const [projectionText, setProjectionText] = useState("");
+  const [sortText, setSortText] = useState("");
+  const [pipelineText, setPipelineText] = useState(DEFAULT_PIPELINE);
+  const [sqlText, setSqlText] = useState(
+    `SELECT * FROM ${collection} ORDER BY _id LIMIT 50`,
+  );
+  const [sqlResult, setSqlResult] = useState<{
+    pipeline: unknown[];
+    find: Record<string, unknown> | null;
+    warnings: string[];
+    code: Record<string, string>;
+  } | null>(null);
+  const [sqlLanguage, setSqlLanguage] = useState<SqlLanguage>("node-js");
+  const [sqlNotice, setSqlNotice] = useState<string | null>(null);
+  const [copyNotice, setCopyNotice] = useState<string | null>(null);
+  const [page, setPage] = useState<DocumentPage | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [running, setRunning] = useState(false);
+  const [insertOpen, setInsertOpen] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<{ idx: number; docId: unknown } | null>(null);
+  const [viewMode, setViewMode] = useState<ResultsViewMode>("table");
+
+  const valid = useMemo(() => {
+    try {
+      if (mode === "find") {
+        if (filterText.trim()) JSON.parse(filterText);
+        if (projectionText.trim()) JSON.parse(projectionText);
+        if (sortText.trim()) JSON.parse(sortText);
+      } else if (mode === "aggregate") {
+        if (pipelineText.trim()) JSON.parse(pipelineText);
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }, [mode, filterText, projectionText, sortText, pipelineText]);
+
+  async function run() {
+    if (!valid) {
+      setError("Fix the JSON syntax first.");
+      return;
+    }
+    setError(null);
+    setRunning(true);
+    try {
+      if (mode === "find") {
+        const result = await commands.findDocuments({
+          connectionId,
+          database,
+          collection,
+          filterJson: filterText,
+          projectionJson: projectionText || null,
+          sortJson: sortText || null,
+          limit: 50,
+        });
+        setPage(result);
+      } else if (mode === "aggregate") {
+        const result = await commands.aggregateDocuments({
+          connectionId,
+          database,
+          collection,
+          pipelineJson: pipelineText,
+          limit: 50,
+        });
+        setPage(result);
+      } else {
+        const translated = await commands.translateSql(database, sqlText);
+        setSqlResult({
+          pipeline: translated.pipeline,
+          find: translated.find,
+          warnings: translated.warnings,
+          code: translated.code,
+        });
+        const result = await commands.aggregateDocuments({
+          connectionId,
+          database,
+          collection,
+          pipelineJson: JSON.stringify(translated.pipeline),
+          limit: 50,
+        });
+        setPage(result);
+      }
+    } catch (e) {
+      setError(describeError(e));
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  useEffect(() => {
+    run();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (onResult) onResult(page);
+  }, [page, onResult]);
+
+  // History capture: every successful run appends to the
+  // per-collection, per-mode history list (capped at HISTORY_CAPACITY).
+  useEffect(() => {
+    if (!page || running) return;
+    const inputText = currentTextForMode();
+    pushHistory(connectionId, database, collection, mode as QueryMode, {
+      ts: Date.now(),
+      text: inputText,
+      durationMs: page.executionMs,
+      docCount: page.documents.length,
+      errored: false,
+    });
+    // Re-run only when the page changes; mode and inputs are
+    // captured via the closure of currentTextForMode at run time.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page]);
+
+  function currentTextForMode(): string {
+    if (mode === "find") {
+      return JSON.stringify({
+        filter: safeParse(filterText, {}),
+        projection: safeParse(projectionText, undefined),
+        sort: safeParse(sortText, undefined),
+      });
+    }
+    if (mode === "aggregate") return pipelineText;
+    return sqlText;
+  }
+
+  function loadTextForMode(text: string): void {
+    if (mode === "find") {
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed && typeof parsed === "object") {
+          // Always reset the three textareas to a known shape so
+          // JSON.stringify never receives `undefined` (which would
+          // emit a non-string and break the state setter contract).
+          setFilterText(
+            parsed.filter !== undefined
+              ? JSON.stringify(parsed.filter, null, 2)
+              : "{}",
+          );
+          setProjectionText(
+            parsed.projection !== undefined
+              ? JSON.stringify(parsed.projection, null, 2)
+              : "",
+          );
+          setSortText(
+            parsed.sort !== undefined
+              ? JSON.stringify(parsed.sort, null, 2)
+              : "",
+          );
+        }
+      } catch {
+        // Legacy SQL-only bookmarks stored raw text; fall back to filter.
+        setFilterText(text);
+      }
+      return;
+    }
+    if (mode === "aggregate") {
+      setPipelineText(text);
+      return;
+    }
+    setSqlText(text);
+  }
+
+  async function handleSaveToFile() {
+    const ext = fileExtension(mode as QueryMode);
+    try {
+      const suggested = `${collection}.${ext}`;
+      const path = await save({
+        defaultPath: suggested,
+        filters: fileFilter(mode as QueryMode),
+      });
+      if (!path) {
+        setNotice("Save cancelled.");
+        return;
+      }
+      await writeTextFile(path, currentTextForMode());
+      setNotice(`Saved to ${path}.`);
+    } catch (e) {
+      const msg = describeError(e);
+      setNotice(`Save failed: ${msg}`);
+    }
+  }
+
+  async function handleLoadFromFile() {
+    try {
+      const path = await open({
+        multiple: false,
+        directory: false,
+        filters: fileFilter(mode as QueryMode),
+      });
+      if (!path || typeof path !== "string") {
+        setNotice("Load cancelled.");
+        return;
+      }
+      const text = await readTextFile(path);
+      loadTextForMode(text);
+      setNotice(`Loaded from ${path}.`);
+    } catch (e) {
+      const msg = describeError(e);
+      setNotice(`Load failed: ${msg}`);
+    }
+  }
+
+  async function handleCopyCode() {
+    if (!sqlResult) return;
+    const code = sqlResult.code[sqlLanguage] ?? "";
+    if (!code) return;
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopyNotice("Copied to clipboard.");
+      setTimeout(() => setCopyNotice(null), 1500);
+    } catch {
+      setCopyNotice("Clipboard copy failed.");
+    }
+  }
+
+  function handleOpenInAggregationEditor() {
+    if (!sqlResult) return;
+    // Hand off the translated pipeline to the parent so it can decide
+    // whether to open a new tab or hand control back. Fall back to
+    // switching this tab into aggregation mode if no handler is wired.
+    if (onOpenInAggregationEditor) {
+      onOpenInAggregationEditor(sqlResult.pipeline);
+      setSqlNotice("Opened in Aggregation Editor.");
+      return;
+    }
+    setPipelineText(JSON.stringify(sqlResult.pipeline, null, 2));
+    setMode("aggregate");
+    setSqlNotice("Switched to Aggregation with translated pipeline.");
+  }
+
+  async function handleCellSaved(rowIdx: number, fieldPath: string, newValue: unknown) {
+    // Update the in-memory page so the cell shows the new value
+    // without a full re-run.
+    setPage((prev) => {
+      if (!prev) return prev;
+      const docs = prev.documents.slice();
+      const target = docs[rowIdx];
+      if (!target) return prev;
+      const updated: Record<string, unknown> = { ...target };
+      applyPath(updated, fieldPath, newValue);
+      docs[rowIdx] = updated;
+      return { ...prev, documents: docs };
+    });
+    setNotice(`Saved ${fieldPath}.`);
+  }
+
+  function handleCellError(_rowIdx: number, fieldPath: string, message: string) {
+    setError(`${fieldPath}: ${message}`);
+  }
+
+  function handleDeleteRow(rowIdx: number, doc: Record<string, unknown>) {
+    const docId = doc._id;
+    if (docId === undefined) {
+      setError("Cannot delete a document without an `_id`.");
+      return;
+    }
+    setPendingDelete({ idx: rowIdx, docId });
+  }
+
+  async function confirmDelete() {
+    if (!pendingDelete) return;
+    const { idx, docId } = pendingDelete;
+    setPendingDelete(null);
+    try {
+      const count = await commands.deleteDocuments(
+        connectionId,
+        database,
+        collection,
+        JSON.stringify({ _id: docId }),
+      );
+      setPage((prev) => {
+        if (!prev) return prev;
+        const docs = prev.documents.slice();
+        if (idx >= 0 && idx < docs.length) {
+          docs.splice(idx, 1);
+        }
+        return { ...prev, documents: docs, totalCount: Math.max(0, (prev.totalCount ?? 0) - count) };
+      });
+      setNotice(`Deleted ${count} document(s).`);
+    } catch (e) {
+      const msg = describeError(e);
+      setError(`Delete failed: ${msg}`);
+    }
+  }
+
+  function cancelDelete() {
+    setPendingDelete(null);
+  }
+
+  async function handleInserted(id: string) {
+    setNotice(`Inserted document (id=${id || "auto"}).`);
+    // Refresh results so the new row appears.
+    await run();
+  }
+
+  function handleInsertError(message: string) {
+    setError(`Insert failed: ${message}`);
+  }
+
+  return (
+    <div className="pane">
+      <div className="pane__header">
+        <h2 className="pane__title">
+          {database}.{collection}
+        </h2>
+        <div className="tabs-secondary" role="tablist" style={{ borderBottom: 0 }}>
+          <div
+            className={`tabs-secondary__item ${mode === "find" ? "is-active" : ""}`}
+            role="tab"
+            tabIndex={0}
+            aria-selected={mode === "find"}
+            onClick={() => setMode("find")}
+            onKeyDown={(e) => e.key === "Enter" && setMode("find")}
+          >
+            Find
+          </div>
+          <div
+            className={`tabs-secondary__item ${mode === "aggregate" ? "is-active" : ""}`}
+            role="tab"
+            tabIndex={0}
+            aria-selected={mode === "aggregate"}
+            onClick={() => setMode("aggregate")}
+            onKeyDown={(e) => e.key === "Enter" && setMode("aggregate")}
+          >
+            Aggregation
+          </div>
+          <div
+            className={`tabs-secondary__item ${mode === "sql" ? "is-active" : ""}`}
+            role="tab"
+            tabIndex={0}
+            aria-selected={mode === "sql"}
+            onClick={() => setMode("sql")}
+            onKeyDown={(e) => e.key === "Enter" && setMode("sql")}
+          >
+            SQL
+          </div>
+        </div>
+        <div className="pane__sub">
+          {running
+            ? "Running…"
+            : page
+              ? `${page.documents.length} returned · ${page.executionMs ?? 0} ms`
+              : "Idle"}
+        </div>
+        <QueryHistoryPanel
+          connectionId={connectionId}
+          database={database}
+          collection={collection}
+          mode={mode as QueryMode}
+          currentText={currentTextForMode()}
+          onLoad={(text) => loadTextForMode(text)}
+          onError={(message) => setError(message)}
+          onNotice={(message) => setNotice(message)}
+        />
+        <button
+          className="btn btn--sm"
+          onClick={() => void handleSaveToFile()}
+          title={`Save the current ${mode} input to a ${fileExtension(mode as QueryMode)} file`}
+        >
+          Save {fileExtension(mode as QueryMode).toUpperCase()}…
+        </button>
+        <button
+          className="btn btn--sm"
+          onClick={() => void handleLoadFromFile()}
+          title={`Load the current ${mode} input from a ${fileExtension(mode as QueryMode)} file`}
+        >
+          Load {fileExtension(mode as QueryMode).toUpperCase()}…
+        </button>
+        <button
+          className="btn btn--sm"
+          onClick={() => setInsertOpen(true)}
+          title="Insert a new document into this collection"
+        >
+          Insert…
+        </button>
+        <button className="btn btn--sm" onClick={onClose}>
+          Close
+        </button>
+        <button
+          className="btn btn--primary btn--sm"
+          onClick={run}
+          disabled={!valid || running}
+        >
+          {running ? "Running…" : "Run"}
+        </button>
+      </div>
+      <div className="split">
+        <div className="editor">
+          {mode === "find" && (
+            <div className="pane__body" style={{ display: "grid", gridTemplateRows: "1fr 1fr 1fr" }}>
+              <div>
+                <div className="editor__toolbar">
+                  <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>Filter</span>
+                  <div className="editor__toolbar-tabs">
+                    <button
+                      className={`editor__toolbar-tab ${filterEditor === "json" ? "is-active" : ""}`}
+                      onClick={() => setFilterEditor("json")}
+                      aria-pressed={filterEditor === "json"}
+                    >
+                      JSON
+                    </button>
+                    <button
+                      className={`editor__toolbar-tab ${filterEditor === "visual" ? "is-active" : ""}`}
+                      onClick={() => setFilterEditor("visual")}
+                      aria-pressed={filterEditor === "visual"}
+                    >
+                      Visual
+                    </button>
+                  </div>
+                </div>
+                {filterEditor === "json" ? (
+                  <textarea
+                    className="editor__textarea"
+                    value={filterText}
+                    onChange={(e) => setFilterText(e.target.value)}
+                    spellCheck={false}
+                  />
+                ) : (
+                  <div className="editor__textarea" style={{ overflow: "auto" }}>
+                    <VisualQueryBuilder
+                      filterJson={filterText}
+                      onFilterJsonChange={(next) => {
+                        setFilterText(next);
+                      }}
+                    />
+                  </div>
+                )}
+              </div>
+              <div>
+                <div className="editor__toolbar">
+                  <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>Projection</span>
+                  <span className="kbd">{`{ field: 1 }`}</span>
+                </div>
+                <textarea
+                  className="editor__textarea"
+                  value={projectionText}
+                  onChange={(e) => setProjectionText(e.target.value)}
+                  placeholder="Optional"
+                  spellCheck={false}
+                />
+              </div>
+              <div>
+                <div className="editor__toolbar">
+                  <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>Sort</span>
+                  <span className="kbd">{`{ field: 1 }`}</span>
+                </div>
+                <textarea
+                  className="editor__textarea"
+                  value={sortText}
+                  onChange={(e) => setSortText(e.target.value)}
+                  placeholder="Optional"
+                  spellCheck={false}
+                />
+              </div>
+            </div>
+          )}
+          {mode === "aggregate" && (
+            <div className="pane__body">
+              <AggregationEditor
+                connectionId={connectionId}
+                database={database}
+                collection={collection}
+                profile={profile ?? null}
+                onResult={onResult}
+                initialPipeline={parsePipeline(pipelineText)}
+              />
+            </div>
+          )}
+          {mode === "sql" && (
+            <div className="pane__body" style={{ display: "grid", gridTemplateRows: "auto 1fr 1fr 1fr" }}>
+              <div className="sql-toolbar" style={{ display: "flex", gap: 8, alignItems: "center", padding: "var(--space-2) var(--space-3)", flexWrap: "wrap" }}>
+                <button
+                  className="btn btn--sm"
+                  onClick={handleOpenInAggregationEditor}
+                  disabled={!sqlResult}
+                  title="Open the translated pipeline in the Aggregation tab"
+                >
+                  Open in Agg Editor
+                </button>
+                {sqlNotice && (
+                  <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>{sqlNotice}</span>
+                )}
+              </div>
+              <div>
+                <div className="editor__toolbar">
+                  <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>SQL</span>
+                  <span className="kbd">Translated on Run</span>
+                </div>
+                <textarea
+                  className="editor__textarea"
+                  value={sqlText}
+                  onChange={(e) => setSqlText(e.target.value)}
+                  spellCheck={false}
+                />
+              </div>
+              <div>
+                <div className="editor__toolbar">
+                  <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>
+                    Generated pipeline
+                  </span>
+                </div>
+                <pre className="json-view" style={{ background: "var(--surface)" }}>
+                  {sqlResult
+                    ? JSON.stringify(sqlResult.pipeline, null, 2)
+                    : "Run to translate."}
+                </pre>
+                {sqlResult && sqlResult.warnings.length > 0 && (
+                  <div style={{ padding: "0 var(--space-3)" }}>
+                    {sqlResult.warnings.map((w, i) => (
+                      <div key={i} className="toast toast--warning" style={{ position: "static", margin: "8px 0" }}>
+                        {w}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div>
+                <div className="editor__toolbar" style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>
+                    Query code
+                  </span>
+                  <select
+                    className="input input--sm"
+                    value={sqlLanguage}
+                    onChange={(e) => setSqlLanguage(e.target.value as SqlLanguage)}
+                    style={{ marginLeft: "auto" }}
+                  >
+                    {SQL_LANGUAGES.map((l) => (
+                      <option key={l} value={l}>
+                        {SQL_LANGUAGE_LABELS[l]}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    className="btn btn--sm"
+                    onClick={handleCopyCode}
+                    disabled={!sqlResult}
+                  >
+                    Copy
+                  </button>
+                  {copyNotice && (
+                    <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>{copyNotice}</span>
+                  )}
+                </div>
+                <pre className="json-view" style={{ background: "var(--surface)" }}>
+                  {sqlResult
+                    ? sqlResult.code[sqlLanguage] ?? "Run to generate."
+                    : "Run to generate."}
+                </pre>
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="split__handle" aria-hidden="true" />
+        <div className="pane__body">
+          {error && (
+            <div className="toast toast--error" style={{ margin: 16 }}>
+              {error}
+            </div>
+          )}
+          {notice && (
+            <div className="toast toast--success" style={{ margin: 16 }}>
+              {notice}
+            </div>
+          )}
+          {page ? (
+            <>
+              <div className="results-view-toolbar">
+                {(["table", "tree", "json"] as ResultsViewMode[]).map((m) => (
+                  <button
+                    key={m}
+                    className={`btn btn--sm ${viewMode === m ? "is-active" : ""}`}
+                    onClick={() => setViewMode(m)}
+                    aria-pressed={viewMode === m}
+                  >
+                    {m[0].toUpperCase() + m.slice(1)}
+                  </button>
+                ))}
+              </div>
+              <ResultsTable
+                documents={page.documents as Array<Record<string, unknown>>}
+                connectionId={connectionId}
+                database={database}
+                collection={collection}
+                view={viewMode}
+                editable
+                onCellSaved={handleCellSaved}
+                onCellError={handleCellError}
+                onDeleteRow={handleDeleteRow}
+              />
+            </>
+          ) : (
+            <div className="empty-state">
+              <h2>Run to see results</h2>
+              <p>The query, projection, sort, and limit are all JSON.</p>
+            </div>
+          )}
+        </div>
+      </div>
+      <InsertDocumentModal
+        open={insertOpen}
+        connectionId={connectionId}
+        database={database}
+        collection={collection}
+        onClose={() => setInsertOpen(false)}
+        onInserted={handleInserted}
+        onError={handleInsertError}
+      />
+      {pendingDelete && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true">
+          <div className="modal" style={{ width: "min(420px, 92vw)" }}>
+            <div className="modal__header">
+              <h2 className="modal__title">Delete document?</h2>
+            </div>
+            <div className="modal__body">
+              <p>This will permanently delete the document from {database}.{collection}.</p>
+            </div>
+            <div className="modal__footer" style={{ display: "flex", gap: 8, justifyContent: "flex-end", padding: "var(--space-3)" }}>
+              <button className="btn btn--sm" onClick={cancelDelete}>Cancel</button>
+              <button className="btn btn--primary btn--sm" onClick={() => void confirmDelete()}>
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function describeError(e: unknown): string {
+  if (typeof e === "string") return e;
+  if (e && typeof e === "object" && "message" in e) {
+    return String((e as { message: unknown }).message);
+  }
+  return "Unexpected error";
+}
+
+function safeParse<T>(text: string, fallback: T): T {
+  const trimmed = text.trim();
+  if (!trimmed) return fallback;
+  try {
+    return JSON.parse(trimmed) as T;
+  } catch {
+    return fallback;
+  }
+}
