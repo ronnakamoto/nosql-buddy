@@ -110,6 +110,13 @@ fn build_filter(node: &VqbNode) -> AppResult<serde_json::Value> {
             if mongo_op == "$text" {
                 return Ok(serde_json::json!({ "$text": { "$search": value } }));
             }
+            // Top-level operators that don't bind to a field.
+            if mongo_op == "$expr" {
+                return Ok(serde_json::json!({ "$expr": value }));
+            }
+            if mongo_op == "$jsonSchema" {
+                return Ok(serde_json::json!({ "$jsonSchema": value }));
+            }
             if mongo_op == "$exists" {
                 return Ok(serde_json::json!({ field: { "$exists": value } }));
             }
@@ -118,6 +125,10 @@ fn build_filter(node: &VqbNode) -> AppResult<serde_json::Value> {
             }
             if mongo_op == "$size" {
                 return Ok(serde_json::json!({ field: { "$size": value } }));
+            }
+            if mongo_op == "$mod" {
+                // value is already a 2-element array [divisor, remainder].
+                return Ok(serde_json::json!({ field: { "$mod": value } }));
             }
             if operator == "is_null" {
                 return Ok(serde_json::json!({ field: serde_json::Value::Null }));
@@ -145,6 +156,10 @@ fn mongo_operator(operator: &str) -> AppResult<&'static str> {
         "text" => Ok("$text"),
         "type" => Ok("$type"),
         "size" => Ok("$size"),
+        "elem_match" => Ok("$elemMatch"),
+        "expr" => Ok("$expr"),
+        "mod" => Ok("$mod"),
+        "json_schema" => Ok("$jsonSchema"),
         "is_null" => Ok("$is_null"),
         "is_not_null" => Ok("$is_not_null"),
         _ => Err(AppError::SqlParse(format!("unknown VQB operator: {operator}"))),
@@ -171,6 +186,8 @@ fn parse_condition_value(
         "type" => Ok(coerce_to_string_or_number(raw)),
         "size" => Ok(coerce_to_number(raw)),
         "in" | "nin" => parse_array_value(raw),
+        "expr" | "json_schema" | "elem_match" => parse_json_object_value(raw, operator),
+        "mod" => parse_mod_value(raw),
         _ => parse_scalar_value(raw),
     }
 }
@@ -253,6 +270,76 @@ fn parse_array_value(raw: serde_json::Value) -> AppResult<serde_json::Value> {
     Ok(serde_json::Value::Array(items))
 }
 
+/// Parse a value that must be a JSON object (sub-filter or schema).
+/// Accepts a pre-parsed object, or a string that is valid JSON.
+fn parse_json_object_value(raw: serde_json::Value, operator: &str) -> AppResult<serde_json::Value> {
+    match raw {
+        serde_json::Value::Object(_) => Ok(raw),
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return Err(AppError::SqlParse(format!(
+                    "{operator} requires a JSON object value"
+                )));
+            }
+            let parsed: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| {
+                AppError::SqlParse(format!("invalid JSON for {operator}: {e}"))
+            })?;
+            if !parsed.is_object() {
+                return Err(AppError::SqlParse(format!(
+                    "{operator} value must be a JSON object, got {}",
+                    match parsed {
+                        serde_json::Value::Array(_) => "array",
+                        serde_json::Value::String(_) => "string",
+                        serde_json::Value::Number(_) => "number",
+                        serde_json::Value::Bool(_) => "boolean",
+                        serde_json::Value::Null => "null",
+                        _ => "unknown",
+                    }
+                )));
+            }
+            Ok(parsed)
+        }
+        other => Err(AppError::SqlParse(format!(
+            "{operator} requires a JSON object value, got {other}"
+        ))),
+    }
+}
+
+/// Parse a `$mod` value: `[divisor, remainder]`.
+/// Accepts a JSON array, a string like "[4, 0]" or "4, 0".
+fn parse_mod_value(raw: serde_json::Value) -> AppResult<serde_json::Value> {
+    let nums: Vec<serde_json::Value> = match raw {
+        serde_json::Value::Array(arr) if arr.len() == 2 => {
+            arr.into_iter().map(coerce_to_number).collect()
+        }
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            let inner = if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                &trimmed[1..trimmed.len() - 1]
+            } else {
+                trimmed
+            };
+            let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
+            if parts.len() != 2 {
+                return Err(AppError::SqlParse(format!(
+                    "$mod requires exactly two numbers [divisor, remainder], got: {s}"
+                )));
+            }
+            parts
+                .iter()
+                .map(|p| coerce_to_number(serde_json::Value::String((*p).into())))
+                .collect()
+        }
+        other => {
+            return Err(AppError::SqlParse(format!(
+                "$mod value must be [divisor, remainder], got {other}"
+            )))
+        }
+    };
+    Ok(serde_json::Value::Array(nums))
+}
+
 fn coerce_to_string_or_number(raw: serde_json::Value) -> serde_json::Value {
     match raw {
         serde_json::Value::String(s) => {
@@ -323,6 +410,24 @@ fn from_filter_value(value: &serde_json::Value) -> Option<VqbNode> {
                     enabled: true,
                 });
             }
+            continue;
+        }
+        if field == "$expr" {
+            children.push(VqbNode::Condition {
+                field: "$expr".into(),
+                operator: "expr".into(),
+                value: Some(val.clone()),
+                enabled: true,
+            });
+            continue;
+        }
+        if field == "$jsonSchema" {
+            children.push(VqbNode::Condition {
+                field: "$jsonSchema".into(),
+                operator: "json_schema".into(),
+                value: Some(val.clone()),
+                enabled: true,
+            });
             continue;
         }
         if let Some(cond) = condition_from_field_value(field, val) {
@@ -405,6 +510,8 @@ fn mongo_to_vqb_op(op: &str) -> Option<String> {
         "$regex" => Some("regex".into()),
         "$type" => Some("type".into()),
         "$size" => Some("size".into()),
+        "$elemMatch" => Some("elem_match".into()),
+        "$mod" => Some("mod".into()),
         _ => None,
     }
 }
@@ -543,5 +650,128 @@ mod tests {
         };
         let filter = to_filter(&node).unwrap();
         assert!(filter["createdAt"]["$gte"].get("$date").is_some());
+    }
+
+    #[test]
+    fn elem_match_emits_sub_filter() {
+        let node = VqbNode::Condition {
+            field: "items".into(),
+            operator: "elem_match".into(),
+            value: Some(serde_json::json!("{ \"qty\": { \"$gt\": 5 } }")),
+            enabled: true,
+        };
+        let filter = to_filter(&node).unwrap();
+        assert_eq!(filter["items"]["$elemMatch"]["qty"]["$gt"], 5);
+    }
+
+    #[test]
+    fn expr_emits_top_level() {
+        let node = VqbNode::Condition {
+            field: "$expr".into(),
+            operator: "expr".into(),
+            value: Some(serde_json::json!("{ \"$gt\": [\"$price\", \"$cost\"] }")),
+            enabled: true,
+        };
+        let filter = to_filter(&node).unwrap();
+        assert_eq!(filter["$expr"]["$gt"][0], "$price");
+        assert_eq!(filter["$expr"]["$gt"][1], "$cost");
+    }
+
+    #[test]
+    fn json_schema_emits_top_level() {
+        let node = VqbNode::Condition {
+            field: "$jsonSchema".into(),
+            operator: "json_schema".into(),
+            value: Some(serde_json::json!("{ \"required\": [\"name\"] }")),
+            enabled: true,
+        };
+        let filter = to_filter(&node).unwrap();
+        assert_eq!(filter["$jsonSchema"]["required"][0], "name");
+    }
+
+    #[test]
+    fn mod_emits_array_from_string() {
+        let node = VqbNode::Condition {
+            field: "qty".into(),
+            operator: "mod".into(),
+            value: Some(serde_json::json!("4, 0")),
+            enabled: true,
+        };
+        let filter = to_filter(&node).unwrap();
+        let arr = filter["qty"]["$mod"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0], 4);
+        assert_eq!(arr[1], 0);
+    }
+
+    #[test]
+    fn mod_emits_array_from_bracket_string() {
+        let node = VqbNode::Condition {
+            field: "qty".into(),
+            operator: "mod".into(),
+            value: Some(serde_json::json!("[4, 0]")),
+            enabled: true,
+        };
+        let filter = to_filter(&node).unwrap();
+        let arr = filter["qty"]["$mod"].as_array().unwrap();
+        assert_eq!(arr[0], 4);
+        assert_eq!(arr[1], 0);
+    }
+
+    #[test]
+    fn mod_rejects_wrong_arity() {
+        let node = VqbNode::Condition {
+            field: "qty".into(),
+            operator: "mod".into(),
+            value: Some(serde_json::json!("4, 0, 1")),
+            enabled: true,
+        };
+        assert!(to_filter(&node).is_err());
+    }
+
+    #[test]
+    fn elem_match_rejects_non_object() {
+        let node = VqbNode::Condition {
+            field: "items".into(),
+            operator: "elem_match".into(),
+            value: Some(serde_json::json!("[1, 2, 3]")),
+            enabled: true,
+        };
+        assert!(to_filter(&node).is_err());
+    }
+
+    #[test]
+    fn round_trip_elem_match() {
+        let json = serde_json::json!({ "items": { "$elemMatch": { "qty": 5 } } });
+        let node = from_filter_value(&json).unwrap();
+        let filter = to_filter(&node).unwrap();
+        // $elemMatch sub-filter is preserved as-is (qty: 5 is a direct equality).
+        assert_eq!(filter["items"]["$elemMatch"]["qty"], 5);
+    }
+
+    #[test]
+    fn round_trip_expr_top_level() {
+        let json = serde_json::json!({ "$expr": { "$gt": ["$a", "$b"] } });
+        let node = from_filter_value(&json).unwrap();
+        let filter = to_filter(&node).unwrap();
+        assert_eq!(filter["$expr"]["$gt"][0], "$a");
+    }
+
+    #[test]
+    fn round_trip_json_schema_top_level() {
+        let json = serde_json::json!({ "$jsonSchema": { "required": ["x"] } });
+        let node = from_filter_value(&json).unwrap();
+        let filter = to_filter(&node).unwrap();
+        assert_eq!(filter["$jsonSchema"]["required"][0], "x");
+    }
+
+    #[test]
+    fn round_trip_mod() {
+        let json = serde_json::json!({ "qty": { "$mod": [4, 0] } });
+        let node = from_filter_value(&json).unwrap();
+        let filter = to_filter(&node).unwrap();
+        let arr = filter["qty"]["$mod"].as_array().unwrap();
+        assert_eq!(arr[0], 4);
+        assert_eq!(arr[1], 0);
     }
 }

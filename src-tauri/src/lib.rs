@@ -189,6 +189,7 @@ pub fn run() {
             commands::mongo::list_indexes,
             commands::mongo::create_index,
             commands::mongo::drop_index,
+            commands::mongo::index_stats,
             commands::mongo::explain_find,
             commands::mongo::explain_aggregate,
             commands::mongo::sample_schema,

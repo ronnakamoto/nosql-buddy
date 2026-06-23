@@ -913,7 +913,7 @@
 
 .index-row {
   display: grid;
-  grid-template-columns: 1.5fr 2fr 1fr 1fr 0.5fr;
+  grid-template-columns: 28px 1.6fr 2fr 1.4fr 1.2fr 0.8fr 0.8fr;
   gap: var(--space-3);
   padding: var(--space-2) var(--space-3);
   border-bottom: 1px solid var(--border);
@@ -927,6 +927,203 @@
   letter-spacing: 0.04em;
   color: var(--ink-muted);
   background: var(--surface);
+}
+
+.index-table {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.index-row-group {
+  border-bottom: 1px solid var(--border);
+}
+.index-row-group:last-child {
+  border-bottom: none;
+}
+
+.index-row__expand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.index-row__options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.index-row__actions {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+.index-row__usage {
+  min-width: 80px;
+}
+
+.index-row__usage-na {
+  color: var(--ink-faint);
+  font-size: var(--font-size-xs);
+}
+
+.usage-bar {
+  position: relative;
+  height: 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.usage-bar__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: linear-gradient(
+    90deg,
+    var(--accent-400, var(--accent-500)),
+    var(--accent-500)
+  );
+  opacity: 0.75;
+  transition: width 200ms ease-out;
+}
+.usage-bar__label {
+  position: relative;
+  z-index: 1;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  padding: 0 6px;
+  line-height: 18px;
+  color: var(--ink);
+  mix-blend-mode: difference;
+}
+
+.index-row-detail {
+  padding: var(--space-2) var(--space-3) var(--space-3) calc(var(--space-3) + 28px);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  gap: var(--space-2);
+  font-size: var(--font-size-xs);
+}
+.index-row-detail__row {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: var(--space-3);
+  align-items: start;
+}
+.index-row-detail__label {
+  color: var(--ink-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.index-row-detail__value code {
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--ink);
+}
+
+.kind-badge--muted {
+  background: var(--surface);
+  color: var(--ink-muted);
+  border: 1px solid var(--border);
+}
+
+/* ---- Index create/edit form (inside Modal) ---- */
+
+.index-form {
+  display: grid;
+  gap: var(--space-3);
+}
+.index-form__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: end;
+}
+.index-form__textarea {
+  font-family: var(--font-mono);
+  resize: vertical;
+}
+.index-form__note {
+  font-size: var(--font-size-xs);
+  color: var(--ink-muted);
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.index-form__collation {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  display: grid;
+  gap: var(--space-2);
+}
+.index-form__collation legend {
+  font-size: var(--font-size-xs);
+  color: var(--ink-muted);
+  font-weight: 600;
+  padding: 0 var(--space-2);
+}
+
+.field__checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--font-size-sm);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+/* ---- Key field builder (drag-to-reorder) ---- */
+
+.key-builder {
+  display: grid;
+  gap: var(--space-2);
+}
+.key-builder__row {
+  display: grid;
+  grid-template-columns: 20px 1fr 120px 28px;
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  transition: border-color 150ms ease-out, opacity 150ms ease-out;
+}
+.key-builder__row--dragging {
+  opacity: 0.5;
+  border-color: var(--accent-500);
+}
+.key-builder__handle {
+  cursor: grab;
+  color: var(--ink-faint);
+  user-select: none;
+  font-size: var(--font-size-sm);
+  text-align: center;
+}
+.key-builder__handle:active {
+  cursor: grabbing;
+}
+.key-builder__field {
+  font-family: var(--font-mono);
+}
+.key-builder__type {
+  font-family: var(--font-mono);
+}
+.key-builder__remove {
+  padding: 0;
+  line-height: 1;
+  font-size: var(--font-size-md, 1rem);
+}
+.key-builder__add {
+  justify-self: start;
 }
 
 .schema-list {
@@ -2281,4 +2478,81 @@
   font-size: var(--font-size-xs);
   word-break: break-word;
   color: var(--ink);
+}
+
+/* VQB — drag-to-reorder */
+.vqb__drag-handle {
+  cursor: grab;
+  color: var(--ink-faint);
+  font-size: 12px;
+  line-height: 24px;
+  user-select: none;
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+
+.vqb__drag-handle:active {
+  cursor: grabbing;
+}
+
+.vqb__child--dragging {
+  opacity: 0.5;
+  border-style: dashed !important;
+}
+
+/* VQB — fixed (non-editable) field for top-level operators */
+.vqb__field--fixed {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--ink-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  min-width: 80px;
+  flex: 1 1 auto;
+}
+
+/* VQB — $mod dual-input */
+.vqb__mod-inputs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 1 1 auto;
+}
+
+.vqb__value--mod {
+  width: 80px;
+  min-width: 80px;
+  flex: 0 0 auto;
+}
+
+.vqb__mod-sep {
+  font-size: var(--font-size-xs);
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+}
+
+/* VQB — JSON textarea value editor */
+.vqb__value--json {
+  flex: 1 1 auto;
+  min-height: 60px;
+  max-height: 160px;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--ink);
+  line-height: 1.4;
+}
+
+.vqb__value--select {
+  min-width: 100px;
+  flex: 1 1 auto;
 }

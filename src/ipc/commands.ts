@@ -122,16 +122,41 @@ export interface CollectionStats {
   avgObjSizeBytes: number;
 }
 
+export interface CollationDto {
+  locale: string;
+  strength?: number | null;
+  caseLevel?: boolean | null;
+  caseFirst?: string | null;
+  numericOrdering?: boolean | null;
+  alternate?: string | null;
+  maxVariable?: string | null;
+  normalization?: boolean | null;
+  backwards?: boolean | null;
+}
+
 export interface IndexInfo {
   name: string;
   key: Record<string, unknown>;
   unique: boolean;
   sparse: boolean;
+  hidden: boolean;
   ttlSeconds: number | null;
   partialFilterExpression: Record<string, unknown> | null;
+  collation: CollationDto | null;
+  wildcardProjection: Record<string, unknown> | null;
   isText: boolean;
   isGeo: boolean;
   isId: boolean;
+}
+
+export interface IndexStats {
+  name: string;
+  ops: number;
+  sinceMs: number | null;
+  accesses: number | null;
+  sizeBytes: number | null;
+  building: boolean | null;
+  metadata: Record<string, unknown> | null;
 }
 
 export interface ExplainResult {
@@ -271,7 +296,11 @@ export interface CreateIndexRequest {
   keyJson: string;
   unique: boolean;
   sparse: boolean;
+  hidden: boolean;
   ttlSeconds?: number | null;
+  partialFilterExpressionJson?: string | null;
+  collation?: CollationDto | null;
+  wildcardProjectionJson?: string | null;
 }
 
 export interface ExplainRequest {
@@ -364,6 +393,8 @@ const commands = {
     name: string,
   ) =>
     invoke<void>("drop_index", { connectionId, database, collection, name }),
+  indexStats: (connectionId: string, database: string, collection: string) =>
+    invoke<IndexStats[]>("index_stats", { connectionId, database, collection }),
   explainFind: (request: ExplainRequest) =>
     invoke<ExplainResult>("explain_find", { request }),
   explainAggregate: (

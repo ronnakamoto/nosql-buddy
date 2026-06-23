@@ -14,10 +14,72 @@ use crate::error::{AppError, AppResult};
 use crate::mongo::bson_json::{doc_to_display_json, doc_to_extjson, parse_optional_doc};
 use crate::mongo::client_registry::list_collections as registry_list_collections;
 use crate::mongo::types::{
-    CollectionKind, CollectionStats, CollectionSummary, DatabaseSummary, DocumentPage,
-    ExplainResult, IndexInfo,
+    CollationDto, CollectionKind, CollectionStats, CollectionSummary, DatabaseSummary,
+    DocumentPage, ExplainResult, IndexInfo, IndexStats,
 };
 use crate::state::AppState;
+
+/// Convert a driver `Collation` (enum-typed fields) into the flat JSON-friendly
+/// `CollationDto` used over IPC. Strength becomes an i32 (1=Primary … 5=Identical);
+/// the kebab-case enum strings are passed through verbatim.
+fn collation_from_driver(c: &mongodb::options::Collation) -> CollationDto {
+    CollationDto {
+        locale: c.locale.clone(),
+        strength: c.strength.map(|s| u32::from(s) as i32),
+        case_level: c.case_level,
+        case_first: c.case_first.map(|v| v.as_str().to_string()),
+        numeric_ordering: c.numeric_ordering,
+        alternate: c.alternate.map(|v| v.as_str().to_string()),
+        max_variable: c.max_variable.map(|v| v.as_str().to_string()),
+        normalization: c.normalization,
+        backwards: c.backwards,
+    }
+}
+
+/// Convert the IPC `CollationDto` back into a driver `Collation`. Unknown
+/// kebab-case strings become `None` rather than erroring, so a malformed
+/// payload from the renderer degrades gracefully instead of failing the
+/// whole create-index call.
+fn collation_to_driver(dto: &CollationDto) -> mongodb::options::Collation {
+    use mongodb::options::{
+        CollationAlternate, CollationCaseFirst, CollationMaxVariable, CollationStrength,
+    };
+    let strength = match dto.strength {
+        Some(1) => Some(CollationStrength::Primary),
+        Some(2) => Some(CollationStrength::Secondary),
+        Some(3) => Some(CollationStrength::Tertiary),
+        Some(4) => Some(CollationStrength::Quaternary),
+        Some(5) => Some(CollationStrength::Identical),
+        _ => None,
+    };
+    let case_first = match dto.case_first.as_deref() {
+        Some("upper") => Some(CollationCaseFirst::Upper),
+        Some("lower") => Some(CollationCaseFirst::Lower),
+        Some("off") => Some(CollationCaseFirst::Off),
+        _ => None,
+    };
+    let alternate = match dto.alternate.as_deref() {
+        Some("non-ignorable") => Some(CollationAlternate::NonIgnorable),
+        Some("shifted") => Some(CollationAlternate::Shifted),
+        _ => None,
+    };
+    let max_variable = match dto.max_variable.as_deref() {
+        Some("punct") => Some(CollationMaxVariable::Punct),
+        Some("space") => Some(CollationMaxVariable::Space),
+        _ => None,
+    };
+    mongodb::options::Collation::builder()
+        .locale(dto.locale.clone())
+        .strength(strength)
+        .case_level(dto.case_level)
+        .case_first(case_first)
+        .numeric_ordering(dto.numeric_ordering)
+        .alternate(alternate)
+        .max_variable(max_variable)
+        .normalization(dto.normalization)
+        .backwards(dto.backwards)
+        .build()
+}
 
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 500;
@@ -260,6 +322,22 @@ pub async fn list_indexes(
             .and_then(|o| o.partial_filter_expression.clone())
             .map(|d| doc_to_extjson(&d))
             .transpose()?;
+        let hidden = model
+            .options
+            .as_ref()
+            .and_then(|o| o.hidden)
+            .unwrap_or(false);
+        let collation = model
+            .options
+            .as_ref()
+            .and_then(|o| o.collation.as_ref())
+            .map(collation_from_driver);
+        let wildcard_projection = model
+            .options
+            .as_ref()
+            .and_then(|o| o.wildcard_projection.clone())
+            .map(|d| doc_to_extjson(&d))
+            .transpose()?;
         let is_text = key_doc
             .values()
             .any(|v| matches!(v, bson::Bson::String(s) if s == "text"));
@@ -272,8 +350,11 @@ pub async fn list_indexes(
             key: key_json,
             unique,
             sparse,
+            hidden,
             ttl_seconds: ttl,
             partial_filter_expression: partial,
+            collation,
+            wildcard_projection,
             is_text,
             is_geo,
             is_id,
@@ -291,7 +372,15 @@ pub struct CreateIndexRequest {
     pub key_json: String,
     pub unique: bool,
     pub sparse: bool,
+    pub hidden: bool,
     pub ttl_seconds: Option<i32>,
+    /// Optional partial-index filter, as Extended JSON. Parsed into a
+    /// `Document` and forwarded to `IndexOptions::partial_filter_expression`.
+    pub partial_filter_expression_json: Option<String>,
+    /// Optional collation. `locale` is required when present.
+    pub collation: Option<CollationDto>,
+    /// Optional wildcard projection (`{"field": 1}` / `{"field": 0}`).
+    pub wildcard_projection_json: Option<String>,
 }
 
 #[tauri::command]
@@ -306,9 +395,23 @@ pub async fn create_index(
         .name(Some(request.name.clone()))
         .unique(request.unique)
         .sparse(request.sparse)
+        .hidden(request.hidden)
         .build();
     if let Some(ttl) = request.ttl_seconds {
         options.expire_after = Some(std::time::Duration::from_secs(ttl as u64));
+    }
+    if let Some(json) = request.partial_filter_expression_json.as_deref() {
+        let doc: Document = serde_json::from_str(json)?;
+        options.partial_filter_expression = Some(doc);
+    }
+    if let Some(dto) = request.collation.as_ref() {
+        if !dto.locale.trim().is_empty() {
+            options.collation = Some(collation_to_driver(dto));
+        }
+    }
+    if let Some(json) = request.wildcard_projection_json.as_deref() {
+        let doc: Document = serde_json::from_str(json)?;
+        options.wildcard_projection = Some(doc);
     }
     let model = mongodb::IndexModel::builder()
         .keys(key)
@@ -330,6 +433,55 @@ pub async fn drop_index(
     let coll = entry.client.database(&database).collection::<Document>(&collection);
     coll.drop_index(name).await?;
     Ok(())
+}
+
+/// Per-index usage statistics via the `$indexStats` aggregation stage.
+/// Returns one `IndexStats` per index, ordered by name. Servers that do
+/// not support `$indexStats` (e.g. MongoDB Serverless preview) will surface
+/// an error to the caller; the frontend treats a failure as "no stats".
+#[tauri::command]
+pub async fn index_stats(
+    connection_id: String,
+    database: String,
+    collection: String,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<IndexStats>> {
+    let entry = state.clients.get(&connection_id).await?;
+    let coll = entry
+        .client
+        .database(&database)
+        .collection::<Document>(&collection);
+    let pipeline = vec![bson::doc! { "$indexStats": {} }];
+    let mut cursor = coll.aggregate(pipeline).await?;
+    let mut out = Vec::new();
+    while cursor.advance().await? {
+        let doc = cursor.deserialize_current()?;
+        let name = doc.get_str("name").unwrap_or("").to_string();
+        let ops = doc.get_i64("ops").unwrap_or(0);
+        let since_ms = doc
+            .get_datetime("since")
+            .ok()
+            .map(|dt| dt.timestamp_millis());
+        let accesses = doc
+            .get_document("accesses")
+            .ok()
+            .and_then(|a| a.get_i64("ops").ok());
+        let size_bytes = doc.get_i64("size").ok();
+        let building = doc.get_bool("building").ok();
+        // Surface the rest of the row (e.g. `spec`, `metadata`) as raw JSON
+        // so the UI can show extra detail without a schema bump per field.
+        let metadata = doc_to_extjson(&doc).ok();
+        out.push(IndexStats {
+            name,
+            ops,
+            since_ms,
+            accesses,
+            size_bytes,
+            building,
+            metadata,
+        });
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -549,3 +701,78 @@ pub async fn translate_vqb(request: VqbTranslateRequest) -> AppResult<serde_json
 
 #[allow(dead_code)]
 fn _kind_marker(_k: CollectionKind) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collation_round_trips_through_driver() {
+        let dto = CollationDto {
+            locale: "de".to_string(),
+            strength: Some(2),
+            case_level: Some(true),
+            case_first: Some("lower".to_string()),
+            numeric_ordering: Some(true),
+            alternate: Some("shifted".to_string()),
+            max_variable: Some("space".to_string()),
+            normalization: Some(true),
+            backwards: Some(false),
+        };
+        let driver = collation_to_driver(&dto);
+        let back = collation_from_driver(&driver);
+        assert_eq!(back, dto);
+    }
+
+    #[test]
+    fn collation_strength_maps_to_named_levels() {
+        for (raw, expected) in [
+            (1i32, 1u32),
+            (2, 2),
+            (3, 3),
+            (4, 4),
+            (5, 5),
+        ] {
+            let dto = CollationDto {
+                locale: "en".to_string(),
+                strength: Some(raw),
+                ..Default::default()
+            };
+            let driver = collation_to_driver(&dto);
+            let back = collation_from_driver(&driver);
+            assert_eq!(back.strength, Some(expected as i32), "strength {raw}");
+        }
+    }
+
+    #[test]
+    fn collation_unknown_strings_degrade_to_none() {
+        // A malformed payload must not panic or error; unknown enum
+        // strings collapse to None so the create-index call still works
+        // with the locale + the fields that did parse.
+        let dto = CollationDto {
+            locale: "en".to_string(),
+            case_first: Some("bogus".to_string()),
+            alternate: Some("nope".to_string()),
+            max_variable: Some("garbage".to_string()),
+            strength: Some(99), // out of range
+            ..Default::default()
+        };
+        let driver = collation_to_driver(&dto);
+        let back = collation_from_driver(&driver);
+        assert_eq!(back.locale, "en");
+        assert_eq!(back.strength, None);
+        assert_eq!(back.case_first, None);
+        assert_eq!(back.alternate, None);
+        assert_eq!(back.max_variable, None);
+    }
+
+    #[test]
+    fn collation_locale_only_preserves_locale() {
+        let dto = CollationDto {
+            locale: "ja".to_string(),
+            ..Default::default()
+        };
+        let back = collation_from_driver(&collation_to_driver(&dto));
+        assert_eq!(back, dto);
+    }
+}

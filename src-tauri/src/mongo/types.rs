@@ -142,6 +142,51 @@ mod tests {
         let masked = mask_uri("mongodb://127.0.0.1:27017");
         assert_eq!(masked, "mongodb://127.0.0.1:27017");
     }
+
+    #[test]
+    fn collation_dto_serializes_camel_case_with_locale_only() {
+        let dto = CollationDto {
+            locale: "en_US".to_string(),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&dto).expect("serialize");
+        // locale is always present; every optional field must be omitted,
+        // not serialized as null, so the IPC payload stays small and the
+        // frontend's `undefined` checks work.
+        assert_eq!(json["locale"], "en_US");
+        assert!(json.get("strength").is_none() || json["strength"].is_null());
+        assert!(json.get("caseLevel").is_none() || json["caseLevel"].is_null());
+    }
+
+    #[test]
+    fn collation_dto_round_trips_full_fields() {
+        let dto = CollationDto {
+            locale: "fr".to_string(),
+            strength: Some(2),
+            case_level: Some(true),
+            case_first: Some("upper".to_string()),
+            numeric_ordering: Some(true),
+            alternate: Some("shifted".to_string()),
+            max_variable: Some("punct".to_string()),
+            normalization: Some(false),
+            backwards: Some(true),
+        };
+        let json = serde_json::to_string(&dto).expect("serialize");
+        let back: CollationDto = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(dto, back);
+        // camelCase must be applied on the wire.
+        assert!(json.contains("\"caseLevel\""));
+        assert!(json.contains("\"numericOrdering\""));
+        assert!(json.contains("\"maxVariable\""));
+    }
+
+    #[test]
+    fn index_stats_default_has_zero_ops() {
+        let s = IndexStats::default();
+        assert_eq!(s.ops, 0);
+        assert_eq!(s.name, "");
+        assert!(s.since_ms.is_none());
+    }
 }
 
 /// A connect request. Includes the credential once, in memory only.
@@ -220,6 +265,24 @@ pub struct DocumentPage {
     pub total_count: Option<u64>,
 }
 
+/// Collation configuration. Mirrors the subset of MongoDB `Collation`
+/// fields that are useful from a GUI: locale is mandatory; the rest are
+/// optional. Strength is sent as an integer (1=Primary … 5=Identical) to
+/// keep the IPC surface a flat JSON object.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CollationDto {
+    pub locale: String,
+    pub strength: Option<i32>,
+    pub case_level: Option<bool>,
+    pub case_first: Option<String>,
+    pub numeric_ordering: Option<bool>,
+    pub alternate: Option<String>,
+    pub max_variable: Option<String>,
+    pub normalization: Option<bool>,
+    pub backwards: Option<bool>,
+}
+
 /// Index descriptor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -228,11 +291,30 @@ pub struct IndexInfo {
     pub key: serde_json::Value,
     pub unique: bool,
     pub sparse: bool,
+    pub hidden: bool,
     pub ttl_seconds: Option<i32>,
     pub partial_filter_expression: Option<serde_json::Value>,
+    pub collation: Option<CollationDto>,
+    pub wildcard_projection: Option<serde_json::Value>,
     pub is_text: bool,
     pub is_geo: bool,
     pub is_id: bool,
+}
+
+/// Per-index usage statistics from `$indexStats`. `ops` is the operation
+/// count; `since` is the server-side timestamp (milliseconds since epoch)
+/// when stats collection started. Missing fields are `None` when the
+/// server omits them or the value is not a valid date.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexStats {
+    pub name: String,
+    pub ops: i64,
+    pub since_ms: Option<i64>,
+    pub accesses: Option<i64>,
+    pub size_bytes: Option<i64>,
+    pub building: Option<bool>,
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Collection statistics.

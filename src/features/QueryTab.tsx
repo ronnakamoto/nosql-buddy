@@ -536,6 +536,9 @@ export function QueryTab({
                       onFilterJsonChange={(next) => {
                         setFilterText(next);
                       }}
+                      connectionId={connectionId}
+                      database={database}
+                      collection={collection}
                     />
                   </div>
                 )}
