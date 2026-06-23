@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use crate::audit::AuditLog;
 use crate::mongo::client_registry::ClientRegistry;
 use crate::mongo::credentials::{InMemorySecretStore, KeyringSecretStore, SecretStore};
 use crate::mongo::profiles::ProfileRepository;
@@ -16,6 +17,7 @@ pub struct AppState {
     pub secrets: Arc<dyn SecretStore>,
     pub clients: ClientRegistry,
     pub shell_registry: ShellRegistry,
+    pub audit_log: Arc<AuditLog>,
 }
 
 impl AppState {
@@ -38,6 +40,7 @@ impl AppState {
             secrets,
             clients: ClientRegistry::new(),
             shell_registry: ShellRegistry::new(),
+            audit_log: Arc::new(AuditLog::new().expect("failed to create audit log")),
         }
     }
 }

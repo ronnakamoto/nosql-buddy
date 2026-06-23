@@ -5,6 +5,7 @@
 //! state in [`state`]; error types in [`error`]; event payloads in [`events`];
 //! Mongo domain in [`mongo`].
 
+pub mod audit;
 pub mod commands;
 pub mod error;
 pub mod events;
@@ -203,6 +204,11 @@ pub fn run() {
             commands::driver_code::generate_pipeline_code,
             commands::shell::eval_shell,
             commands::shell::shell_autocomplete,
+            audit::commands::audit_get_status,
+            audit::commands::audit_list_events,
+            audit::commands::audit_get_root,
+            audit::commands::audit_generate_proof,
+            audit::commands::audit_record_event,
         ])
         .setup(|app| {
             // Native menu (macOS menu bar + Windows/Linux in-window).

@@ -612,6 +612,15 @@ pub async fn insert_document(
         .as_object_id()
         .map(|o| o.to_hex())
         .unwrap_or_else(|| doc.get_object_id("_id").map(|o| o.to_hex()).unwrap_or_default());
+
+    // Record audit event.
+    let _ = crate::audit::interceptor::record_insert(
+        &state.audit_log,
+        &request.database,
+        &request.collection,
+        &request.document_json,
+    );
+
     Ok(id)
 }
 
@@ -642,6 +651,16 @@ pub async fn update_documents(
     } else {
         coll.update_one(filter, update).await?
     };
+
+    // Record audit event.
+    let _ = crate::audit::interceptor::record_update(
+        &state.audit_log,
+        &request.database,
+        &request.collection,
+        &request.filter_json,
+        &request.update_json,
+    );
+
     Ok(res.modified_count)
 }
 
@@ -657,6 +676,15 @@ pub async fn delete_documents(
     let filter = parse_optional_doc(Some(&filter_json))?.unwrap_or_default();
     let coll = entry.client.database(&database).collection::<Document>(&collection);
     let res = coll.delete_many(filter).await?;
+
+    // Record audit event.
+    let _ = crate::audit::interceptor::record_delete(
+        &state.audit_log,
+        &database,
+        &collection,
+        &filter_json,
+    );
+
     Ok(res.deleted_count)
 }
 

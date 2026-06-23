@@ -1,0 +1,37 @@
+[package]
+name = "zk-audit"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "ZK audit log: tamper-evident Merkle tree + Groth16 proofs for NoSQLBuddy"
+
+[dependencies]
+# ZK proof generation
+ark-circom = "0.5"
+ark-groth16 = { version = "0.5", default-features = false, features = ["parallel"] }
+ark-bn254 = "0.5"
+ark-ff = { version = "0.5", features = ["parallel"] }
+ark-ec = "0.5"
+ark-poly = "0.5"
+ark-relations = "0.5"
+ark-serialize = "0.5"
+ark-std = { version = "0.5", features = ["parallel"] }
+
+# Merkle tree hashing (matches circomlib Poseidon(2))
+light-poseidon = "0.4"
+
+# Witness calculation via WASM (wasmer, pulled in by ark-circom)
+wasmer = "4"
+wasmer-wasix = "0.28"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+num-bigint = "0.4"
+num-traits = "0.2"
+
+# Misc
+thiserror = "2"
+rand = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread"] }

@@ -43,6 +43,8 @@ pub enum AppError {
     Timeout(String),
     #[error("sql parse error: {0}")]
     SqlParse(String),
+    #[error("zk audit error: {0}")]
+    ZkAudit(String),
 }
 
 impl From<std::io::Error> for AppError {
@@ -96,6 +98,12 @@ impl From<keyring::Error> for AppError {
 impl From<mongodb::error::Error> for AppError {
     fn from(err: mongodb::error::Error) -> Self {
         AppError::Mongo(Redactor::new().redact(&err.to_string()))
+    }
+}
+
+impl From<zk_audit::ZkAuditError> for AppError {
+    fn from(err: zk_audit::ZkAuditError) -> Self {
+        AppError::ZkAudit(err.to_string())
     }
 }
 

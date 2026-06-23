@@ -1,0 +1,20 @@
+[package]
+name = "rust-prover"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ark-circom = { version = "0.5" }
+ark-groth16 = { version = "0.5", default-features = false, features = ["parallel"] }
+ark-bn254 = "0.5"
+ark-ff = "0.5"
+ark-ec = "0.5"
+ark-poly = "0.5"
+ark-relations = "0.5"
+ark-serialize = "0.5"
+ark-std = { version = "0.5", features = ["parallel"] }
+serde_json = "1"
+num-bigint = "0.4"
+hex = "0.4"
+rand = "0.8"

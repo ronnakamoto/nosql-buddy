@@ -1,0 +1,19 @@
+[package]
+name = "poseidon-check"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+light-poseidon = "0.4"
+ark-bn254 = "0.5"
+ark-ff = "0.5"
+serde_json = "1"
+
+[[bin]]
+name = "poseidon-check"
+path = "src/main.rs"
+
+[[bin]]
+name = "merkle-witness"
+path = "src/merkle_witness.rs"

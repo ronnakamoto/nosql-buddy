@@ -16,12 +16,15 @@ import { IndexTab } from "./features/IndexTab";
 import { SchemaTab } from "./features/SchemaTab";
 import { ShellTab } from "./features/ShellTab";
 import { ToastStack, useToasts } from "./components/Toast";
+import AuditPanel from "./components/AuditPanel";
+import ErrorBoundary from "./components/ErrorBoundary";
 
 type Tab =
   | { id: string; kind: "query"; connectionId: string; database: string; collection: string }
   | { id: string; kind: "indexes"; connectionId: string; database: string; collection: string }
   | { id: string; kind: "schema"; connectionId: string; database: string; collection: string }
-  | { id: string; kind: "shell"; connectionId: string; database: string; collection: string };
+  | { id: string; kind: "shell"; connectionId: string; database: string; collection: string }
+  | { id: string; kind: "audit" };
 
 interface ActiveConnection {
   handle: ConnectionHandle;
@@ -442,7 +445,9 @@ export default function App() {
                     ? `Indexes · ${t.database}.${t.collection}`
                     : t.kind === "shell"
                       ? `Shell · ${t.database}`
-                      : `Schema · ${t.database}.${t.collection}`}
+                      : t.kind === "audit"
+                        ? "ZK Audit Log"
+                        : `Schema · ${t.database}.${t.collection}`}
               </span>
               <span
                 className="tab__close"
@@ -480,17 +485,32 @@ export default function App() {
               >
                 +
               </button>
+              <button
+                className="tab-add"
+                onClick={() => {
+                  const id = `audit-${Date.now()}`;
+                  setTabs((prev) => [...prev, { id, kind: "audit" }]);
+                  setActiveTabId(id);
+                }}
+                title="Open ZK Audit Log panel"
+                aria-label="ZK Audit Log"
+                style={{ fontSize: "11px", padding: "0 8px" }}
+              >
+                Audit
+              </button>
             </>
           )}
         </div>
         {activeTab ? (
-          <TabPane
-            key={activeTab.id}
-            tab={activeTab}
-            profile={active?.profile ?? null}
-            onQueryTime={setQueryTime}
-            onDocCount={setDocCount}
-          />
+          <ErrorBoundary label={activeTab.kind}>
+            <TabPane
+              key={activeTab.id}
+              tab={activeTab}
+              profile={active?.profile ?? null}
+              onQueryTime={setQueryTime}
+              onDocCount={setDocCount}
+            />
+          </ErrorBoundary>
         ) : (
           <div className="empty-state">
             <h2>Connect to a database to get started</h2>
@@ -608,6 +628,9 @@ function TabPane({
         profile={profile}
       />
     );
+  }
+  if (tab.kind === "audit") {
+    return <AuditPanel />;
   }
   return (
     <SchemaTab

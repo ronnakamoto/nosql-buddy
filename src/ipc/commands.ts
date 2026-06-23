@@ -333,12 +333,72 @@ export interface PreviewRequest {
   filterJson?: string | null;
 }
 
+/** Audit log status snapshot. */
+export interface AuditStatus {
+  rootHex: string;
+  leafCount: number;
+  eventCount: number;
+  treeHeight: number;
+}
+
+/** An audit event recorded in the ZK audit log. */
+export interface AuditEvent {
+  index: number;
+  leafHex: string;
+  operation: string;
+  database: string;
+  collection: string;
+  timestamp: string;
+}
+
+/** Soroban proof result for on-chain verification. */
+export interface ProofResult {
+  rootHex: string;
+  leafIndex: number;
+  proof: { a: string; b: string; c: string };
+  vk: {
+    alpha: string;
+    beta: string;
+    gamma: string;
+    delta: string;
+    ic: string[];
+  };
+  pubSignals: string[];
+}
+
 const commands = {
   ping: (message: string) => invoke<string>("ping", { message }),
   appInfo: () => invoke<AppInfo>("app_info"),
   getSettings: () => invoke<AppSettings>("get_settings"),
   updateSettings: (settings: AppSettings) =>
     invoke<void>("update_settings", { settings }),
+
+  // --- ZK Audit ---
+  auditGetStatus: () => invoke<AuditStatus>("audit_get_status"),
+  auditListEvents: () => invoke<AuditEvent[]>("audit_list_events"),
+  auditGetRoot: () => invoke<string>("audit_get_root"),
+  auditGenerateProof: (
+    index: number,
+    r1csPath: string,
+    wasmPath: string,
+  ) =>
+    invoke<ProofResult>("audit_generate_proof", {
+      index,
+      r1csPath,
+      wasmPath,
+    }),
+  auditRecordEvent: (
+    operation: string,
+    database: string,
+    collection: string,
+    payload: string,
+  ) =>
+    invoke<number>("audit_record_event", {
+      operation,
+      database,
+      collection,
+      payload,
+    }),
 
   listProfiles: () => invoke<ProfileSummary[]>("list_profiles"),
   saveProfile: (request: SaveProfileRequest) =>

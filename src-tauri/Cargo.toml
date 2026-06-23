@@ -40,6 +40,13 @@ dirs = "5"
 regex = "1"
 boa_engine = "0.21"
 
+# ZK audit log (local path dependency)
+zk-audit = { path = "../zk-audit" }
+ark-bn254 = "0.5"
+ark-ff = "0.5"
+sha2 = "0.10"
+hex = "0.4"
+
 [features]
 # This feature is used for production builds where `devUrl` is not used.
 custom-protocol = ["tauri/custom-protocol"]
