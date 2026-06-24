@@ -52,6 +52,14 @@ base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 
+# Standalone audit daemon (nosqlbuddy-auditd)
+axum = { version = "0.7", features = ["json"] }
+tower = "0.5"
+
+[[bin]]
+name = "nosqlbuddy-auditd"
+path = "src/bin/nosqlbuddy-auditd.rs"
+
 [features]
 # This feature is used for production builds where `devUrl` is not used.
 custom-protocol = ["tauri/custom-protocol"]

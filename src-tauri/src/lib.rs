@@ -6,6 +6,7 @@
 //! Mongo domain in [`mongo`].
 
 pub mod audit;
+pub mod auditd;
 pub mod commands;
 pub mod error;
 pub mod events;
