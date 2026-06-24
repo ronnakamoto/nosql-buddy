@@ -151,14 +151,60 @@ textarea {
   color: inherit;
 }
 
+input,
+textarea,
+select {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  background-color: var(--bg);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--ink-muted);
+  opacity: 1;
+}
+
 button {
   cursor: pointer;
 }
 
-:focus-visible {
-  outline: 2px solid var(--accent-500);
-  outline-offset: 2px;
+/* Kill ALL browser-default outlines and focus rings globally.
+   The macOS WebKit focus ring (blue bar) is nearly impossible to override
+   with per-element specificity. Instead we kill it everywhere, then add
+   intentional focus styles back only for elements that need them. */
+*,
+*::before,
+*::after {
+  outline: none !important;
+  -webkit-tap-highlight-color: transparent !important;
+  -webkit-focus-ring-color: transparent !important;
+}
+
+/* Intentional focus indicator for keyboard navigation on interactive
+   non-form elements (buttons, tabs, tree items). Form controls get a
+   border-color change instead (see below). */
+button:focus-visible,
+[role="tab"]:focus-visible,
+[role="menuitem"]:focus-visible,
+[tabindex]:focus-visible,
+.tree-item:focus-visible {
+  outline: 2px solid var(--accent-500) !important;
+  outline-offset: -2px !important;
   border-radius: var(--radius-sm);
+}
+
+/* Form controls: subtle border darkening on focus, no ring. */
+input:focus,
+input:focus-visible,
+textarea:focus,
+textarea:focus-visible,
+select:focus,
+select:focus-visible {
+  border-color: var(--border-strong) !important;
+  box-shadow: none !important;
+  background-color: var(--bg) !important;
 }
 
 ::selection {

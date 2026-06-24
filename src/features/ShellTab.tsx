@@ -383,7 +383,6 @@ export function ShellTab({
           <DriverCodePanel
             pipeline={lastPipeline}
             codeByLanguage={codeByLanguage}
-            title="Driver code for the last aggregate"
           />
         </div>
       )}

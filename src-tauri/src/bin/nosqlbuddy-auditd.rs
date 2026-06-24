@@ -53,8 +53,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Initialize the attestation manager with a sled store.
+    // Uses a separate sled path from the audit log's tree store to avoid lock conflicts.
     let attestation_manager = AttestationManager::default();
-    let sled_path = config.data_dir.join("audit").join("tree.sled");
+    let sled_path = config.data_dir.join("audit").join("attestation.sled");
     if sled_path.exists() || config.data_dir.join("audit").exists() {
         match SledTreeStore::open(&sled_path) {
             Ok(store) => {
@@ -67,7 +68,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let epoch_manager = EpochManager::default();
+    let epoch_manager = EpochManager::new(app_lib::audit::epoch::EpochConfig {
+        event_threshold: config.epoch_threshold,
+        time_threshold_secs: config.epoch_time_secs,
+    });
+    log::info!(
+        "epoch manager configured: threshold={} events, time={}s",
+        config.epoch_threshold, config.epoch_time_secs
+    );
     let change_streams = ChangeStreamRegistry::new();
 
     // Build the daemon state.
@@ -120,6 +128,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///   --circuit-dir <dir>           Circuit artifacts directory (for proof generation)
 ///   --ipfs-api <url>              IPFS Kubo HTTP API URL (default: http://127.0.0.1:5001)
 ///   --rpc-url <url>               Stellar Soroban RPC URL (default: testnet)
+///   --epoch-threshold <n>         Auto-close epoch after N events (default: 100, 0=disabled)
+///   --epoch-time-secs <s>         Auto-close epoch after S seconds (default: 0=disabled)
 ///   --help, -h                    Show help
 fn parse_args() -> DaemonConfig {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -180,6 +190,24 @@ fn parse_args() -> DaemonConfig {
                     config.rpc_url = args[i].clone();
                 }
             }
+            "--epoch-threshold" => {
+                i += 1;
+                if i < args.len() {
+                    config.epoch_threshold = args[i].parse().unwrap_or_else(|_| {
+                        eprintln!("error: --epoch-threshold must be a number");
+                        std::process::exit(1);
+                    });
+                }
+            }
+            "--epoch-time-secs" => {
+                i += 1;
+                if i < args.len() {
+                    config.epoch_time_secs = args[i].parse().unwrap_or_else(|_| {
+                        eprintln!("error: --epoch-time-secs must be a number");
+                        std::process::exit(1);
+                    });
+                }
+            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -219,6 +247,8 @@ fn print_help() {
           --circuit-dir <dir>      Circuit artifacts directory (for proof generation)\n\
           --ipfs-api <url>         IPFS Kubo HTTP API URL (default: http://127.0.0.1:5001)\n\
           --rpc-url <url>          Stellar Soroban RPC URL (default: testnet)\n\
+          --epoch-threshold <n>    Auto-close epoch after N events (default: 100, 0=disabled)\n\
+          --epoch-time-secs <s>    Auto-close epoch after S seconds (default: 0=disabled)\n\
           --help, -h               Show this help message\n\
         \n\
         Publisher mode endpoints (localhost:9173):\n\

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import commands, { type DocumentPage, type SqlLanguage } from "../ipc/commands";
 import { ResultsTable, type ResultsViewMode } from "../components/ResultsTable";
 import { toFilterId } from "../components/resultsDisplay";
@@ -9,6 +9,34 @@ import { VisualQueryBuilder } from "./VisualQueryBuilder";
 import { pushHistory, type QueryMode, fileExtension, fileFilter } from "./queryHistory";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
+import Prism from "prismjs";
+import "prismjs/components/prism-javascript";
+import "prismjs/components/prism-json";
+import "prismjs/components/prism-sql";
+import "prismjs/components/prism-python";
+import "prismjs/components/prism-java";
+import "prismjs/components/prism-csharp";
+import "prismjs/components/prism-ruby";
+import "prismjs/components/prism-bash";
+import { HighlightedTextarea } from "../components/HighlightedTextarea";
+
+/** Prism grammar name for each driver-code language. Mirrors the map
+ *  in DriverCodePanel so the SQL tab's read-only code block shares the
+ *  same highlighting vocabulary. */
+const PRISM_LANG: Record<SqlLanguage, string> = {
+  "node-js": "javascript",
+  python: "python",
+  java: "java",
+  "c-sharp": "csharp",
+  ruby: "ruby",
+  shell: "bash",
+};
+
+function highlightCode(code: string, grammarName: string): string {
+  const grammar = Prism.languages[grammarName];
+  if (!grammar) return code;
+  return Prism.highlight(code, grammar, grammarName);
+}
 
 export interface QueryTabProps {
   connectionId: string;
@@ -98,6 +126,103 @@ function parsePipeline(text: string): unknown[] {
   }
 }
 
+/** A compact dropdown menu for secondary pane actions. The dropdown is
+ *  rendered with `position: fixed` so it can never be clipped by an
+ *  overflow container. */
+function PaneActionsMenu({
+  items,
+}: {
+  items: {
+    id: string;
+    label: string;
+    hint?: string;
+    onClick: () => void;
+    disabled?: boolean;
+  }[];
+}) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left: number | null; right: number | null }>({ top: 0, left: 0, right: null });
+  const menuRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  const updatePosition = useCallback(() => {
+    const btn = triggerRef.current;
+    if (!btn) return;
+    const rect = btn.getBoundingClientRect();
+    const dropdownWidth = 160;
+    const gap = 4;
+    const top = rect.bottom + gap;
+    if (rect.left + dropdownWidth > window.innerWidth - 8) {
+      setPos({ top, left: null, right: window.innerWidth - rect.right });
+    } else {
+      setPos({ top, left: rect.left, right: null });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    updatePosition();
+    const onClick = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const onResize = () => updatePosition();
+    document.addEventListener("mousedown", onClick);
+    window.addEventListener("resize", onResize);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      window.removeEventListener("resize", onResize);
+    };
+  }, [open, updatePosition]);
+
+  return (
+    <div className="pane-actions-menu" ref={menuRef}>
+      <button
+        className="btn btn--sm pane-actions-menu__trigger"
+        ref={triggerRef}
+        onClick={() => {
+          if (!open) updatePosition();
+          setOpen((o) => !o);
+        }}
+        aria-label="More actions"
+        aria-expanded={open}
+        title="More actions"
+      >
+        More
+      </button>
+      {open && (
+        <div
+          className="pane-actions-menu__dropdown"
+          role="menu"
+          style={{
+            position: "fixed",
+            top: pos.top,
+            left: pos.left ?? undefined,
+            right: pos.right ?? undefined,
+          }}
+        >
+          {items.map((item) => (
+            <button
+              key={item.id}
+              className="pane-actions-menu__item"
+              role="menuitem"
+              disabled={item.disabled}
+              onClick={() => {
+                setOpen(false);
+                item.onClick();
+              }}
+            >
+              <span className="pane-actions-menu__label">{item.label}</span>
+              {item.hint && <span className="pane-actions-menu__hint">{item.hint}</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function QueryTab({
   connectionId,
   database,
@@ -113,6 +238,7 @@ export function QueryTab({
   const [projectionText, setProjectionText] = useState("");
   const [sortText, setSortText] = useState("");
   const [pipelineText, setPipelineText] = useState(DEFAULT_PIPELINE);
+  const [pipelineKey, setPipelineKey] = useState(0);
   const [sqlText, setSqlText] = useState(
     `SELECT * FROM ${collection} ORDER BY _id LIMIT 50`,
   );
@@ -147,6 +273,17 @@ export function QueryTab({
       return false;
     }
   }, [mode, filterText, projectionText, sortText, pipelineText]);
+
+  const sqlPipelineHtml = useMemo(() => {
+    if (!sqlResult) return "";
+    return highlightCode(JSON.stringify(sqlResult.pipeline, null, 2), "json");
+  }, [sqlResult]);
+
+  const sqlCodeHtml = useMemo(() => {
+    if (!sqlResult) return "";
+    const code = sqlResult.code[sqlLanguage] ?? "";
+    return highlightCode(code, PRISM_LANG[sqlLanguage]);
+  }, [sqlResult, sqlLanguage]);
 
   async function run() {
     if (!valid) {
@@ -308,6 +445,11 @@ export function QueryTab({
       }
       const text = await readTextFile(path);
       loadTextForMode(text);
+      if (mode === "aggregate") {
+        // Force the visual AggregationEditor to re-mount with the
+        // newly loaded pipeline.
+        setPipelineKey((k) => k + 1);
+      }
       setNotice(`Loaded from ${path}.`);
     } catch (e) {
       const msg = describeError(e);
@@ -463,47 +605,56 @@ export function QueryTab({
               ? `${page.documents.length} returned · ${page.executionMs ?? 0} ms`
               : "Idle"}
         </div>
-        <QueryHistoryPanel
-          connectionId={connectionId}
-          database={database}
-          collection={collection}
-          mode={mode as QueryMode}
-          currentText={currentTextForMode()}
-          onLoad={(text) => loadTextForMode(text)}
-          onError={(message) => setError(message)}
-          onNotice={(message) => setNotice(message)}
-        />
-        <button
-          className="btn btn--sm"
-          onClick={() => void handleSaveToFile()}
-          title={`Save the current ${mode} input to a ${fileExtension(mode as QueryMode)} file`}
-        >
-          Save {fileExtension(mode as QueryMode).toUpperCase()}…
-        </button>
-        <button
-          className="btn btn--sm"
-          onClick={() => void handleLoadFromFile()}
-          title={`Load the current ${mode} input from a ${fileExtension(mode as QueryMode)} file`}
-        >
-          Load {fileExtension(mode as QueryMode).toUpperCase()}…
-        </button>
-        <button
-          className="btn btn--sm"
-          onClick={() => setInsertOpen(true)}
-          title="Insert a new document into this collection"
-        >
-          Insert…
-        </button>
-        <button className="btn btn--sm" onClick={onClose}>
-          Close
-        </button>
-        <button
-          className="btn btn--primary btn--sm"
-          onClick={run}
-          disabled={!valid || running}
-        >
-          {running ? "Running…" : "Run"}
-        </button>
+        <div className="pane__actions">
+          <QueryHistoryPanel
+            connectionId={connectionId}
+            database={database}
+            collection={collection}
+            mode={mode as QueryMode}
+            currentText={currentTextForMode()}
+            onLoad={(text) => loadTextForMode(text)}
+            onError={(message) => setError(message)}
+            onNotice={(message) => setNotice(message)}
+          />
+          <button
+            className="btn btn--sm"
+            onClick={() => setInsertOpen(true)}
+            title="Insert a new document into this collection"
+          >
+            Insert
+          </button>
+          <PaneActionsMenu
+            items={[
+              {
+                id: "save",
+                label: `Save ${fileExtension(mode as QueryMode).toUpperCase()}`,
+                hint: `Save current ${mode} input`,
+                onClick: () => void handleSaveToFile(),
+              },
+              {
+                id: "load",
+                label: `Load ${fileExtension(mode as QueryMode).toUpperCase()}`,
+                hint: `Load ${mode} input from file`,
+                onClick: () => void handleLoadFromFile(),
+              },
+              {
+                id: "close",
+                label: "Close tab",
+                hint: "Close this query tab",
+                onClick: onClose,
+              },
+            ]}
+          />
+          {mode !== "aggregate" && (
+            <button
+              className="btn btn--primary btn--sm"
+              onClick={run}
+              disabled={!valid || running}
+            >
+              {running ? "Running…" : "Run"}
+            </button>
+          )}
+        </div>
       </div>
       <div className="split">
         <div className="editor">
@@ -581,11 +732,15 @@ export function QueryTab({
           {mode === "aggregate" && (
             <div className="pane__body">
               <AggregationEditor
+                key={pipelineKey}
                 connectionId={connectionId}
                 database={database}
                 collection={collection}
                 profile={profile ?? null}
                 onResult={onResult}
+                onPipelineChange={(pipeline) =>
+                  setPipelineText(JSON.stringify(pipeline, null, 2))
+                }
                 initialPipeline={parsePipeline(pipelineText)}
               />
             </div>
@@ -610,11 +765,12 @@ export function QueryTab({
                   <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>SQL</span>
                   <span className="kbd">Translated on Run</span>
                 </div>
-                <textarea
-                  className="editor__textarea"
+                <HighlightedTextarea
                   value={sqlText}
-                  onChange={(e) => setSqlText(e.target.value)}
+                  onChange={setSqlText}
+                  language="sql"
                   spellCheck={false}
+                  ariaLabel="SQL query"
                 />
               </div>
               <div>
@@ -624,9 +780,14 @@ export function QueryTab({
                   </span>
                 </div>
                 <pre className="json-view" style={{ background: "var(--surface)" }}>
-                  {sqlResult
-                    ? JSON.stringify(sqlResult.pipeline, null, 2)
-                    : "Run to translate."}
+                  {sqlResult ? (
+                    <code
+                      className="language-json"
+                      dangerouslySetInnerHTML={{ __html: sqlPipelineHtml }}
+                    />
+                  ) : (
+                    "Run to translate."
+                  )}
                 </pre>
                 {sqlResult && sqlResult.warnings.length > 0 && (
                   <div style={{ padding: "0 var(--space-3)" }}>
@@ -667,9 +828,14 @@ export function QueryTab({
                   )}
                 </div>
                 <pre className="json-view" style={{ background: "var(--surface)" }}>
-                  {sqlResult
-                    ? sqlResult.code[sqlLanguage] ?? "Run to generate."
-                    : "Run to generate."}
+                  {sqlResult ? (
+                    <code
+                      className={`language-${PRISM_LANG[sqlLanguage]}`}
+                      dangerouslySetInnerHTML={{ __html: sqlCodeHtml }}
+                    />
+                  ) : (
+                    "Run to generate."
+                  )}
                 </pre>
               </div>
             </div>

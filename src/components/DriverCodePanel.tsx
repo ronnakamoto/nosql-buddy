@@ -1,4 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
+import Prism from "prismjs";
+import "prismjs/components/prism-javascript";
+import "prismjs/components/prism-python";
+import "prismjs/components/prism-java";
+import "prismjs/components/prism-csharp";
+import "prismjs/components/prism-ruby";
+import "prismjs/components/prism-bash";
 import { type Language, type SqlLanguage, languageLabel } from "./driverCodeTypes";
 
 export interface DriverCodePanelProps {
@@ -8,8 +15,6 @@ export interface DriverCodePanelProps {
    *  the panel itself stays synchronous and easy to test. Missing
    *  entries fall back to a small built-in JS snippet. */
   codeByLanguage?: Partial<Record<Language, string>>;
-  /** Title shown at the top of the panel. */
-  title?: string;
   /** Initial language selection. */
   initialLanguage?: Language;
 }
@@ -23,6 +28,22 @@ const LANGUAGES: Language[] = [
   "shell",
 ];
 
+const PRISM_LANG: Record<Language, string> = {
+  "node-js": "javascript",
+  python: "python",
+  java: "java",
+  "c-sharp": "csharp",
+  ruby: "ruby",
+  shell: "bash",
+};
+
+function highlight(code: string, lang: Language): string {
+  const grammarName = PRISM_LANG[lang];
+  const grammar = Prism.languages[grammarName];
+  if (!grammar) return code;
+  return Prism.highlight(code, grammar, grammarName);
+}
+
 /**
  * Language dropdown + generated driver code + Copy-to-clipboard.
  * Used by the AggregationEditor's toolbar and Explain panel.
@@ -35,7 +56,6 @@ const LANGUAGES: Language[] = [
 export function DriverCodePanel({
   pipeline,
   codeByLanguage,
-  title = "Driver code",
   initialLanguage = "node-js",
 }: DriverCodePanelProps) {
   const [language, setLanguage] = useState<Language>(initialLanguage);
@@ -64,10 +84,14 @@ export function DriverCodePanel({
     }
   }
 
+  const highlightedCode = useMemo(() => {
+    if (!code) return "";
+    return highlight(code, language);
+  }, [code, language]);
+
   if (!pipeline || pipeline.length === 0) {
     return (
       <div className="driver-code-panel driver-code-panel--empty">
-        <div className="driver-code-panel__title">{title}</div>
         <p className="driver-code-panel__empty-msg">
           Run the pipeline first to generate driver code.
         </p>
@@ -78,19 +102,18 @@ export function DriverCodePanel({
   return (
     <div className="driver-code-panel">
       <div className="driver-code-panel__head">
-        <span className="driver-code-panel__title">{title}</span>
-        <select
-          className="input input--sm"
-          value={language}
-          onChange={(e) => setLanguage(e.target.value as Language)}
-          aria-label="Driver language"
-        >
+        <div className="driver-code-panel__lang-tabs">
           {LANGUAGES.map((l) => (
-            <option key={l} value={l}>
+            <button
+              key={l}
+              className={`driver-code-panel__lang-tab ${language === l ? "is-active" : ""}`}
+              onClick={() => setLanguage(l)}
+              aria-pressed={language === l}
+            >
               {languageLabel(l)}
-            </option>
+            </button>
           ))}
-        </select>
+        </div>
         <button
           className="btn btn--sm driver-code-panel__copy"
           onClick={() => void handleCopy()}
@@ -98,14 +121,17 @@ export function DriverCodePanel({
           title="Copy code to clipboard"
         >
           {copyState === "copied"
-            ? "Copied!"
+            ? "Copied"
             : copyState === "failed"
               ? "Copy failed"
               : "Copy"}
         </button>
       </div>
       <pre className="driver-code-panel__code">
-        <code>{code}</code>
+        <code
+          className={`language-${PRISM_LANG[language]}`}
+          dangerouslySetInnerHTML={{ __html: highlightedCode }}
+        />
       </pre>
     </div>
   );

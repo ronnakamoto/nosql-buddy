@@ -106,7 +106,8 @@ export function AggregationEditor({
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [codeOpen, setCodeOpen] = useState(false);
+  const [showCodeModal, setShowCodeModal] = useState(false);
+  const [showExplainModal, setShowExplainModal] = useState(false);
   const [resolvedUri, setResolvedUri] = useState<string>("");
   const [draggingKey, setDraggingKey] = useState<string | null>(null);
   const [showTemplates, setShowTemplates] = useState(false);
@@ -130,6 +131,20 @@ export function AggregationEditor({
   useEffect(() => {
     if (onPipelineChange) onPipelineChange(pipeline);
   }, [pipeline, onPipelineChange]);
+
+  // Close modals on Escape.
+  useEffect(() => {
+    if (!showCodeModal && !showExplainModal) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        setShowCodeModal(false);
+        setShowExplainModal(false);
+      }
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [showCodeModal, showExplainModal]);
 
   // Track whether the URI is still resolving so the code-fetch
   // effect can wait for it. Without this gate, opening the panel
@@ -174,7 +189,7 @@ export function AggregationEditor({
     Partial<Record<Language, string>>
   >({});
   useEffect(() => {
-    if (!codeOpen) return;
+    if (!showCodeModal) return;
     if (!profile) {
       setCodeByLanguage({});
       return;
@@ -222,7 +237,7 @@ export function AggregationEditor({
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [codeOpen, profile, resolvedUri, uriReady, database, collection, pipeline]);
+  }, [showCodeModal, profile, resolvedUri, uriReady, database, collection, pipeline]);
 
   async function run() {
     if (!allValid) {
@@ -268,6 +283,7 @@ export function AggregationEditor({
         JSON.stringify(pipeline),
       );
       setExplainResult(result);
+      setShowExplainModal(true);
       setNotice("Explain completed.");
     } catch (e) {
       setError(`Explain failed: ${describeError(e)}`);
@@ -311,6 +327,8 @@ export function AggregationEditor({
     setStages([]);
     setPage(null);
     setExplainResult(null);
+    setShowCodeModal(false);
+    setShowExplainModal(false);
     setNotice(null);
     setError(null);
   }
@@ -342,12 +360,11 @@ export function AggregationEditor({
         </button>
         <button
           className="btn btn--sm"
-          onClick={() => setCodeOpen((v) => !v)}
+          onClick={() => setShowCodeModal(true)}
           disabled={pipeline.length === 0}
           title="Generate driver code for the current pipeline"
-          aria-expanded={codeOpen}
         >
-          {codeOpen ? "Hide code" : "Code"}
+          Code
         </button>
         <span className="agg-editor__sub">
           {stages.length === 0
@@ -379,21 +396,6 @@ export function AggregationEditor({
           )}
         </div>
       </div>
-      {codeOpen && (
-        <div className="agg-editor__code">
-          {!profile && (
-            <div className="agg-editor__notice">
-              Connect to a profile to embed your real Mongo URI in the generated code.
-            </div>
-          )}
-          <DriverCodePanel
-            pipeline={pipeline}
-            codeByLanguage={codeByLanguage}
-            title="Driver code for this pipeline"
-            initialLanguage="node-js"
-          />
-        </div>
-      )}
       {error && (
         <div className="toast toast--error" style={{ margin: "0 var(--space-3) var(--space-2)" }}>
           {error}
@@ -478,19 +480,89 @@ export function AggregationEditor({
           />
         </div>
       )}
-      {explainResult && (
-        <div className="agg-editor__explain">
-          <div className="agg-editor__explain-head">
-            <h3>Explain plan</h3>
-            <button
-              className="btn btn--sm"
-              onClick={() => setCodeOpen(true)}
-              title="Open the driver-code panel"
-            >
-              Code
-            </button>
+      {showCodeModal && (
+        <div
+          className="modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Driver code"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setShowCodeModal(false);
+          }}
+        >
+          <div className="modal modal--code" style={{ width: "min(760px, 92vw)" }}>
+            <div className="modal__header">
+              <div className="modal__heading">
+                <h2 className="modal__title">Driver code</h2>
+                <span className="modal__subtitle">
+                  {stages.length} stage{stages.length === 1 ? "" : "s"} · {database}.{collection}
+                </span>
+              </div>
+              <button
+                className="modal__close"
+                onClick={() => setShowCodeModal(false)}
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+            <div className="modal__body modal__body--flush">
+              {!profile && (
+                <div className="modal__notice">
+                  Connect to a profile to embed your real Mongo URI in the generated code.
+                </div>
+              )}
+              <DriverCodePanel
+                pipeline={pipeline}
+                codeByLanguage={codeByLanguage}
+                initialLanguage="node-js"
+              />
+            </div>
+            <div className="modal__footer">
+              <span className="modal__footer-hint">Esc to close</span>
+              <button className="btn btn--sm" onClick={() => setShowCodeModal(false)}>
+                Close
+              </button>
+            </div>
           </div>
-          <ExplainTree raw={explainResult} />
+        </div>
+      )}
+      {showExplainModal && (
+        <div
+          className="modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Explain plan"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setShowExplainModal(false);
+          }}
+        >
+          <div className="modal modal--explain" style={{ width: "min(760px, 92vw)" }}>
+            <div className="modal__header">
+              <div className="modal__heading">
+                <h2 className="modal__title">Explain plan</h2>
+                <span className="modal__subtitle">
+                  {database}.{collection}
+                </span>
+              </div>
+              <button
+                className="modal__close"
+                onClick={() => setShowExplainModal(false)}
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+            <div className="modal__body modal__body--flush">
+              {explainResult && <ExplainTree raw={explainResult} />}
+            </div>
+            <div className="modal__footer">
+              <span className="modal__footer-hint">Esc to close</span>
+              <button className="btn btn--sm" onClick={() => setShowExplainModal(false)}>
+                Close
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

@@ -89,6 +89,9 @@ cargo build --bin nosqlbuddy-auditd
 **Publisher mode** — captures writes, manages epochs, publishes to IPFS, commits roots on-chain:
 
 ```bash
+# All daemon commands run from src-tauri/
+cd src-tauri
+
 # Basic: connect to MongoDB and listen for changes
 cargo run --bin nosqlbuddy-auditd -- \
   --mode publish \
@@ -106,6 +109,7 @@ cargo run --bin nosqlbuddy-auditd -- \
 **Reader mode** — verifies local audit log against on-chain commitments (no MongoDB connection needed):
 
 ```bash
+cd src-tauri
 cargo run --bin nosqlbuddy-auditd -- \
   --mode read \
   --data-dir ~/.local/share/nosqlbuddy-auditd
@@ -122,6 +126,8 @@ cargo run --bin nosqlbuddy-auditd -- \
 | `--circuit-dir <dir>` | — | Circuit artifacts dir (for `/proof/:index`) |
 | `--ipfs-api <url>` | `http://127.0.0.1:5001` | IPFS Kubo HTTP API URL |
 | `--rpc-url <url>` | Stellar testnet | Soroban RPC URL |
+| `--epoch-threshold <n>` | `100` | Auto-close epoch after N events (0=disabled) |
+| `--epoch-time-secs <s>` | `0` | Auto-close epoch after S seconds (0=disabled) |
 | `--help` | — | Show help |
 
 ### HTTP API
@@ -172,8 +178,8 @@ All endpoints are on `http://localhost:9173`. Both modes share common endpoints;
 # 1. Start IPFS daemon
 ipfs daemon &
 
-# 2. Start the audit daemon in publisher mode
-cargo run --bin nosqlbuddy-auditd -- \
+# 2. Start the audit daemon in publisher mode (from src-tauri/)
+cd src-tauri && cargo run --bin nosqlbuddy-auditd -- \
   --mode publish \
   --mongo-uri "mongodb://localhost:27017"
 

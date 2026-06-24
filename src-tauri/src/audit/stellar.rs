@@ -20,7 +20,10 @@ use crate::error::{AppError, AppResult};
 pub const CONTRACT_ID: &str = "CCUCFDRF6IMY3STBIFRBBGFFPETBSAPPTDACNOBYWKNPG5QUCAMGGUQ5";
 
 /// The Stellar identity name authorized to commit roots.
-pub const SOURCE_IDENTITY: &str = "spike";
+/// Override with the `STELLAR_IDENTITY` environment variable.
+fn source_identity() -> String {
+    std::env::var("STELLAR_IDENTITY").unwrap_or_else(|_| "spike".to_string())
+}
 
 /// The Stellar network to use.
 pub const NETWORK: &str = "testnet";
@@ -64,7 +67,7 @@ pub fn commit_root(root_hex: &str, metadata: &str) -> AppResult<CommitResult> {
         "contract",
         "invoke",
         "--source",
-        SOURCE_IDENTITY,
+        &source_identity(),
         "--network",
         NETWORK,
         "--id",
@@ -78,9 +81,7 @@ pub fn commit_root(root_hex: &str, metadata: &str) -> AppResult<CommitResult> {
     ])?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let sequence: u64 = stdout
-        .trim()
-        .parse()
+    let sequence: u64 = parse_u64_output(stdout.trim())
         .map_err(|e| AppError::Validation(format!("failed to parse commit_root sequence: {e} (stdout: {stdout})")))?;
 
     // Extract the tx hash from stderr (the CLI prints it to stderr).
@@ -100,7 +101,7 @@ pub fn get_current_root() -> AppResult<Option<OnChainRoot>> {
         "contract",
         "invoke",
         "--source",
-        SOURCE_IDENTITY,
+        &source_identity(),
         "--network",
         NETWORK,
         "--id",
@@ -131,7 +132,7 @@ pub fn get_root_history(limit: u32) -> AppResult<Vec<OnChainRoot>> {
         "contract",
         "invoke",
         "--source",
-        SOURCE_IDENTITY,
+        &source_identity(),
         "--network",
         NETWORK,
         "--id",
@@ -159,18 +160,34 @@ pub fn get_root_history(limit: u32) -> AppResult<Vec<OnChainRoot>> {
 
 /// Run the `stellar` CLI with the given arguments.
 fn run_stellar_cli(args: &[&str]) -> AppResult<std::process::Output> {
+    let identity = source_identity();
     Command::new("stellar")
         .args(args)
         .output()
-        .map_err(|e| AppError::Validation(format!("failed to run stellar CLI: {e}")))
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                AppError::Validation(
+                    "stellar CLI not found in PATH. Install it: https://docs.stellar.org/tools/developer-tools/cli/install".to_string(),
+                )
+            } else {
+                AppError::Validation(format!("failed to run stellar CLI: {e}"))
+            }
+        })
         .and_then(|output| {
             if output.status.success() {
                 Ok(output)
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                Err(AppError::Validation(format!(
-                    "stellar CLI failed: {stderr}"
-                )))
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let mut msg = format!("stellar CLI failed: {stderr}");
+                if stderr.contains("identity") || stderr.contains("signing key") {
+                    msg = format!("{msg}\n\nHINT: identity '{identity}' not found. Create it with:\n  stellar keys generate --global {identity} --network testnet\n\nOr set another identity via STELLAR_IDENTITY env var.");
+                } else if stderr.contains("network") {
+                    msg = format!("{msg}\n\nHINT: add testnet with:\n  stellar network add testnet --rpc-url https://soroban-testnet.stellar.org:443 --global");
+                } else if !stdout.is_empty() {
+                    msg = format!("{msg}\nstdout: {stdout}");
+                }
+                Err(AppError::Validation(msg))
             }
         })
 }
@@ -192,13 +209,70 @@ fn extract_tx_hash(stderr: &str) -> Option<String> {
 }
 
 /// Parse a RootEntry from the stellar CLI's output format.
-/// The CLI prints struct results as:
-///   {"vec":[{"u64":"1"},{"bytes":"0000..."},{"u64":"1782..."},{"string":"metadata"}]}
+///
+/// The stellar CLI's output format has changed across versions:
+///
+/// - **New (>=22, flat JSON)**: the CLI prints struct results as a flat JSON
+///   object with field names matching the contract struct:
+///   `{"metadata":"...","root":"2e1a...","sequence":2,"timestamp":1782276789}`
+///
+/// - **Old (<=21, typed vec)**: the CLI printed struct results as a JSON-like
+///   structure with typed values:
+///   `{"vec":[{"u64":"1"},{"bytes":"0000..."},{"u64":"1782..."},{"string":"metadata"}]}`
+///
+/// We try the new flat-JSON format first (via serde_json), then fall back to
+/// the legacy typed-vec parser so both CLI versions keep working.
 fn parse_root_entry(s: &str) -> AppResult<OnChainRoot> {
-    // Try to parse as a Soroban CLI value. The format is a JSON-like
-    // structure with typed values. We use a loose parser.
     let s = s.trim();
 
+    // Try the new flat-JSON format first.
+    if let Ok(entry) = parse_root_entry_flat(s) {
+        return Ok(entry);
+    }
+
+    // Fall back to the legacy typed-vec format.
+    parse_root_entry_legacy(s)
+}
+
+/// Parse the new (stellar CLI >=22) flat JSON output format.
+fn parse_root_entry_flat(s: &str) -> AppResult<OnChainRoot> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FlatRoot {
+        sequence: serde_json::Number,
+        root: String,
+        timestamp: serde_json::Number,
+        #[serde(default)]
+        metadata: String,
+    }
+
+    let flat: FlatRoot = serde_json::from_str(s)
+        .map_err(|e| AppError::Validation(format!("parse flat root entry: {e}")))?;
+
+    let sequence = flat
+        .sequence
+        .as_u64()
+        .ok_or_else(|| AppError::Validation(format!("sequence is not a u64: {}", flat.sequence)))?;
+    let timestamp = flat
+        .timestamp
+        .as_u64()
+        .ok_or_else(|| AppError::Validation(format!("timestamp is not a u64: {}", flat.timestamp)))?;
+
+    // The CLI may print the root as a hex string (with or without a "0x"
+    // prefix). Normalize to bare lowercase hex.
+    let root_hex = flat.root.trim().trim_start_matches("0x").to_lowercase();
+
+    Ok(OnChainRoot {
+        sequence,
+        root_hex,
+        timestamp,
+        metadata: flat.metadata,
+    })
+}
+
+/// Parse the legacy (stellar CLI <=21) typed-vec output format:
+///   {"vec":[{"u64":"1"},{"bytes":"0000..."},{"u64":"1782..."},{"string":"metadata"}]}
+fn parse_root_entry_legacy(s: &str) -> AppResult<OnChainRoot> {
     // Extract the sequence (first u64)
     let sequence = extract_typed_value(s, "u64", 0)?
         .parse::<u64>()
@@ -223,7 +297,35 @@ fn parse_root_entry(s: &str) -> AppResult<OnChainRoot> {
     })
 }
 
-/// Extract the Nth occurrence of a typed value from the CLI output.
+/// Parse a `u64` from the stellar CLI's stdout for a `u64`-returning invocation.
+///
+/// The stellar CLI prints a bare `u64` return value differently across
+/// versions:
+/// - New (>=22): a bare number, e.g. `3`
+/// - Old (<=21): a typed JSON value, e.g. `"3"` or `{"u64":"3"}`
+///
+/// This helper handles all of these.
+fn parse_u64_output(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    // Bare number (new CLI).
+    if let Ok(n) = s.parse::<u64>() {
+        return Ok(n);
+    }
+    // Quoted number, e.g. `"3"`.
+    let unquoted = s.trim_matches('"');
+    if let Ok(n) = unquoted.parse::<u64>() {
+        return Ok(n);
+    }
+    // Typed JSON value, e.g. `{"u64":"3"}` (legacy CLI).
+    if let Ok(v) = extract_typed_value(s, "u64", 0) {
+        if let Ok(n) = v.parse::<u64>() {
+            return Ok(n);
+        }
+    }
+    Err(format!("unrecognized u64 output: {s:?}"))
+}
+
+
 /// e.g., extract_typed_value(s, "u64", 0) extracts the first {"u64":"..."} value.
 fn extract_typed_value(s: &str, type_name: &str, n: usize) -> AppResult<String> {
     let pattern = format!("\"{type_name}\":\"");
@@ -286,6 +388,49 @@ mod tests {
         );
         assert_eq!(entry.timestamp, 1782230809);
         assert_eq!(entry.metadata, "test commit");
+    }
+
+    #[test]
+    fn parse_root_entry_parses_new_flat_format() {
+        // Output from stellar CLI 27.0.0 (real captured output).
+        let s = r#"{"metadata":"events=2 leaves=2","root":"2e1a1c70812d9e9c445800c9e63c7f13b0b9bd2c57a528121d7911e0f7b1a18b","sequence":2,"timestamp":1782276789}"#;
+        let entry = parse_root_entry(s).unwrap();
+        assert_eq!(entry.sequence, 2);
+        assert_eq!(
+            entry.root_hex,
+            "2e1a1c70812d9e9c445800c9e63c7f13b0b9bd2c57a528121d7911e0f7b1a18b"
+        );
+        assert_eq!(entry.timestamp, 1782276789);
+        assert_eq!(entry.metadata, "events=2 leaves=2");
+    }
+
+    #[test]
+    fn parse_root_entry_flat_strips_0x_prefix() {
+        let s = r#"{"metadata":"","root":"0x2e1a1c","sequence":5,"timestamp":1}"#;
+        let entry = parse_root_entry(s).unwrap();
+        assert_eq!(entry.root_hex, "2e1a1c");
+        assert_eq!(entry.sequence, 5);
+    }
+
+    #[test]
+    fn parse_u64_output_handles_bare_number() {
+        assert_eq!(parse_u64_output("3").unwrap(), 3);
+        assert_eq!(parse_u64_output("  42 \n").unwrap(), 42);
+    }
+
+    #[test]
+    fn parse_u64_output_handles_quoted_number() {
+        assert_eq!(parse_u64_output("\"7\"").unwrap(), 7);
+    }
+
+    #[test]
+    fn parse_u64_output_handles_typed_legacy() {
+        assert_eq!(parse_u64_output(r#"{"u64":"9"}"#).unwrap(), 9);
+    }
+
+    #[test]
+    fn parse_u64_output_rejects_garbage() {
+        assert!(parse_u64_output("not a number").is_err());
     }
 
     #[test]

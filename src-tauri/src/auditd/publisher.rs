@@ -137,7 +137,7 @@ pub async fn publish_ipfs(
         String::new()
     };
 
-    let batch_content = extract_epoch_batch(&events_jsonl, epoch.start_index, end_index);
+    let batch_content = super::extract_epoch_batch(&events_jsonl, epoch.start_index, end_index);
     if batch_content.is_empty() {
         return Err(ApiError(AppError::Validation(format!(
             "no events found for epoch {epoch_number} (range {}-{})",
@@ -298,68 +298,3 @@ pub async fn get_threshold(
     Ok(Json(state.attestation_manager.threshold()))
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────
-
-/// Extract JSONL lines for events in the given index range (inclusive).
-fn extract_epoch_batch(jsonl: &str, start_index: u64, end_index: u64) -> String {
-    jsonl
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
-                return None;
-            }
-            let ev: serde_json::Value = serde_json::from_str(line).ok()?;
-            let index = ev.get("index")?.as_u64()?;
-            if index >= start_index && index <= end_index {
-                Some(line.to_string())
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn extract_epoch_batch_filters_by_range() {
-        let jsonl = [
-            r#"{"index":0,"operation":"insert"}"#,
-            r#"{"index":1,"operation":"update"}"#,
-            r#"{"index":2,"operation":"delete"}"#,
-            r#"{"index":3,"operation":"insert"}"#,
-        ]
-        .join("\n");
-
-        let batch = extract_epoch_batch(&jsonl, 1, 2);
-        assert_eq!(batch.lines().count(), 2);
-        assert!(batch.contains(r#""index":1"#));
-        assert!(batch.contains(r#""index":2"#));
-        assert!(!batch.contains(r#""index":0"#));
-        assert!(!batch.contains(r#""index":3"#));
-    }
-
-    #[test]
-    fn extract_epoch_batch_empty_range() {
-        let jsonl = r#"{"index":0,"operation":"insert"}"#;
-        let batch = extract_epoch_batch(jsonl, 5, 10);
-        assert!(batch.is_empty());
-    }
-
-    #[test]
-    fn extract_epoch_batch_skips_invalid_lines() {
-        let jsonl = [
-            r#"{"index":0,"operation":"insert"}"#,
-            "not valid json",
-            r#"{"index":1,"operation":"update"}"#,
-        ]
-        .join("\n");
-
-        let batch = extract_epoch_batch(&jsonl, 0, 1);
-        assert_eq!(batch.lines().count(), 2);
-    }
-}

@@ -21,12 +21,14 @@
     "@visx/text": "^4.0.0",
     "@visx/tooltip": "^4.0.0",
     "circomlib": "^2.0.5",
+    "prismjs": "^1.30.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.1",
     "@tauri-apps/cli": "^2.1.0",
+    "@types/prismjs": "^1.26.6",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",

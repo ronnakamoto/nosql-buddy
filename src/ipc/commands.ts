@@ -5,6 +5,22 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
+/** Format a Tauri/Rust error for display. Errors are serialized as `{ kind, message }`. */
+export function formatError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  if (err && typeof err === "object") {
+    const obj = err as Record<string, unknown>;
+    if (typeof obj.message === "string") return obj.message;
+    if (typeof obj.error === "string") return obj.error;
+    if (typeof obj.kind === "string" && typeof obj.message === "string") {
+      return `${obj.kind}: ${obj.message}`;
+    }
+    return JSON.stringify(err);
+  }
+  return String(err);
+}
+
 /** Profile summary as shown in the connection tree. */
 export interface ProfileSummary {
   id: string;

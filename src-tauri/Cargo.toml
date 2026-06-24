@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "NoSQLBuddy: a cross-platform MongoDB management studio"
 edition = "2021"
 rust-version = "1.77"
+default-run = "nosql-buddy"
 
 [lib]
 name = "app_lib"

@@ -218,6 +218,11 @@ impl EpochManager {
             .collect()
     }
 
+    /// Get the current epoch configuration.
+    pub fn config(&self) -> EpochConfig {
+        self.config.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     /// Update the epoch configuration.
     pub fn set_config(&self, config: EpochConfig) {
         let mut guard = self.config.lock().unwrap_or_else(|e| e.into_inner());

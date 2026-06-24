@@ -50,6 +50,8 @@ pub struct DaemonConfig {
     pub circuit_dir: Option<PathBuf>,
     pub ipfs_api_url: String,
     pub rpc_url: String,
+    pub epoch_threshold: usize,
+    pub epoch_time_secs: u64,
 }
 
 impl Default for DaemonConfig {
@@ -64,6 +66,8 @@ impl Default for DaemonConfig {
             circuit_dir: None,
             ipfs_api_url: "http://127.0.0.1:5001".to_string(),
             rpc_url: crate::audit::stellar_rpc::TESTNET_RPC_URL.to_string(),
+            epoch_threshold: 100,
+            epoch_time_secs: 0,
         }
     }
 }
@@ -175,13 +179,160 @@ pub fn build_router(state: Arc<DaemonState>) -> axum::Router {
 }
 
 /// Start the HTTP server on the configured port.
+/// In publisher mode, also spawns the auto-commit background task.
 pub async fn run_server(state: Arc<DaemonState>, port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
+
+    // Spawn auto-commit loop in publisher mode.
+    if state.mode == DaemonMode::Publish {
+        let auto_state = state.clone();
+        tokio::spawn(async move {
+            auto_commit_loop(auto_state).await;
+        });
+        log::info!("auto-commit background task started (epoch threshold: {} events)", state.epoch_manager.config().event_threshold);
+    }
+
     let router = build_router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     log::info!("nosqlbuddy-auditd listening on http://{addr}");
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+/// Background task that monitors the audit log for new events, feeds them
+/// into the epoch manager, and when an epoch auto-closes, publishes the
+/// batch to IPFS and commits the root to Stellar.
+async fn auto_commit_loop(state: Arc<DaemonState>) {
+    let mut last_event_count: usize = state.audit_log.event_count();
+
+    // If there are already events at startup, fast-forward the epoch manager
+    // to the current count without triggering commits for past events.
+    if last_event_count > 0 {
+        for i in 0..last_event_count as u64 {
+            let _ = state.epoch_manager.record_event(i, &state.audit_log);
+        }
+        log::info!(
+            "auto-commit: fast-forwarded epoch manager past {last_event_count} existing events"
+        );
+    }
+
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+        let current_count = state.audit_log.event_count();
+        if current_count == last_event_count {
+            continue;
+        }
+
+        // Feed new events into the epoch manager.
+        for i in last_event_count as u64..current_count as u64 {
+            match state.epoch_manager.record_event(i, &state.audit_log) {
+                Ok(Some(closed_epoch)) => {
+                    log::info!(
+                        "auto-commit: epoch {} closed ({} events), publishing + committing...",
+                        closed_epoch.epoch_number,
+                        closed_epoch.event_count
+                    );
+                    if let Err(e) = publish_and_commit(&state, &closed_epoch).await {
+                        log::error!(
+                            "auto-commit: failed for epoch {}: {e}",
+                            closed_epoch.epoch_number
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!("auto-commit: record_event error for index {i}: {e}");
+                }
+            }
+        }
+
+        last_event_count = current_count;
+    }
+}
+
+/// Publish an epoch's events to IPFS and commit the root to Stellar.
+async fn publish_and_commit(
+    state: &DaemonState,
+    epoch: &crate::audit::epoch::Epoch,
+) -> Result<(), String> {
+    let epoch_number = epoch.epoch_number;
+    let end_index = epoch.end_index.ok_or("epoch has no end_index")?;
+
+    // 1. Publish to IPFS.
+    let events_path = state.data_dir.join("audit").join("events.jsonl");
+    let events_jsonl = if events_path.exists() {
+        std::fs::read_to_string(&events_path).map_err(|e| format!("read events.jsonl: {e}"))?
+    } else {
+        String::new()
+    };
+
+    let batch_content = extract_epoch_batch(&events_jsonl, epoch.start_index, end_index);
+    if !batch_content.is_empty() {
+        match crate::audit::ipfs::publish_epoch_batch(&state.ipfs_config, epoch_number, &batch_content).await {
+            Ok(result) => {
+                log::info!("auto-commit: epoch {epoch_number} published to IPFS, CID: {}", result.cid);
+                let _ = state.audit_log.save_ipfs_cid(epoch_number, &result.cid);
+            }
+            Err(e) => {
+                log::warn!("auto-commit: IPFS publish failed for epoch {epoch_number}: {e} — committing without CID");
+            }
+        }
+    }
+
+    // 2. Commit root to Stellar.
+    let root_hex = epoch.root_hex.clone().unwrap_or_else(|| {
+        state.audit_log.root_hex().unwrap_or_default()
+    });
+
+    let cid = state.audit_log.load_ipfs_cid(epoch_number).ok().flatten();
+    let metadata = match &cid {
+        Some(c) => format!("epoch={epoch_number} cid={c}"),
+        None => format!("epoch={epoch_number}"),
+    };
+
+    let root_clone = root_hex.clone();
+    let metadata_clone = metadata.clone();
+    let commit_result = tokio::task::spawn_blocking(move || {
+        crate::audit::stellar::commit_root(&root_clone, &metadata_clone)
+    })
+    .await
+    .map_err(|e| format!("commit_root task join: {e}"))?
+    .map_err(|e| format!("commit_root: {e}"))?;
+
+    log::info!(
+        "auto-commit: epoch {epoch_number} committed on-chain, tx: {}",
+        commit_result.tx_hash
+    );
+
+    // 3. Mark epoch as committed.
+    state
+        .epoch_manager
+        .mark_committed(epoch_number, commit_result.tx_hash)
+        .map_err(|e| format!("mark_committed: {e}"))?;
+
+    Ok(())
+}
+
+/// Extract JSONL lines for events in the given index range (inclusive).
+fn extract_epoch_batch(jsonl: &str, start_index: u64, end_index: u64) -> String {
+    jsonl
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let ev: serde_json::Value = serde_json::from_str(line).ok()?;
+            let index = ev.get("index")?.as_u64()?;
+            if index >= start_index && index <= end_index {
+                Some(line.to_string())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ─── Common handlers (shared by both modes) ───────────────────────────
@@ -281,5 +432,43 @@ mod tests {
         assert_eq!(json, "\"publish\"");
         let json = serde_json::to_string(&DaemonMode::Read).unwrap();
         assert_eq!(json, "\"read\"");
+    }
+
+    #[test]
+    fn extract_epoch_batch_filters_by_range() {
+        let jsonl = [
+            r#"{"index":0,"operation":"insert"}"#,
+            r#"{"index":1,"operation":"update"}"#,
+            r#"{"index":2,"operation":"delete"}"#,
+            r#"{"index":3,"operation":"insert"}"#,
+        ]
+        .join("\n");
+
+        let batch = extract_epoch_batch(&jsonl, 1, 2);
+        assert_eq!(batch.lines().count(), 2);
+        assert!(batch.contains(r#""index":1"#));
+        assert!(batch.contains(r#""index":2"#));
+        assert!(!batch.contains(r#""index":0"#));
+        assert!(!batch.contains(r#""index":3"#));
+    }
+
+    #[test]
+    fn extract_epoch_batch_empty_range() {
+        let jsonl = r#"{"index":0,"operation":"insert"}"#;
+        let batch = extract_epoch_batch(jsonl, 5, 10);
+        assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn extract_epoch_batch_skips_invalid_lines() {
+        let jsonl = [
+            r#"{"index":0,"operation":"insert"}"#,
+            "not valid json",
+            r#"{"index":1,"operation":"update"}"#,
+        ]
+        .join("\n");
+
+        let batch = extract_epoch_batch(&jsonl, 0, 1);
+        assert_eq!(batch.lines().count(), 2);
     }
 }

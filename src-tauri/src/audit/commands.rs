@@ -202,6 +202,22 @@ pub async fn audit_commit_root(
     let root_bytes = root_bigint.to_bytes_be();
     let root_hex = hex::encode(&root_bytes);
 
+    // Check if this root is already committed on-chain to avoid
+    // RootAlreadyCommitted errors.
+    let root_hex_check = root_hex.clone();
+    let onchain = tokio::task::spawn_blocking(move || stellar::get_current_root())
+        .await
+        .map_err(|e| AppError::Validation(format!("get_current_root task join: {e}")))??;
+    if let Some(ref entry) = onchain {
+        if entry.root_hex == root_hex_check {
+            return Err(AppError::Validation(format!(
+                "root 0x{}.. is already committed on-chain (seq #{}). New audit events are needed to produce a different root.",
+                &root_hex_check[..16],
+                entry.sequence
+            )));
+        }
+    }
+
     let meta = metadata.unwrap_or_else(|| {
         format!(
             "events={} leaves={}",

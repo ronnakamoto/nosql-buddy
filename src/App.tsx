@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import commands, {
   type AppInfo,
   type AppSettings,
@@ -34,6 +34,115 @@ interface ActiveConnection {
   profile: ProfileSummary;
   databases: DatabaseSummary[];
   collections: Record<string, CollectionSummary[]>;
+}
+
+/** A unified "new tab" button with a fixed-positioned dropdown menu.
+ *  The button lives inside the scrollable `.tabs` list so it sits right
+ *  after the last tab. The dropdown is rendered with `position: fixed`
+ *  so it escapes the `overflow: auto` clipping context and repositions
+ *  itself when it would overflow the right edge of the viewport. */
+function NewTabMenu({
+  onNewQuery,
+  onNewShell,
+  onOpenAudit,
+}: {
+  onNewQuery: () => void;
+  onNewShell: () => void;
+  onOpenAudit: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left: number | null; right: number | null }>({ top: 0, left: 0, right: null });
+  const menuRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  const updatePosition = useCallback(() => {
+    const btn = triggerRef.current;
+    if (!btn) return;
+    const rect = btn.getBoundingClientRect();
+    const dropdownWidth = 200;
+    const gap = 4;
+    const top = rect.bottom + gap;
+    if (rect.left + dropdownWidth > window.innerWidth - 8) {
+      setPos({ top, left: null, right: window.innerWidth - rect.right });
+    } else {
+      setPos({ top, left: rect.left, right: null });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    updatePosition();
+    const onClick = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const onResize = () => updatePosition();
+    document.addEventListener("mousedown", onClick);
+    window.addEventListener("resize", onResize);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      window.removeEventListener("resize", onResize);
+    };
+  }, [open, updatePosition]);
+
+  return (
+    <div className="new-tab-menu" ref={menuRef}>
+      <button
+        className="new-tab-menu__trigger"
+        ref={triggerRef}
+        onClick={() => {
+          if (!open) updatePosition();
+          setOpen((o) => !o);
+        }}
+        aria-label="New tab"
+        aria-expanded={open}
+        title="New tab"
+      >
+        +
+      </button>
+      {open && (
+        <div
+          className="new-tab-menu__dropdown"
+          role="menu"
+          style={{
+            position: "fixed",
+            top: pos.top,
+            left: pos.left ?? undefined,
+            right: pos.right ?? undefined,
+          }}
+        >
+          <button
+            className="new-tab-menu__item"
+            role="menuitem"
+            onClick={() => { setOpen(false); onNewQuery(); }}
+          >
+            <span className="new-tab-menu__icon" aria-hidden="true">⌕</span>
+            <span className="new-tab-menu__label">Query</span>
+            <span className="new-tab-menu__hint">Find documents</span>
+          </button>
+          <button
+            className="new-tab-menu__item"
+            role="menuitem"
+            onClick={() => { setOpen(false); onNewShell(); }}
+          >
+            <span className="new-tab-menu__icon" aria-hidden="true">›</span>
+            <span className="new-tab-menu__label">Shell</span>
+            <span className="new-tab-menu__hint">Run mongosh</span>
+          </button>
+          <button
+            className="new-tab-menu__item"
+            role="menuitem"
+            onClick={() => { setOpen(false); onOpenAudit(); }}
+          >
+            <span className="new-tab-menu__icon" aria-hidden="true">⊕</span>
+            <span className="new-tab-menu__label">Audit Log</span>
+            <span className="new-tab-menu__hint">ZK tamper-evident log</span>
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function App() {
@@ -269,52 +378,67 @@ export default function App() {
           );
           return (
             <div key={db.name} className="tree-group">
-              <div className="tree-group__label">{db.name}</div>
+              <div className="tree-group__header">
+                <span className="tree-group__icon" aria-hidden="true">▤</span>
+                <span className="tree-group__label">{db.name}</span>
+                <span className="tree-group__count">{collections.length} collections</span>
+              </div>
               {collections.length === 0 && (
-                <div className="tree-item" style={{ color: "var(--ink-faint)" }}>
+                <div className="tree-item" style={{ color: "var(--ink-faint)", cursor: "default" }}>
                   <span className="tree-item__name">No collections</span>
                 </div>
               )}
               {collections.map((c) => (
                 <div key={`${db.name}.${c.name}`}>
-                  <div className="tree-item" onDoubleClick={() => openQueryTab(active.handle.connectionId, db.name, c.name)}>
-                    <span className="tree-item__icon" aria-hidden="true">
-                      ▢
-                    </span>
+                  <div
+                    className="tree-item tree-item--collection"
+                    onClick={() => openQueryTab(active.handle.connectionId, db.name, c.name)}
+                    title={`${db.name}.${c.name}`}
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") openQueryTab(active.handle.connectionId, db.name, c.name);
+                    }}
+                  >
+                    <span className="tree-item__icon" aria-hidden="true">◫</span>
                     <span className="tree-item__name">{c.name}</span>
                     <span className="tree-item__meta">
                       {c.documentCount != null ? formatNumber(c.documentCount) : ""}
                     </span>
-                    <button
-                      className="btn btn--ghost btn--sm"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openQueryTab(active.handle.connectionId, db.name, c.name);
-                      }}
-                      title="Open query tab"
-                    >
-                      Find
-                    </button>
-                    <button
-                      className="btn btn--ghost btn--sm"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openIndexTab(active.handle.connectionId, db.name, c.name);
-                      }}
-                      title="Open indexes"
-                    >
-                      Indexes
-                    </button>
-                    <button
-                      className="btn btn--ghost btn--sm"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openSchemaTab(active.handle.connectionId, db.name, c.name);
-                      }}
-                      title="Open schema"
-                    >
-                      Schema
-                    </button>
+                    <span className="tree-item__actions" role="group" aria-label="Collection actions">
+                      <button
+                        className="tree-item__action"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openQueryTab(active.handle.connectionId, db.name, c.name);
+                        }}
+                        title="Find documents"
+                        aria-label="Find documents"
+                      >
+                        ⌕
+                      </button>
+                      <button
+                        className="tree-item__action"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openIndexTab(active.handle.connectionId, db.name, c.name);
+                        }}
+                        title="Indexes"
+                        aria-label="Indexes"
+                      >
+                        ▤
+                      </button>
+                      <button
+                        className="tree-item__action"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openSchemaTab(active.handle.connectionId, db.name, c.name);
+                        }}
+                        title="Schema"
+                        aria-label="Schema"
+                      >
+                        ⊟
+                      </button>
+                    </span>
                   </div>
                 </div>
               ))}
@@ -342,17 +466,29 @@ export default function App() {
           <span className="dot" aria-hidden="true" />
           {active ? (
             <>
-              <span>{active.handle.name}</span>
-              <span style={{ color: "var(--ink-faint)" }}>·</span>
-              <span style={{ color: "var(--ink-faint)" }}>
+              <span className="app__titlebar-conn-name">{active.handle.name}</span>
+              <span
+                className="app__titlebar-conn-topo"
+                title={`Connected to a ${active.handle.serverInfo?.topology ?? "unknown"} topology${
+                  active.handle.serverInfo?.topology === "replicaSet"
+                    ? " — a cluster with automatic failover and change streams"
+                    : active.handle.serverInfo?.topology === "sharded"
+                      ? " — a horizontally scaled cluster with multiple shards"
+                      : active.handle.serverInfo?.topology === "single"
+                        ? " — a standalone MongoDB instance"
+                        : ""
+                }`}
+              >
                 {active.handle.serverInfo?.topology ?? "unknown"}
               </span>
-              <button className="btn btn--ghost btn--sm" onClick={closeConnection}>
+              <button className="btn btn--ghost btn--sm" onClick={closeConnection} title="Close this connection">
                 Disconnect
               </button>
             </>
+          ) : error ? (
+            <span className="app__titlebar-conn-error" title={error}>Connection error</span>
           ) : (
-            <span>No active connection</span>
+            <span className="app__titlebar-conn-idle">No connection</span>
           )}
         </div>
       </header>
@@ -363,8 +499,9 @@ export default function App() {
             className="btn btn--sm"
             onClick={() => setConnectionFormOpen(true)}
             style={{ marginLeft: "auto" }}
+            title="Add a new connection profile"
           >
-            New
+            Add
           </button>
         </div>
         {profiles.length === 0 ? (
@@ -412,12 +549,24 @@ export default function App() {
           </div>
         )}
         <div className="app__sidebar-search">
+          <span className="app__sidebar-search-icon" aria-hidden="true">⌕</span>
           <input
             type="text"
-            placeholder="Filter…"
+            placeholder={active ? "Filter collections…" : "Filter connections…"}
             value={treeFilter}
             onChange={(e) => setTreeFilter(e.target.value)}
+            aria-label={active ? "Filter collections" : "Filter connections"}
           />
+          {treeFilter && (
+            <button
+              className="app__sidebar-search-clear"
+              onClick={() => setTreeFilter("")}
+              title="Clear filter"
+              aria-label="Clear filter"
+            >
+              ×
+            </button>
+          )}
         </div>
         {tree}
         <div className="app__sidebar-footer">
@@ -434,20 +583,42 @@ export default function App() {
               role="tab"
               tabIndex={0}
               aria-selected={t.id === activeTabId}
-              className={`tab ${t.id === activeTabId ? "is-active" : ""}`}
+              className={`tab tab--${t.kind} ${t.id === activeTabId ? "is-active" : ""}`}
               onClick={() => setActiveTabId(t.id)}
               onKeyDown={(e) => e.key === "Enter" && setActiveTabId(t.id)}
             >
-              <span>
+              <span className="tab__icon" aria-hidden="true">
                 {t.kind === "query"
-                  ? `Find · ${t.database}.${t.collection}`
+                  ? "⌕"
                   : t.kind === "indexes"
-                    ? `Indexes · ${t.database}.${t.collection}`
-                    : t.kind === "shell"
-                      ? `Shell · ${t.database}`
-                      : t.kind === "audit"
-                        ? "ZK Audit Log"
-                        : `Schema · ${t.database}.${t.collection}`}
+                    ? "▤"
+                    : t.kind === "schema"
+                      ? "⊟"
+                      : t.kind === "shell"
+                        ? "›"
+                        : "⊕"}
+              </span>
+              <span className="tab__label">
+                {t.kind === "query"
+                  ? `${t.database}.${t.collection}`
+                  : t.kind === "indexes"
+                    ? `${t.database}.${t.collection}`
+                    : t.kind === "schema"
+                      ? `${t.database}.${t.collection}`
+                      : t.kind === "shell"
+                        ? t.database
+                        : "Audit Log"}
+              </span>
+              <span className="tab__kind" aria-hidden="true">
+                {t.kind === "query"
+                  ? "Find"
+                  : t.kind === "indexes"
+                    ? "Indexes"
+                    : t.kind === "schema"
+                      ? "Schema"
+                      : t.kind === "shell"
+                        ? "Shell"
+                        : "ZK"}
               </span>
               <span
                 className="tab__close"
@@ -467,38 +638,15 @@ export default function App() {
             </div>
           ))}
           {active && (
-            <>
-              <button
-                className="tab-add"
-                onClick={() => openShellTab(active.handle.connectionId, active.databases[0]?.name ?? "admin")}
-                title="Open mongo shell (Cmd/Ctrl+;)"
-                aria-label="Open shell tab"
-                style={{ marginLeft: "var(--space-2)" }}
-              >
-                &gt;_
-              </button>
-              <button
-                className="tab-add"
-                onClick={() => openQueryTab(active.handle.connectionId, active.databases[0]?.name ?? "admin", "new")}
-                title="New query tab (Cmd/Ctrl+T)"
-                aria-label="New query tab"
-              >
-                +
-              </button>
-              <button
-                className="tab-add"
-                onClick={() => {
-                  const id = `audit-${Date.now()}`;
-                  setTabs((prev) => [...prev, { id, kind: "audit" }]);
-                  setActiveTabId(id);
-                }}
-                title="Open ZK Audit Log panel"
-                aria-label="ZK Audit Log"
-                style={{ fontSize: "11px", padding: "0 8px" }}
-              >
-                Audit
-              </button>
-            </>
+            <NewTabMenu
+              onNewQuery={() => openQueryTab(active.handle.connectionId, active.databases[0]?.name ?? "admin", "new")}
+              onNewShell={() => openShellTab(active.handle.connectionId, active.databases[0]?.name ?? "admin")}
+              onOpenAudit={() => {
+                const id = `audit-${Date.now()}`;
+                setTabs((prev) => [...prev, { id, kind: "audit" }]);
+                setActiveTabId(id);
+              }}
+            />
           )}
         </div>
         {activeTab ? (
@@ -527,23 +675,28 @@ export default function App() {
         )}
       </main>
       <footer className="statusbar" role="status" aria-live="polite">
-        <span className="statusbar__item">
-          {info?.platform ?? "—"} · {info?.arch ?? "—"}
-        </span>
-        <span className="statusbar__item">
-          Tauri {info?.tauriVersion ?? "—"}
-        </span>
-        <span className="statusbar__item">
+        <span className="statusbar__item" title={`${active?.databases.length ?? 0} databases on this connection`}>
           {active ? `${active.databases.length} databases` : "No connection"}
         </span>
+        {active && (
+          <span className="statusbar__item">
+            {Object.values(active.collections).reduce((n, cols) => n + cols.length, 0)} collections
+          </span>
+        )}
         <span className="statusbar__spacer" />
         {queryTime != null && (
-          <span className="statusbar__item">Query: {queryTime} ms</span>
+          <span className="statusbar__item" title="Last query execution time">
+            <span className="statusbar__label">Query</span>
+            <strong>{queryTime} ms</strong>
+          </span>
         )}
         {docCount != null && (
-          <span className="statusbar__item">Rows: {docCount}</span>
+          <span className="statusbar__item" title="Documents returned by last query">
+            <span className="statusbar__label">Rows</span>
+            <strong>{docCount}</strong>
+          </span>
         )}
-        <span className="statusbar__item">
+        <span className="statusbar__item statusbar__item--theme">
           <label htmlFor="theme-toggle" className="sr-only">Theme</label>
           <select
             id="theme-toggle"
