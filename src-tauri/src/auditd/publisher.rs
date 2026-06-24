@@ -24,10 +24,41 @@ use super::{ApiError, ApiResult, DaemonState};
 pub async fn close_epoch(
     state: State<Arc<DaemonState>>,
 ) -> ApiResult<Epoch> {
-    let epoch = state
+    let mut epoch = state
         .epoch_manager
         .close_current_epoch(&state.audit_log)
         .map_err(ApiError::from)?;
+
+    // If we have a MongoDB client, compute and attach the oplog hash.
+    // This binds the audit log epoch to the oplog, proving completeness.
+    if let Some(client) = &state.mongo_client {
+        match super::compute_and_attach_oplog_hash(&state, client, epoch.epoch_number).await {
+            Ok((oplog_range, updated_epoch)) => {
+                log::info!(
+                    "close_epoch: oplog hash attached to epoch {}: root={}, entries={}",
+                    epoch.epoch_number,
+                    oplog_range.oplog_merkle_root_hex,
+                    oplog_range.entry_count
+                );
+                // Use the updated epoch returned by attach_oplog_hash to avoid
+                // the racy list/reload pattern.
+                epoch = updated_epoch;
+            }
+            Err(e) => {
+                if state.oplog_hash_required {
+                    return Err(ApiError(AppError::Validation(format!(
+                        "close_epoch: oplog hash computation failed for epoch {}: {e}",
+                        epoch.epoch_number
+                    ))));
+                }
+                log::warn!(
+                    "close_epoch: oplog hash computation failed for epoch {}: {e}",
+                    epoch.epoch_number
+                );
+            }
+        }
+    }
+
     Ok(Json(epoch))
 }
 
@@ -74,20 +105,62 @@ pub async fn commit_epoch(
 
     // Get the IPFS CID if available, include it in metadata.
     let cid = state.audit_log.load_ipfs_cid(epoch_number).ok().flatten();
-    let metadata = match &cid {
-        Some(c) => format!("epoch={epoch_number} cid={c}"),
-        None => format!("epoch={epoch_number}"),
+
+    // Include the oplog hash in the metadata if present.
+    // This binds the on-chain commitment to the oplog completeness proof.
+    let oplog_root = epoch.oplog_merkle_root_hex.as_deref();
+    let metadata = match (&cid, oplog_root) {
+        (Some(c), Some(oplog)) => format!(
+            "epoch={epoch_number} cid={c} oplog_root={oplog} oplog_entries={}",
+            epoch.oplog_entry_count.unwrap_or(0)
+        ),
+        (None, Some(oplog)) => format!(
+            "epoch={epoch_number} oplog_root={oplog} oplog_entries={}",
+            epoch.oplog_entry_count.unwrap_or(0)
+        ),
+        (Some(c), None) => format!("epoch={epoch_number} cid={c}"),
+        (None, None) => format!("epoch={epoch_number}"),
     };
 
-    // Commit via stellar CLI (writes still use CLI).
-    let root_hex_clone = root_hex.clone();
-    let metadata_clone = metadata.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        stellar::commit_root(&root_hex_clone, &metadata_clone)
-    })
-    .await
-    .map_err(|e| AppError::Validation(format!("commit_root task join: {e}")))
-    .map_err(ApiError::from)??;
+    // Commit via stellar CLI. Use commit_root_with_oplog if the epoch
+    // has an oplog hash, otherwise fall back to commit_root.
+    let result = if let Some(oplog_root_hex) = &epoch.oplog_merkle_root_hex {
+        let oplog_start = epoch
+            .oplog_start_ts
+            .map(|t| ((t.time as u64) << 32) | (t.increment as u64))
+            .unwrap_or(0);
+        let oplog_end = epoch
+            .oplog_end_ts
+            .map(|t| ((t.time as u64) << 32) | (t.increment as u64))
+            .unwrap_or(0);
+        let oplog_count = epoch.oplog_entry_count.unwrap_or(0);
+
+        let root_clone = root_hex.clone();
+        let oplog_root_clone = oplog_root_hex.clone();
+        let metadata_clone = metadata.clone();
+        tokio::task::spawn_blocking(move || {
+            stellar::commit_root_with_oplog(
+                &root_clone,
+                &oplog_root_clone,
+                oplog_start,
+                oplog_end,
+                oplog_count,
+                &metadata_clone,
+            )
+        })
+        .await
+        .map_err(|e| AppError::Validation(format!("commit_root_with_oplog task join: {e}")))
+        .map_err(ApiError::from)??
+    } else {
+        let root_hex_clone = root_hex.clone();
+        let metadata_clone = metadata.clone();
+        tokio::task::spawn_blocking(move || {
+            stellar::commit_root(&root_hex_clone, &metadata_clone)
+        })
+        .await
+        .map_err(|e| AppError::Validation(format!("commit_root task join: {e}")))
+        .map_err(ApiError::from)??
+    };
 
     // Mark the epoch as committed.
     state

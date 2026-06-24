@@ -126,6 +126,177 @@ pub fn get_current_root() -> AppResult<Option<OnChainRoot>> {
     Ok(Some(root_entry))
 }
 
+/// Commit a Merkle root with an oplog completeness commitment.
+///
+/// This calls `commit_root_with_oplog` on the contract, storing both
+/// the audit log root and the oplog Merkle root on-chain. The oplog
+/// root binds the audit log to MongoDB's oplog, proving completeness.
+///
+/// Timestamps are packed as `(time << 32) | increment`.
+pub fn commit_root_with_oplog(
+    root_hex: &str,
+    oplog_root_hex: &str,
+    oplog_start_ts: u64,
+    oplog_end_ts: u64,
+    oplog_entry_count: u64,
+    metadata: &str,
+) -> AppResult<CommitResult> {
+    let output = run_stellar_cli(&[
+        "contract",
+        "invoke",
+        "--source",
+        &source_identity(),
+        "--network",
+        NETWORK,
+        "--id",
+        CONTRACT_ID,
+        "--",
+        "commit_root_with_oplog",
+        "--root",
+        root_hex,
+        "--oplog_root",
+        oplog_root_hex,
+        "--oplog_start_ts",
+        &oplog_start_ts.to_string(),
+        "--oplog_end_ts",
+        &oplog_end_ts.to_string(),
+        "--oplog_entry_count",
+        &oplog_entry_count.to_string(),
+        "--metadata",
+        metadata,
+    ])?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let sequence: u64 = parse_u64_output(stdout.trim())
+        .map_err(|e| AppError::Validation(format!("failed to parse commit_root_with_oplog sequence: {e} (stdout: {stdout})")))?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let tx_hash = extract_tx_hash(&stderr).unwrap_or_default();
+
+    Ok(CommitResult {
+        sequence,
+        tx_hash,
+        root_hex: root_hex.to_string(),
+    })
+}
+
+/// Authorize an attester address on the contract (admin only).
+///
+/// `public_key_hex` is the 32-byte ed25519 public key (64 hex chars) that the
+/// attester will use to sign oplog attestations.
+pub fn authorize_attester(attester_address: &str, public_key_hex: &str) -> AppResult<()> {
+    let _output = run_stellar_cli(&[
+        "contract",
+        "invoke",
+        "--source",
+        &source_identity(),
+        "--network",
+        NETWORK,
+        "--id",
+        CONTRACT_ID,
+        "--",
+        "authorize_attester",
+        "--attester",
+        attester_address,
+        "--public_key",
+        public_key_hex,
+    ])?;
+    Ok(())
+}
+
+/// Submit an oplog attestation to the contract.
+///
+/// The attester's Stellar identity must sign the transaction. The
+/// `signature_hex` is a 64-byte ed25519 signature (128 hex chars) over
+/// `sha256(oplog_root || oplog_end_ts.to_be_bytes())`.
+pub fn attest_oplog(
+    attester_identity: &str,
+    attester_address: &str,
+    sequence: u64,
+    signature_hex: &str,
+) -> AppResult<()> {
+    let _output = run_stellar_cli(&[
+        "contract",
+        "invoke",
+        "--source",
+        attester_identity,
+        "--network",
+        NETWORK,
+        "--id",
+        CONTRACT_ID,
+        "--",
+        "attest_oplog",
+        "--attester",
+        attester_address,
+        "--sequence",
+        &sequence.to_string(),
+        "--signature",
+        signature_hex,
+    ])?;
+    Ok(())
+}
+
+/// Get the oplog commitment for a given sequence number.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnChainOplogCommitment {
+    pub sequence: u64,
+    pub oplog_root_hex: String,
+    pub oplog_start_ts: u64,
+    pub oplog_end_ts: u64,
+    pub oplog_entry_count: u64,
+}
+
+/// Get the oplog commitment for a given sequence from the contract.
+pub fn get_oplog_commitment(sequence: u64) -> AppResult<Option<OnChainOplogCommitment>> {
+    let output = run_stellar_cli(&[
+        "contract",
+        "invoke",
+        "--source",
+        &source_identity(),
+        "--network",
+        NETWORK,
+        "--id",
+        CONTRACT_ID,
+        "--",
+        "get_oplog_commitment",
+        "--sequence",
+        &sequence.to_string(),
+    ])?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+
+    if trimmed.is_empty() || trimmed == "void" || trimmed == "null" {
+        return Ok(None);
+    }
+
+    // Parse the oplog commitment from the CLI output.
+    // The output format is similar to RootEntry but with different fields.
+    // For the hackathon, we do a loose parse.
+    let oplog_root_hex = extract_typed_value(trimmed, "bytes", 0).unwrap_or_default();
+    let oplog_start_ts = extract_typed_value(trimmed, "u64", 0)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let oplog_end_ts = extract_typed_value(trimmed, "u64", 1)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let oplog_entry_count = extract_typed_value(trimmed, "u64", 2)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+
+    Ok(Some(OnChainOplogCommitment {
+        sequence,
+        oplog_root_hex,
+        oplog_start_ts,
+        oplog_end_ts,
+        oplog_entry_count,
+    }))
+}
+
 /// Get the root history from the Soroban contract.
 pub fn get_root_history(limit: u32) -> AppResult<Vec<OnChainRoot>> {
     let output = run_stellar_cli(&[

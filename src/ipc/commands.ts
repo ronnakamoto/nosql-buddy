@@ -469,6 +469,29 @@ export interface AttestationStatus {
   pending: string[];
 }
 
+/** On-chain oplog commitment for an epoch (from the Soroban contract). */
+export interface OnChainOplogCommitment {
+  sequence: number;
+  oplogRootHex: string;
+  oplogStartTs: number;
+  oplogEndTs: number;
+  oplogEntryCount: number;
+}
+
+/** Result of the oplog integrity three-way compare. */
+export interface OplogIntegrityReport {
+  sequence: number;
+  onChainOplogRoot: string;
+  auditorOplogRoot: string | null;
+  oplogEntryCount: number | null;
+  allMatch: boolean;
+  onChainMatchesAuditor: boolean;
+  /** "complete", "mismatch", "stale", "no_commitment", "no_oplog_commitment", or "error" */
+  verdict: string;
+  explanation: string;
+  alerts: string[];
+}
+
 const commands = {
   ping: (message: string) => invoke<string>("ping", { message }),
   appInfo: () => invoke<AppInfo>("app_info"),
@@ -555,6 +578,17 @@ const commands = {
     invoke<AttestationStatus>("audit_get_attestation_status", {
       epochNumber,
       rootHex,
+    }),
+
+  // --- ZK Audit: Oplog completeness verification ---
+  auditVerifyOplogIntegrity: (connectionId: string, rpcUrl?: string) =>
+    invoke<OplogIntegrityReport>("audit_verify_oplog_integrity", {
+      connectionId,
+      rpcUrl,
+    }),
+  auditGetOplogCommitment: (sequence: number) =>
+    invoke<OnChainOplogCommitment | null>("audit_get_oplog_commitment", {
+      sequence,
     }),
 
   listProfiles: () => invoke<ProfileSummary[]>("list_profiles"),

@@ -100,7 +100,8 @@ pub async fn build_client(
     if uri.trim().is_empty() {
         return Err(AppError::Validation("connection URI must not be empty".into()));
     }
-    let mut options = ClientOptions::parse(uri).await?;
+    let uri = ensure_direct_connection(uri);
+    let mut options = ClientOptions::parse(&uri).await?;
     options.app_name = Some(app_name.to_string());
     options.server_selection_timeout = Some(Duration::from_secs(8));
     options.connect_timeout = Some(Duration::from_secs(8));
@@ -108,6 +109,26 @@ pub async fn build_client(
     options.min_pool_size = Some(1);
     let client = Client::with_options(options)?;
     Ok(Arc::new(client))
+}
+
+/// Append `directConnection=true` to a MongoDB URI if not already present.
+///
+/// When connecting to a Docker-exposed replica set member from the host,
+/// the driver discovers the replica set topology via `hello` and then tries
+/// to connect to the internal container hostnames (e.g. `mongo1:27017`)
+/// which aren't resolvable from the host. `directConnection=true` tells the
+/// driver to use only the provided seed address and skip topology discovery.
+///
+/// This is a no-op if the URI already contains `directConnection=true`.
+pub fn ensure_direct_connection(uri: &str) -> String {
+    if uri.contains("directConnection=") {
+        return uri.to_string();
+    }
+    if uri.contains('?') {
+        format!("{}&directConnection=true", uri)
+    } else {
+        format!("{}?directConnection=true", uri)
+    }
 }
 
 /// Probe the server, list databases, and produce a `ConnectionHandle`.
@@ -174,6 +195,35 @@ pub async fn list_databases(client: &Client) -> AppResult<Vec<DatabaseSummary>> 
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_direct_connection_adds_param_when_missing() {
+        assert_eq!(
+            ensure_direct_connection("mongodb://localhost:27017"),
+            "mongodb://localhost:27017?directConnection=true"
+        );
+    }
+
+    #[test]
+    fn ensure_direct_connection_appends_with_ampersand_when_query_exists() {
+        assert_eq!(
+            ensure_direct_connection("mongodb://localhost:27017?replicaSet=rs0"),
+            "mongodb://localhost:27017?replicaSet=rs0&directConnection=true"
+        );
+    }
+
+    #[test]
+    fn ensure_direct_connection_is_noop_when_already_present() {
+        assert_eq!(
+            ensure_direct_connection("mongodb://localhost:27017?directConnection=true"),
+            "mongodb://localhost:27017?directConnection=true"
+        );
+    }
 }
 
 pub async fn list_collections(

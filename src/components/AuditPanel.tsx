@@ -8,6 +8,8 @@ import commands, {
   IpfsPublishResult,
   Publisher,
   AttestationStatus,
+  OplogIntegrityReport,
+  ConnectionDescriptor,
   formatError,
 } from "../ipc/commands";
 
@@ -549,6 +551,13 @@ export default function AuditPanel() {
     useState<VerificationReport | null>(null);
   const [verifyLoading, setVerifyLoading] = useState(false);
 
+  // Oplog integrity verification state
+  const [oplogReport, setOplogReport] =
+    useState<OplogIntegrityReport | null>(null);
+  const [oplogLoading, setOplogLoading] = useState(false);
+  const [oplogConnectionId, setOplogConnectionId] = useState<string>("");
+  const [connections, setConnections] = useState<ConnectionDescriptor[]>([]);
+
   // IPFS state
   const [ipfsDaemonOnline, setIpfsDaemonOnline] = useState<boolean | null>(
     null,
@@ -661,6 +670,41 @@ export default function AuditPanel() {
       setError(formatError(err));
     } finally {
       setVerifyLoading(false);
+    }
+  };
+
+  // ─── Oplog integrity verification ──────────────────────────────────
+  const refreshConnections = useCallback(async () => {
+    try {
+      const list = await commands.listActiveConnections();
+      setConnections(list);
+    } catch {
+      // Ignore — connections may not be available
+    }
+  }, []);
+
+  // Refresh connections when the reader tab is opened (for oplog verification).
+  useEffect(() => {
+    if (activeTab === "reader") {
+      refreshConnections();
+    }
+  }, [activeTab, refreshConnections]);
+
+  const handleVerifyOplogIntegrity = async () => {
+    if (!oplogConnectionId) {
+      setError("Select a connection to the independent replica member first.");
+      return;
+    }
+    setOplogLoading(true);
+    setError(null);
+    setOplogReport(null);
+    try {
+      const report = await commands.auditVerifyOplogIntegrity(oplogConnectionId);
+      setOplogReport(report);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setOplogLoading(false);
     }
   };
 
@@ -1297,6 +1341,7 @@ export default function AuditPanel() {
 
       {/* ─── Reader Mode tab ─────────────────────────────────────────── */}
       {activeTab === "reader" && (
+        <>
         <SectionCard>
           <SectionHeader
             title="Verify Integrity"
@@ -1400,6 +1445,183 @@ export default function AuditPanel() {
             </EmptyState>
           )}
         </SectionCard>
+
+        {/* ─── Oplog integrity verification ─────────────────────────── */}
+        <SectionCard>
+          <SectionHeader
+            title="Verify Oplog Integrity"
+            actions={
+              <BtnPrimary
+                onClick={handleVerifyOplogIntegrity}
+                loading={oplogLoading}
+                loadingLabel="Verifying..."
+                disabled={!oplogConnectionId}
+              >
+                Verify Oplog
+              </BtnPrimary>
+            }
+          />
+          <TabDescription>
+            Three-way compare: checks the on-chain oplog root against an
+            independent computation from your own replica member. This detects
+            omitted writes — the operator's replication betrays them. Connect
+            to the <strong>independent replica member</strong> (not the
+            operator's server).
+          </TabDescription>
+
+          {/* Connection selector */}
+          <div style={{ display: "flex", gap: "8px", alignItems: "center", marginBottom: "12px" }}>
+            <label
+              htmlFor="oplog-connection-select"
+              style={{ fontSize: "11px", color: "var(--ink-muted)", fontFamily: "var(--font-sans)" }}
+            >
+              Independent member:
+            </label>
+            <select
+              id="oplog-connection-select"
+              value={oplogConnectionId}
+              onChange={(e) => setOplogConnectionId(e.target.value)}
+              style={{
+                fontSize: "11px",
+                fontFamily: "var(--font-sans)",
+                padding: "4px 8px",
+                borderRadius: "var(--radius-sm)",
+                border: "1px solid var(--border)",
+                background: "var(--surface)",
+                color: "var(--ink)",
+                minWidth: "200px",
+              }}
+            >
+              <option value="">Select a connection…</option>
+              {connections.map((c) => (
+                <option key={c.connectionId} value={c.connectionId}>
+                  {c.name} ({c.connectionId.slice(0, 12)}…)
+                </option>
+              ))}
+            </select>
+            {connections.length === 0 && (
+              <span style={{ fontSize: "10px", color: "var(--ink-muted)" }}>
+                No active connections — open one to the independent replica first.
+              </span>
+            )}
+          </div>
+
+          {/* Loading skeleton */}
+          {oplogLoading && !oplogReport && (
+            <div
+              style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "6px 12px", fontSize: "11px" }}
+              aria-busy="true"
+              aria-live="polite"
+            >
+              <span style={{ color: "var(--ink-muted)" }}>Verifying</span>
+              <SkeletonRow width="180px" />
+            </div>
+          )}
+
+          {/* Oplog verification result */}
+          {oplogReport && (() => {
+            const r = oplogReport;
+            const tone =
+              r.verdict === "complete" ? "success" :
+              r.verdict === "mismatch" ? "danger" :
+              r.verdict === "stale" ? "warning" : "warning";
+            const icon =
+              r.verdict === "complete" ? "✓" :
+              r.verdict === "mismatch" ? "✗" :
+              r.verdict === "stale" ? "⚠" : "○";
+            const label =
+              r.verdict === "complete" ? "Oplog verified" :
+              r.verdict === "mismatch" ? "Omission detected" :
+              r.verdict === "stale" ? "Stale — oplog rolled over" :
+              r.verdict === "no_commitment" ? "No on-chain commitment" :
+              r.verdict === "no_oplog_commitment" ? "No oplog commitment" :
+              "Verification error";
+            return (
+              <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                {/* Summary banner */}
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    padding: "8px 12px",
+                    background: "color-mix(in oklch, var(--" + tone + "-500) 12%, var(--surface))",
+                    border: "1px solid color-mix(in oklch, var(--" + tone + "-500) 40%, var(--border))",
+                    borderRadius: "var(--radius-sm)",
+                    fontSize: "12px",
+                    fontFamily: "var(--font-sans)",
+                    color: "var(--ink)",
+                  }}
+                >
+                  <StatusPill tone={tone}>{icon} {label}</StatusPill>
+                  <span style={{ color: "var(--ink-muted)" }}>Epoch #{r.sequence}</span>
+                </div>
+
+                {/* Details */}
+                <KVGrid
+                  rows={[
+                    { label: "On-chain oplog root", value: r.onChainOplogRoot === "none" ? "—" : `${r.onChainOplogRoot.slice(0, 24)}…` },
+                    {
+                      label: "Auditor's computed root",
+                      value: r.auditorOplogRoot ? `${r.auditorOplogRoot.slice(0, 24)}…` : "—",
+                    },
+                    { label: "Oplog entries", value: r.oplogEntryCount ?? "—" },
+                    {
+                      label: "On-chain matches auditor",
+                      value: (
+                        <span style={{ color: r.onChainMatchesAuditor ? "var(--success-500)" : "var(--danger-500)", fontWeight: 600 }}>
+                          {r.onChainMatchesAuditor ? "yes" : "no"}
+                        </span>
+                      ),
+                    },
+                    {
+                      label: "Verdict",
+                      value: (
+                        <span style={{ fontWeight: 600 }}>{r.verdict}</span>
+                      ),
+                    },
+                  ]}
+                />
+
+                {/* Explanation */}
+                <div style={{ fontSize: "11px", color: "var(--ink-muted)", fontFamily: "var(--font-sans)", lineHeight: 1.5 }}>
+                  {r.explanation}
+                </div>
+
+                {/* Alerts */}
+                {r.alerts.length > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                    {r.alerts.map((alert, i) => (
+                      <div
+                        key={i}
+                        style={{
+                          fontSize: "10px",
+                          fontFamily: "var(--font-mono)",
+                          color: "var(--danger-500)",
+                          padding: "4px 8px",
+                          background: "color-mix(in oklch, var(--danger-500) 8%, var(--surface))",
+                          borderRadius: "var(--radius-sm)",
+                        }}
+                      >
+                        {alert}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {!oplogReport && !oplogLoading && (
+            <EmptyState>
+              Click <strong>Verify Oplog</strong> to check the on-chain oplog
+              root against your independent computation. This detects omitted
+              writes — if the operator skipped a write, the oplog hashes won't
+              match.
+            </EmptyState>
+          )}
+        </SectionCard>
+        </>
       )}
 
       {/* ─── IPFS tab ────────────────────────────────────────────────── */}

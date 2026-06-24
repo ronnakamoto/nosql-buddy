@@ -1,37 +1,65 @@
 services:
-  mongodb:
+  # ─── Primary (operator) ───────────────────────────────────────────────
+  mongo1:
     image: mongo:7
-    container_name: mongo-rs
+    container_name: mongo-rs-1
     ports:
       - "27017:27017"
-    command: ["--replSet", "rs0"]
+    command: ["--replSet", "rs0", "--bind_ip_all"]
     volumes:
-      - mongo-data:/data/db
-      - ./scripts/rs-init.js:/docker-entrypoint-initdb.d/rs-init.js:ro
-    healthcheck:
-      test: |
-        mongosh --eval "
-          try {
-            rs.status().ok === 1 ? process.exit(0) : process.exit(1)
-          } catch(e) {
-            process.exit(1)
-          }
-        "
-      interval: 5s
-      timeout: 5s
-      retries: 30
-      start_period: 10s
+      - mongo-data-1:/data/db
 
+  # ─── Secondary 1 (operator) ──────────────────────────────────────────
+  mongo2:
+    image: mongo:7
+    container_name: mongo-rs-2
+    ports:
+      - "27018:27017"
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    volumes:
+      - mongo-data-2:/data/db
+
+  # ─── Secondary 2 (independent — auditor/regulator) ───────────────────
+  # This member is the trust anchor for oplog completeness verification.
+  # The independent attester daemon connects here to compute the real
+  # oplog hash from its own replicated copy.
+  mongo3:
+    image: mongo:7
+    container_name: mongo-rs-3
+    ports:
+      - "27019:27017"
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    volumes:
+      - mongo-data-3:/data/db
+
+  # ─── Replica set initializer ─────────────────────────────────────────
+  # Runs after all 3 members are up, initiates the replica set.
+  rs-init:
+    image: mongo:7
+    container_name: mongo-rs-init
+    depends_on:
+      - mongo1
+      - mongo2
+      - mongo3
+    volumes:
+      - ./scripts/rs-init.js:/scripts/rs-init.js:ro
+    entrypoint: ["mongosh", "--nodb", "/scripts/rs-init.js"]
+    restart: "no"
+
+  # ─── Data seeder ─────────────────────────────────────────────────────
+  # Runs after the replica set is initiated and a primary is elected.
   seeder:
     image: mongo:7
     container_name: mongo-seeder
     depends_on:
-      mongodb:
-        condition: service_healthy
+      rs-init:
+        condition: service_completed_successfully
     volumes:
       - ./scripts/seed.js:/scripts/seed.js:ro
-    entrypoint: ["mongosh", "mongodb://mongodb:27017", "/scripts/seed.js"]
+    entrypoint: ["mongosh", "mongodb://mongo1:27017", "/scripts/seed.js"]
     restart: "no"
 
 volumes:
-  mongo-data:
+  mongo-data-1:
+  mongo-data-2:
+  mongo-data-3:

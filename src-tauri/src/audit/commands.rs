@@ -519,6 +519,225 @@ pub async fn audit_get_attestation_status(
     state.attestation_manager.get_status(epoch_number, &root_hex)
 }
 
+// ─── Oplog completeness verification commands ─────────────────────────
+
+/// Result of the oplog integrity verification (three-way compare).
+///
+/// Mirrors the daemon's `OplogIntegrityReport` but is exposed via the Tauri
+/// IPC so the desktop app can run "Verify Oplog Integrity" without the
+/// standalone daemon.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OplogIntegrityReport {
+    pub sequence: u64,
+    pub on_chain_oplog_root: String,
+    pub auditor_oplog_root: Option<String>,
+    pub oplog_entry_count: Option<u64>,
+    pub all_match: bool,
+    pub on_chain_matches_auditor: bool,
+    /// "complete", "mismatch", "stale", "no_commitment", "no_oplog_commitment", or "error"
+    pub verdict: String,
+    pub explanation: String,
+    pub alerts: Vec<String>,
+}
+
+/// Verify oplog integrity via a three-way compare.
+///
+/// This is the desktop-app equivalent of the daemon's `/reader/verify-oplog`
+/// endpoint. It requires a MongoDB connection (to the independent replica
+/// member) identified by `connection_id`. It:
+/// 1. Gets the latest on-chain root from Stellar.
+/// 2. Gets the on-chain oplog commitment for that sequence.
+/// 3. Independently computes the oplog hash from the connected replica.
+/// 4. Compares the on-chain root with the auditor's computed root.
+///
+/// Verdicts:
+/// - "complete" — on-chain root matches auditor's computation.
+/// - "mismatch" — on-chain root differs from auditor's (omission detected).
+/// - "stale" — oplog has rolled over; rely on on-chain attestation.
+/// - "no_commitment" — no on-chain root has been committed.
+/// - "no_oplog_commitment" — epoch was committed without an oplog hash.
+/// - "error" — computation failed for an unexpected reason.
+#[tauri::command]
+pub async fn audit_verify_oplog_integrity(
+    state: State<'_, AppState>,
+    connection_id: String,
+    rpc_url: Option<String>,
+) -> AppResult<OplogIntegrityReport> {
+    use crate::audit::oplog::{compute_oplog_range_hash, OplogTimestamp};
+    use crate::audit::stellar;
+
+    // 1. Get the MongoDB client from the connection registry.
+    let entry = state.clients.get(&connection_id).await?;
+    let client = entry.client.clone();
+
+    // 2. Get the latest on-chain root.
+    let rpc_url = rpc_url.unwrap_or_else(|| {
+        crate::audit::stellar_rpc::TESTNET_RPC_URL.to_string()
+    });
+    let rpc_client = crate::audit::stellar_rpc::StellarRpcClient::with_url(&rpc_url);
+    let onchain_root = rpc_client.get_current_root().await?;
+
+    let sequence = match onchain_root {
+        Some(ref root) => root.sequence,
+        None => {
+            return Ok(OplogIntegrityReport {
+                sequence: 0,
+                on_chain_oplog_root: "none".to_string(),
+                auditor_oplog_root: None,
+                oplog_entry_count: None,
+                all_match: false,
+                on_chain_matches_auditor: false,
+                verdict: "no_commitment".to_string(),
+                explanation: "No on-chain root has been committed yet.".to_string(),
+                alerts: vec![],
+            });
+        }
+    };
+
+    // 3. Get the on-chain oplog commitment.
+    let on_chain_oplog = stellar::get_oplog_commitment(sequence)?;
+
+    let on_chain_oplog_root = match on_chain_oplog {
+        Some(ref oc) => oc.oplog_root_hex.clone(),
+        None => {
+            return Ok(OplogIntegrityReport {
+                sequence,
+                on_chain_oplog_root: "none".to_string(),
+                auditor_oplog_root: None,
+                oplog_entry_count: None,
+                all_match: false,
+                on_chain_matches_auditor: false,
+                verdict: "no_oplog_commitment".to_string(),
+                explanation: format!(
+                    "Epoch {sequence} was committed without an oplog hash. \
+                    Completeness cannot be verified."
+                ),
+                alerts: vec![format!(
+                    "Epoch {sequence} has no oplog commitment — completeness not guaranteed"
+                )],
+            });
+        }
+    };
+
+    let on_chain_ref = on_chain_oplog.as_ref().unwrap();
+    let start_ts = OplogTimestamp::unpack_u64(on_chain_ref.oplog_start_ts);
+    let end_ts = OplogTimestamp::unpack_u64(on_chain_ref.oplog_end_ts);
+    let on_chain_entry_count = on_chain_ref.oplog_entry_count;
+
+    // 4. Independently compute the oplog hash.
+    match compute_oplog_range_hash(&client, sequence, start_ts, end_ts).await {
+        Ok(range) => {
+            // Detect oplog rollover.
+            if range.entry_count == 0 && on_chain_entry_count > 0 {
+                return Ok(OplogIntegrityReport {
+                    sequence,
+                    on_chain_oplog_root,
+                    auditor_oplog_root: None,
+                    oplog_entry_count: Some(0),
+                    all_match: false,
+                    on_chain_matches_auditor: false,
+                    verdict: "stale".to_string(),
+                    explanation: format!(
+                        "Oplog has rolled over — the {on_chain_entry_count} entries committed \
+                        for this epoch are no longer in the oplog. Relying on the independent \
+                        member's on-chain attestation (signed when fresh) as the durable guarantee."
+                    ),
+                    alerts: vec![format!(
+                        "Oplog rolled over for epoch {sequence} — {on_chain_entry_count} entries \
+                        were committed but 0 found. Verify via on-chain attestation instead."
+                    )],
+                });
+            }
+
+            let auditor_root = range.oplog_merkle_root_hex.clone();
+            let matches = auditor_root == on_chain_oplog_root;
+
+            let (verdict, explanation, alerts) = if matches {
+                (
+                    "complete".to_string(),
+                    format!(
+                        "Oplog integrity verified: on-chain root matches auditor's independent \
+                        computation. {} oplog entries in the range.",
+                        range.entry_count
+                    ),
+                    vec![],
+                )
+            } else {
+                (
+                    "mismatch".to_string(),
+                    format!(
+                        "OMISSION DETECTED: on-chain oplog root {} does not match auditor's \
+                        independent computation {}. The operator may have omitted writes \
+                        from the audit log.",
+                        on_chain_oplog_root, auditor_root
+                    ),
+                    vec![format!(
+                        "CRITICAL: oplog hash mismatch — on_chain={} auditor={} — possible omission",
+                        on_chain_oplog_root, auditor_root
+                    )],
+                )
+            };
+
+            Ok(OplogIntegrityReport {
+                sequence,
+                on_chain_oplog_root,
+                auditor_oplog_root: Some(auditor_root),
+                oplog_entry_count: Some(range.entry_count),
+                all_match: matches,
+                on_chain_matches_auditor: matches,
+                verdict,
+                explanation,
+                alerts,
+            })
+        }
+        Err(e) => {
+            let err_msg = format!("{e}");
+            let is_stale = err_msg.contains("lastCommittedOpTime")
+                || err_msg.contains("not found")
+                || err_msg.contains("replica set");
+            let verdict = if is_stale { "stale" } else { "error" };
+            let explanation = if is_stale {
+                format!(
+                    "Oplog entries for this epoch may have rolled over. \
+                    Relying on the independent member's on-chain attestation \
+                    (signed when fresh) as the durable guarantee. Detail: {err_msg}"
+                )
+            } else {
+                format!("Failed to compute oplog hash: {err_msg}")
+            };
+            Ok(OplogIntegrityReport {
+                sequence,
+                on_chain_oplog_root,
+                auditor_oplog_root: None,
+                oplog_entry_count: None,
+                all_match: false,
+                on_chain_matches_auditor: false,
+                verdict: verdict.to_string(),
+                explanation,
+                alerts: vec![format!("Oplog verification: {err_msg}")],
+            })
+        }
+    }
+}
+
+/// Get the on-chain oplog commitment for a specific epoch.
+///
+/// Returns the oplog root, start/end timestamps, and entry count committed
+/// on-chain by the operator. This is the "operator's commitment" that the
+/// auditor compares against their own independent computation.
+#[tauri::command]
+pub async fn audit_get_oplog_commitment(
+    sequence: u64,
+) -> AppResult<Option<crate::audit::stellar::OnChainOplogCommitment>> {
+    let result = tokio::task::spawn_blocking(move || {
+        crate::audit::stellar::get_oplog_commitment(sequence)
+    })
+    .await
+    .map_err(|e| AppError::Validation(format!("get_oplog_commitment task join: {e}")))??;
+    Ok(result)
+}
+
 /// Extract the JSONL lines for events in the given index range
 /// (inclusive on both ends).
 fn extract_epoch_batch(jsonl: &str, start_index: u64, end_index: u64) -> String {

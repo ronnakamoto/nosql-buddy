@@ -48,6 +48,12 @@ pub mod commands;
 pub mod epoch;
 pub mod interceptor;
 pub mod ipfs;
+pub mod oplog;
+pub mod oplog_canon;
+#[cfg(test)]
+mod oplog_integration;
+#[cfg(test)]
+mod oplog_omission;
 pub mod reader;
 pub mod sled_store;
 pub mod stellar;

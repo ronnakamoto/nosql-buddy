@@ -18,10 +18,23 @@
 //! - `epoch_number`: sequential counter (0, 1, 2, ...)
 //! - `start_index`: the first leaf index in this epoch
 //! - `end_index`: the last leaf index in this epoch (inclusive)
-//! - `root_hex`: the Merkle root at `end_index`
+//! - `root_hex`: the Merkle root at `end_index` (audit log root)
 //! - `committed`: whether this epoch's root has been committed on-chain
 //! - `committed_at`: timestamp of on-chain commitment (if any)
 //! - `tx_hash`: the on-chain transaction hash (if committed)
+//!
+//! ## Oplog completeness fields
+//!
+//! Each closed epoch also carries oplog completeness fields:
+//! - `oplog_start_ts`: the oplog timestamp where this epoch's oplog range starts (inclusive)
+//! - `oplog_end_ts`: the oplog timestamp where this epoch's oplog range ends (exclusive)
+//! - `oplog_entry_count`: the number of oplog entries in the range
+//! - `oplog_merkle_root_hex`: the SHA-256 Merkle root over canonicalized oplog entries
+//! - `oplog_majority_commit_ts`: the majority-committed oplog timestamp at close time
+//!
+//! These fields are `None` when oplog completeness is not enabled. When
+//! present, they bind the audit log to MongoDB's oplog — proving that
+//! no writes were omitted from the audit log.
 //!
 //! The current (open) epoch accumulates events. When it closes, its
 //! root is frozen and a new epoch opens.
@@ -31,6 +44,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::audit::AuditLog;
+use crate::audit::oplog::OplogTimestamp;
 use crate::error::{AppError, AppResult};
 
 /// Configuration for when an epoch auto-closes.
@@ -64,6 +78,17 @@ pub struct Epoch {
     pub committed: bool,
     pub committed_at: Option<String>,
     pub tx_hash: Option<String>,
+    // --- Oplog completeness fields (None when oplog hashing is not enabled) ---
+    /// The oplog timestamp where this epoch's oplog range starts (inclusive).
+    pub oplog_start_ts: Option<OplogTimestamp>,
+    /// The oplog timestamp where this epoch's oplog range ends (exclusive).
+    pub oplog_end_ts: Option<OplogTimestamp>,
+    /// The number of oplog entries in this epoch's range.
+    pub oplog_entry_count: Option<u64>,
+    /// The SHA-256 Merkle root over canonicalized oplog entries.
+    pub oplog_merkle_root_hex: Option<String>,
+    /// The majority-committed oplog timestamp at the time of closing.
+    pub oplog_majority_commit_ts: Option<OplogTimestamp>,
 }
 
 impl Epoch {
@@ -78,6 +103,11 @@ impl Epoch {
             committed: false,
             committed_at: None,
             tx_hash: None,
+            oplog_start_ts: None,
+            oplog_end_ts: None,
+            oplog_entry_count: None,
+            oplog_merkle_root_hex: None,
+            oplog_majority_commit_ts: None,
         }
     }
 
@@ -85,12 +115,22 @@ impl Epoch {
     pub fn is_open(&self) -> bool {
         self.end_index.is_none()
     }
+
+    /// Whether this epoch has oplog completeness data attached.
+    pub fn has_oplog_hash(&self) -> bool {
+        self.oplog_merkle_root_hex.is_some()
+    }
 }
 
 /// Manages epoch construction for an audit log.
 pub struct EpochManager {
     config: Mutex<EpochConfig>,
     epochs: Mutex<Vec<Epoch>>,
+    /// The oplog timestamp where the next epoch's oplog range should start.
+    /// This is updated when an epoch's oplog hash is attached. If None,
+    /// oplog completeness is not enabled and the next epoch should start
+    /// from the beginning of the oplog (timestamp 0).
+    next_oplog_start_ts: Mutex<Option<OplogTimestamp>>,
 }
 
 impl EpochManager {
@@ -100,7 +140,67 @@ impl EpochManager {
         Self {
             config: Mutex::new(config),
             epochs: Mutex::new(vec![initial]),
+            next_oplog_start_ts: Mutex::new(None),
         }
+    }
+
+    /// Get the oplog start timestamp for the next epoch to close.
+    /// Returns `OplogTimestamp::zero()` if oplog hashing hasn't been
+    /// initialized yet (first epoch starts from the beginning of the oplog).
+    pub fn next_oplog_start_ts(&self) -> OplogTimestamp {
+        self.next_oplog_start_ts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(OplogTimestamp::zero)
+    }
+
+    /// Attach oplog completeness data to a closed epoch.
+    ///
+    /// This is called after the epoch is closed and the oplog hash has
+    /// been computed externally (using the `oplog` module with a MongoDB
+    /// client). The `oplog_end_ts` from the attached data becomes the
+    /// `next_oplog_start_ts` for the subsequent epoch.
+    ///
+    /// Returns the updated epoch, or an error if the epoch is not found
+    /// or is still open.
+    pub fn attach_oplog_hash(
+        &self,
+        epoch_number: u64,
+        oplog_start_ts: OplogTimestamp,
+        oplog_end_ts: OplogTimestamp,
+        oplog_entry_count: u64,
+        oplog_merkle_root_hex: String,
+        oplog_majority_commit_ts: OplogTimestamp,
+    ) -> AppResult<Epoch> {
+        let mut epochs = self.epochs.lock().unwrap_or_else(|e| e.into_inner());
+
+        for epoch in epochs.iter_mut() {
+            if epoch.epoch_number == epoch_number {
+                if epoch.is_open() {
+                    return Err(AppError::Validation(format!(
+                        "epoch {epoch_number} is still open — close it before attaching oplog hash"
+                    )));
+                }
+                epoch.oplog_start_ts = Some(oplog_start_ts);
+                epoch.oplog_end_ts = Some(oplog_end_ts);
+                epoch.oplog_entry_count = Some(oplog_entry_count);
+                epoch.oplog_merkle_root_hex = Some(oplog_merkle_root_hex);
+                epoch.oplog_majority_commit_ts = Some(oplog_majority_commit_ts);
+
+                // Update the next epoch's oplog start timestamp.
+                let mut next_ts = self
+                    .next_oplog_start_ts
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                *next_ts = Some(oplog_end_ts);
+
+                return Ok(epoch.clone());
+            }
+        }
+
+        Err(AppError::Validation(format!(
+            "epoch {epoch_number} not found"
+        )))
     }
 
     /// Record that an event was added to the audit log at the given
@@ -403,5 +503,148 @@ mod tests {
         assert_eq!(epochs[2].end_index, Some(5));
         assert!(epochs[3].is_open());
         assert_eq!(epochs[3].start_index, 6);
+    }
+
+    // --- Oplog hash attachment tests ---
+
+    #[test]
+    fn next_oplog_start_ts_defaults_to_zero() {
+        let mgr = EpochManager::new(EpochConfig::default());
+        let ts = mgr.next_oplog_start_ts();
+        assert_eq!(ts.time, 0);
+        assert_eq!(ts.increment, 0);
+    }
+
+    #[test]
+    fn attach_oplog_hash_to_closed_epoch() {
+        let mgr = EpochManager::new(EpochConfig {
+            event_threshold: 2,
+            time_threshold_secs: 0,
+        });
+        let audit = make_audit_with_events(2);
+
+        mgr.record_event(0, &audit).unwrap();
+        let closed = mgr.record_event(1, &audit).unwrap().unwrap();
+        assert!(!closed.has_oplog_hash());
+
+        let start_ts = OplogTimestamp { time: 1000, increment: 0 };
+        let end_ts = OplogTimestamp { time: 2000, increment: 5 };
+        let majority_ts = OplogTimestamp { time: 2000, increment: 10 };
+
+        let updated = mgr.attach_oplog_hash(
+            0,
+            start_ts,
+            end_ts,
+            42,
+            "abc123".to_string(),
+            majority_ts,
+        ).unwrap();
+
+        assert!(updated.has_oplog_hash());
+        assert_eq!(updated.oplog_start_ts, Some(start_ts));
+        assert_eq!(updated.oplog_end_ts, Some(end_ts));
+        assert_eq!(updated.oplog_entry_count, Some(42));
+        assert_eq!(updated.oplog_merkle_root_hex.as_deref(), Some("abc123"));
+        assert_eq!(updated.oplog_majority_commit_ts, Some(majority_ts));
+    }
+
+    #[test]
+    fn attach_oplog_hash_updates_next_oplog_start() {
+        let mgr = EpochManager::new(EpochConfig {
+            event_threshold: 2,
+            time_threshold_secs: 0,
+        });
+        let audit = make_audit_with_events(2);
+
+        mgr.record_event(0, &audit).unwrap();
+        mgr.record_event(1, &audit).unwrap();
+
+        let start_ts = OplogTimestamp { time: 1000, increment: 0 };
+        let end_ts = OplogTimestamp { time: 2000, increment: 5 };
+        let majority_ts = OplogTimestamp { time: 2000, increment: 10 };
+
+        mgr.attach_oplog_hash(0, start_ts, end_ts, 42, "abc".to_string(), majority_ts)
+            .unwrap();
+
+        // The next epoch's oplog start should be the previous epoch's end_ts.
+        let next_start = mgr.next_oplog_start_ts();
+        assert_eq!(next_start, end_ts);
+    }
+
+    #[test]
+    fn attach_oplog_hash_rejects_open_epoch() {
+        let mgr = EpochManager::new(EpochConfig::default());
+
+        let start_ts = OplogTimestamp { time: 1000, increment: 0 };
+        let end_ts = OplogTimestamp { time: 2000, increment: 5 };
+        let majority_ts = OplogTimestamp { time: 2000, increment: 10 };
+
+        let err = mgr
+            .attach_oplog_hash(0, start_ts, end_ts, 1, "abc".to_string(), majority_ts)
+            .unwrap_err();
+        assert!(err.to_string().contains("still open"));
+    }
+
+    #[test]
+    fn attach_oplog_hash_rejects_unknown_epoch() {
+        let mgr = EpochManager::new(EpochConfig {
+            event_threshold: 2,
+            time_threshold_secs: 0,
+        });
+        let audit = make_audit_with_events(2);
+        mgr.record_event(0, &audit).unwrap();
+        mgr.record_event(1, &audit).unwrap();
+
+        let start_ts = OplogTimestamp { time: 1000, increment: 0 };
+        let end_ts = OplogTimestamp { time: 2000, increment: 5 };
+        let majority_ts = OplogTimestamp { time: 2000, increment: 10 };
+
+        let err = mgr
+            .attach_oplog_hash(99, start_ts, end_ts, 1, "abc".to_string(), majority_ts)
+            .unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn oplog_hash_chains_across_epochs() {
+        let mgr = EpochManager::new(EpochConfig {
+            event_threshold: 2,
+            time_threshold_secs: 0,
+        });
+        let audit = make_audit_with_events(4);
+
+        // Close epoch 0.
+        mgr.record_event(0, &audit).unwrap();
+        mgr.record_event(1, &audit).unwrap();
+
+        let start0 = OplogTimestamp::zero();
+        let end0 = OplogTimestamp { time: 1000, increment: 5 };
+        let majority0 = OplogTimestamp { time: 1000, increment: 10 };
+
+        mgr.attach_oplog_hash(0, start0, end0, 10, "root0".to_string(), majority0)
+            .unwrap();
+
+        // Close epoch 1.
+        mgr.record_event(2, &audit).unwrap();
+        mgr.record_event(3, &audit).unwrap();
+
+        // Epoch 1's oplog start should be epoch 0's end.
+        let start1 = mgr.next_oplog_start_ts();
+        assert_eq!(start1, end0);
+
+        let end1 = OplogTimestamp { time: 2000, increment: 3 };
+        let majority1 = OplogTimestamp { time: 2000, increment: 8 };
+
+        let updated1 = mgr
+            .attach_oplog_hash(1, start1, end1, 15, "root1".to_string(), majority1)
+            .unwrap();
+
+        assert_eq!(updated1.oplog_start_ts, Some(end0));
+        assert_eq!(updated1.oplog_end_ts, Some(end1));
+        assert_eq!(updated1.oplog_merkle_root_hex.as_deref(), Some("root1"));
+
+        // Next epoch's start should be epoch 1's end.
+        let start2 = mgr.next_oplog_start_ts();
+        assert_eq!(start2, end1);
     }
 }

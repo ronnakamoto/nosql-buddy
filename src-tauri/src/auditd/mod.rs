@@ -12,6 +12,7 @@
 //! `--port`). The daemon reuses the same audit modules as the Tauri app —
 //! no code duplication.
 
+pub mod attester;
 pub mod publisher;
 pub mod reader;
 
@@ -32,12 +33,16 @@ use crate::audit::ipfs::IpfsConfig;
 use crate::audit::AuditLog;
 use crate::error::AppError;
 
-/// Daemon mode: publisher or reader.
+/// Daemon mode: publisher, reader, or attester.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DaemonMode {
     Publish,
     Read,
+    /// Independent attester mode: connects to an independent replica
+    /// member, watches for new epoch commitments on-chain, independently
+    /// computes the oplog hash, and submits attestations to the contract.
+    Attest,
 }
 
 /// Configuration for the daemon, parsed from CLI args.
@@ -52,6 +57,15 @@ pub struct DaemonConfig {
     pub rpc_url: String,
     pub epoch_threshold: usize,
     pub epoch_time_secs: u64,
+    /// Path to the ed25519 attester signing key file. Generated if missing.
+    pub attester_key_file: Option<PathBuf>,
+    /// Stellar CLI identity name used by the attester to sign transactions.
+    pub attester_identity: Option<String>,
+    /// Stellar account address of the attester (must match the identity).
+    pub attester_address: Option<String>,
+    /// If true, epoch close fails when oplog hash computation fails.
+    /// If false, the epoch closes without the oplog hash (warns).
+    pub oplog_hash_required: bool,
 }
 
 impl Default for DaemonConfig {
@@ -68,6 +82,10 @@ impl Default for DaemonConfig {
             rpc_url: crate::audit::stellar_rpc::TESTNET_RPC_URL.to_string(),
             epoch_threshold: 100,
             epoch_time_secs: 0,
+            attester_key_file: None,
+            attester_identity: None,
+            attester_address: None,
+            oplog_hash_required: false,
         }
     }
 }
@@ -83,6 +101,17 @@ pub struct DaemonState {
     pub circuit_dir: Option<PathBuf>,
     pub ipfs_config: IpfsConfig,
     pub rpc_url: String,
+    /// MongoDB client for oplog hashing (publisher mode only).
+    /// When present, epoch closes will compute and attach the oplog hash.
+    pub mongo_client: Option<mongodb::Client>,
+    /// Ed25519 signing key for the attester mode (oplog attestations).
+    pub attester_key: Option<ed25519_dalek::SigningKey>,
+    /// Stellar CLI identity name used to sign attester transactions.
+    pub attester_identity: Option<String>,
+    /// Stellar account address of the attester (for contract authorization).
+    pub attester_address: Option<String>,
+    /// If true, epoch close fails when oplog hash computation fails.
+    pub oplog_hash_required: bool,
 }
 
 /// HTTP error wrapper for AppError. Converts domain errors into appropriate
@@ -172,8 +201,14 @@ pub fn build_router(state: Arc<DaemonState>) -> axum::Router {
             .with_state(state),
         DaemonMode::Read => common
             .route("/reader/verify", get(reader::verify))
+            .route("/reader/verify-oplog", get(reader::verify_oplog))
             .route("/reader/onchain-root", get(reader::onchain_root))
             .route("/reader/rebuild", post(reader::rebuild))
+            .with_state(state),
+        DaemonMode::Attest => common
+            .route("/attest/status", get(attester::get_status))
+            .route("/attest/scan", post(attester::scan_and_attest))
+            .route("/attest/attestations/:sequence", get(attester::list_attestations))
             .with_state(state),
     }
 }
@@ -190,6 +225,18 @@ pub async fn run_server(state: Arc<DaemonState>, port: u16) -> Result<(), Box<dy
             auto_commit_loop(auto_state).await;
         });
         log::info!("auto-commit background task started (epoch threshold: {} events)", state.epoch_manager.config().event_threshold);
+    }
+
+    // Spawn auto-attest loop in attester mode.
+    // This is the "fresh attestation" mechanism (C2 fix): the attester
+    // continuously scans for new on-chain commitments and signs each
+    // epoch's oplog hash while the entries are still in the oplog.
+    if state.mode == DaemonMode::Attest {
+        let attest_state = state.clone();
+        tokio::spawn(async move {
+            auto_attest_loop(attest_state).await;
+        });
+        log::info!("auto-attest background task started (scans every 10s for new commitments to attest)");
     }
 
     let router = build_router(state);
@@ -251,13 +298,175 @@ async fn auto_commit_loop(state: Arc<DaemonState>) {
     }
 }
 
+/// Background task for attester mode: continuously scans for new on-chain
+/// commitments and independently attests each epoch's oplog hash.
+///
+/// This is the "fresh attestation" mechanism (C2 fix). The attester runs on
+/// the independent replica member and signs each epoch's oplog hash while
+/// the entries are still in the oplog. The on-chain signature is durable
+/// even after the oplog rolls over.
+///
+/// The loop polls the Stellar RPC for the latest committed sequence every
+/// 10 seconds. For each new sequence that hasn't been attested yet, it:
+/// 1. Gets the on-chain oplog commitment.
+/// 2. Independently computes the oplog hash from the local replica.
+/// 3. If they match, submits an attestation to the contract.
+/// 4. If they don't match, logs an alert (omission detected).
+async fn auto_attest_loop(state: Arc<DaemonState>) {
+    use crate::audit::stellar_rpc::StellarRpcClient;
+
+    let mut last_attested_seq: u64 = 0;
+
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+
+        let client = match &state.mongo_client {
+            Some(c) => c,
+            None => continue,
+        };
+
+        let rpc = StellarRpcClient::with_url(&state.rpc_url);
+        let current_root = match rpc.get_current_root().await {
+            Ok(Some(root)) => root,
+            Ok(None) => continue,
+            Err(e) => {
+                log::warn!("auto-attest: failed to get current root: {e}");
+                continue;
+            }
+        };
+
+        let current_seq = current_root.sequence;
+        if current_seq <= last_attested_seq {
+            continue;
+        }
+
+        // Scan new sequences from last_attested_seq+1 to current_seq.
+        for seq in (last_attested_seq + 1)..=current_seq {
+            match attest_epoch_internal(&state, client, seq).await {
+                Ok(true) => {
+                    log::info!("auto-attest: sequence {seq} attested successfully");
+                    last_attested_seq = seq;
+                }
+                Ok(false) => {
+                    // No oplog commitment for this epoch, or hash mismatch.
+                    // Still advance so we don't keep retrying.
+                    last_attested_seq = seq;
+                }
+                Err(e) => {
+                    log::warn!("auto-attest: failed for sequence {seq}: {e}");
+                }
+            }
+        }
+    }
+}
+
+/// Internal helper: attest a single epoch (used by both the auto-attest loop
+/// and the manual /attest/scan endpoint).
+async fn attest_epoch_internal(
+    state: &Arc<DaemonState>,
+    client: &mongodb::Client,
+    sequence: u64,
+) -> Result<bool, String> {
+    use crate::audit::oplog::{compute_oplog_range_hash, OplogTimestamp};
+    use crate::audit::stellar;
+    use crate::auditd::attester::sign_oplog_attestation;
+
+    let on_chain = stellar::get_oplog_commitment(sequence)
+        .map_err(|e| format!("get_oplog_commitment({sequence}): {e}"))?;
+
+    let on_chain_oplog = match on_chain {
+        Some(oc) => oc,
+        None => return Ok(false),
+    };
+
+    let oplog_start_ts = OplogTimestamp::unpack_u64(on_chain_oplog.oplog_start_ts);
+    let oplog_end_ts = OplogTimestamp::unpack_u64(on_chain_oplog.oplog_end_ts);
+
+    let computed = compute_oplog_range_hash(client, sequence, oplog_start_ts, oplog_end_ts)
+        .await
+        .map_err(|e| format!("compute_oplog_range_hash: {e}"))?;
+
+    let matched = computed.oplog_merkle_root_hex == on_chain_oplog.oplog_root_hex;
+
+    if matched {
+        let (attester_key, attester_identity, attester_address) = match (
+            state.attester_key.as_ref(),
+            state.attester_identity.as_ref(),
+            state.attester_address.as_ref(),
+        ) {
+            (Some(key), Some(identity), Some(address)) => (key, identity, address),
+            _ => {
+                return Err(
+                    "attester key/identity/address not configured".to_string(),
+                );
+            }
+        };
+
+        let signature_hex = sign_oplog_attestation(
+            attester_key,
+            &on_chain_oplog.oplog_root_hex,
+            on_chain_oplog.oplog_end_ts,
+        )?;
+
+        match stellar::attest_oplog(attester_identity, attester_address, sequence, &signature_hex) {
+            Ok(()) => Ok(true),
+            Err(e) => {
+                // Duplicate attestation is expected if we've already attested.
+                log::warn!("auto-attest: sequence {sequence} attestation submission: {e}");
+                Ok(false)
+            }
+        }
+    } else {
+        log::error!(
+            "auto-attest: ALERT — sequence {sequence} oplog hash mismatch! \
+             on_chain={} computed={}",
+            on_chain_oplog.oplog_root_hex,
+            computed.oplog_merkle_root_hex
+        );
+        Ok(false)
+    }
+}
+
 /// Publish an epoch's events to IPFS and commit the root to Stellar.
+///
+/// If a MongoDB client is available, this also computes the oplog hash
+/// for the epoch's time range and attaches it to the epoch before
+/// committing. The oplog hash provides the completeness guarantee:
+/// it proves that no writes were omitted from the audit log.
 async fn publish_and_commit(
     state: &DaemonState,
     epoch: &crate::audit::epoch::Epoch,
 ) -> Result<(), String> {
     let epoch_number = epoch.epoch_number;
     let end_index = epoch.end_index.ok_or("epoch has no end_index")?;
+
+    // 0. Compute oplog hash and attach to epoch (if MongoDB client is available).
+    if let Some(client) = &state.mongo_client {
+        match compute_and_attach_oplog_hash(state, client, epoch_number).await {
+            Ok((oplog_range, _epoch)) => {
+                log::info!(
+                    "auto-commit: epoch {epoch_number} oplog hash attached: root={}, entries={}",
+                    oplog_range.oplog_merkle_root_hex,
+                    oplog_range.entry_count
+                );
+            }
+            Err(e) => {
+                log::warn!(
+                    "auto-commit: oplog hash computation failed for epoch {epoch_number}: {e} — committing without oplog hash"
+                );
+            }
+        }
+    }
+
+    // Reload the epoch to get the updated oplog fields (if attached above).
+    let epoch = {
+        let epochs = state.epoch_manager.list_epochs();
+        epochs
+            .iter()
+            .find(|e| e.epoch_number == epoch_number)
+            .cloned()
+            .unwrap_or_else(|| epoch.clone())
+    };
 
     // 1. Publish to IPFS.
     let events_path = state.data_dir.join("audit").join("events.jsonl");
@@ -281,6 +490,8 @@ async fn publish_and_commit(
     }
 
     // 2. Commit root to Stellar.
+    //    If the epoch has an oplog hash, use commit_root_with_oplog to
+    //    store both the audit root and the oplog root on-chain.
     let root_hex = epoch.root_hex.clone().unwrap_or_else(|| {
         state.audit_log.root_hex().unwrap_or_default()
     });
@@ -291,14 +502,50 @@ async fn publish_and_commit(
         None => format!("epoch={epoch_number}"),
     };
 
-    let root_clone = root_hex.clone();
-    let metadata_clone = metadata.clone();
-    let commit_result = tokio::task::spawn_blocking(move || {
-        crate::audit::stellar::commit_root(&root_clone, &metadata_clone)
-    })
-    .await
-    .map_err(|e| format!("commit_root task join: {e}"))?
-    .map_err(|e| format!("commit_root: {e}"))?;
+    let commit_result = if let Some(oplog_root_hex) = &epoch.oplog_merkle_root_hex {
+        // Commit with oplog hash — the completeness-preserving path.
+        let oplog_start = epoch
+            .oplog_start_ts
+            .as_ref()
+            .map_or(0, |ts| ts.pack_u64());
+        let oplog_end = epoch
+            .oplog_end_ts
+            .as_ref()
+            .map_or(0, |ts| ts.pack_u64());
+        let oplog_count = epoch.oplog_entry_count.unwrap_or(0);
+
+        log::info!(
+            "auto-commit: epoch {epoch_number} committing with oplog hash: root={}, entries={}",
+            oplog_root_hex, oplog_count
+        );
+
+        let root_clone = root_hex.clone();
+        let oplog_root_clone = oplog_root_hex.clone();
+        let metadata_clone = metadata.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::audit::stellar::commit_root_with_oplog(
+                &root_clone,
+                &oplog_root_clone,
+                oplog_start,
+                oplog_end,
+                oplog_count,
+                &metadata_clone,
+            )
+        })
+        .await
+        .map_err(|e| format!("commit_root_with_oplog task join: {e}"))?
+        .map_err(|e| format!("commit_root_with_oplog: {e}"))?
+    } else {
+        // Fallback: commit without oplog hash (backward compatible).
+        let root_clone = root_hex.clone();
+        let metadata_clone = metadata.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::audit::stellar::commit_root(&root_clone, &metadata_clone)
+        })
+        .await
+        .map_err(|e| format!("commit_root task join: {e}"))?
+        .map_err(|e| format!("commit_root: {e}"))?
+    };
 
     log::info!(
         "auto-commit: epoch {epoch_number} committed on-chain, tx: {}",
@@ -333,6 +580,53 @@ fn extract_epoch_batch(jsonl: &str, start_index: u64, end_index: u64) -> String 
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Compute the oplog hash for an epoch's time range and attach it to
+/// the epoch in the EpochManager.
+///
+/// The oplog range is `[next_oplog_start_ts, majority_commit_ts)`. The
+/// start timestamp is tracked by the EpochManager (chained from the
+/// previous epoch's end). The end timestamp is the current majority-
+/// committed oplog timestamp, ensuring we only hash durable entries.
+async fn compute_and_attach_oplog_hash(
+    state: &DaemonState,
+    client: &mongodb::Client,
+    epoch_number: u64,
+) -> Result<(crate::audit::oplog::OplogRange, crate::audit::epoch::Epoch), String> {
+    use crate::audit::oplog::{compute_oplog_range_hash, get_majority_commit_ts};
+
+    let start_ts = state.epoch_manager.next_oplog_start_ts();
+    let majority_ts = get_majority_commit_ts(client)
+        .await
+        .map_err(|e| format!("get_majority_commit_ts: {e}"))?;
+
+    // If the majority commit point hasn't advanced past the start,
+    // there are no new oplog entries to hash for this epoch.
+    if majority_ts <= start_ts {
+        log::warn!(
+            "oplog hash: majority commit ts {} not past start ts {} for epoch {epoch_number} — attaching empty range",
+            majority_ts, start_ts
+        );
+    }
+
+    let oplog_range = compute_oplog_range_hash(client, epoch_number, start_ts, majority_ts)
+        .await
+        .map_err(|e| format!("compute_oplog_range_hash: {e}"))?;
+
+    let epoch = state
+        .epoch_manager
+        .attach_oplog_hash(
+            epoch_number,
+            oplog_range.start_ts,
+            oplog_range.end_ts,
+            oplog_range.entry_count,
+            oplog_range.oplog_merkle_root_hex.clone(),
+            oplog_range.majority_commit_ts,
+        )
+        .map_err(|e| format!("attach_oplog_hash: {e}"))?;
+
+    Ok((oplog_range, epoch))
 }
 
 // ─── Common handlers (shared by both modes) ───────────────────────────

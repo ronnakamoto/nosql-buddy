@@ -5,9 +5,23 @@
 //!
 //! ## Architecture
 //!
-//! - **Instance storage**: admin address, sequence counter, current root pointer.
-//! - **Persistent storage**: append-only root log, root dedup index.
-//! - **Events**: `commit_root` emitted on each commit.
+//! - **Instance storage**: admin address, sequence counter, current root pointer,
+//!   authorized attesters.
+//! - **Persistent storage**: append-only root log, root dedup index, oplog
+//!   commitments, oplog attestations.
+//! - **Events**: `commit_root` emitted on each commit, `attest_oplog` on each
+//!   attestation.
+//!
+//! ## Oplog completeness
+//!
+//! Each root commitment can optionally carry an **oplog commitment** — a
+//! SHA-256 Merkle root over MongoDB's oplog entries for the epoch's time
+//! range. This binds the audit log to the oplog, proving that no writes
+//! were omitted.
+//!
+//! Independent attesters (e.g., the auditor/regulator's replica member)
+//! can submit ed25519 attestations over the oplog root, providing a
+//! durable, on-chain record that they observed the same oplog hash.
 //!
 //! ## Verification
 //!
@@ -63,6 +77,67 @@ pub struct RootEntry {
     pub metadata: String,
 }
 
+/// Oplog completeness commitment for an epoch.
+///
+/// Binds an audit log root to MongoDB's oplog, proving that no writes
+/// were omitted from the audit log. The `oplog_root` is a SHA-256
+/// Merkle root over canonicalized oplog entries in the range
+/// `[oplog_start_ts, oplog_end_ts)`.
+///
+/// Timestamps are packed as `(time << 32) | increment` to fit in a u64.
+#[derive(Clone)]
+#[contracttype]
+pub struct OplogCommitment {
+    /// SHA-256 Merkle root over canonicalized oplog entries (32 bytes).
+    pub oplog_root: Bytes,
+    /// Packed oplog start timestamp (inclusive).
+    pub oplog_start_ts: u64,
+    /// Packed oplog end timestamp (exclusive).
+    pub oplog_end_ts: u64,
+    /// Number of oplog entries in the range.
+    pub oplog_entry_count: u64,
+}
+
+/// An independent attester's signature over an oplog commitment.
+///
+/// The attester (e.g., the auditor's replica member) signs the
+/// `oplog_root` and `oplog_end_ts` with their ed25519 key, providing
+/// a durable on-chain record that they observed the same oplog hash.
+/// This survives oplog rollover (C2 fix).
+#[derive(Clone)]
+#[contracttype]
+pub struct OplogAttestation {
+    /// The attester's address (must be authorized).
+    pub attester: Address,
+    /// Ed25519 signature over `sha256(oplog_root || oplog_end_ts)`.
+    pub signature: Bytes,
+    /// Ledger timestamp when the attestation was submitted.
+    pub timestamp: u64,
+}
+
+/// Result of verifying oplog attestations for a sequence.
+///
+/// Reports how many attestations exist, how many are from currently-authorized
+/// attesters, and an overall verdict describing the attestation state.
+#[derive(Clone)]
+#[contracttype]
+pub struct AttestationVerification {
+    /// The sequence number being verified.
+    pub sequence: u64,
+    /// The oplog root from the commitment (what was attested to).
+    pub oplog_root: Bytes,
+    /// Total number of attestations on record for this sequence.
+    pub attestation_count: u32,
+    /// Number of attestations from currently-authorized attesters.
+    pub authorized_count: u32,
+    /// True if all attestations are from authorized attesters and count > 0.
+    pub all_match: bool,
+    /// "verified" if all attestations are authorized and count > 0,
+    /// "no_attestations" if count == 0,
+    /// "unauthorized_attester" if any attester is no longer authorized.
+    pub verdict: String,
+}
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -80,6 +155,12 @@ pub enum CommitmentError {
     RootNotCommitted = 7,
     VerificationFailed = 8,
     NotInitialized = 9,
+    AttesterNotAuthorized = 10,
+    OplogCommitmentNotFound = 11,
+    InvalidSignature = 12,
+    DuplicateAttestation = 13,
+    InvalidOplogRoot = 14,
+    InvalidTimestampRange = 15,
 }
 
 // ---------------------------------------------------------------------------
@@ -91,6 +172,8 @@ pub enum InstanceKey {
     Admin,
     Sequence,
     CurrentRoot,
+    /// Set of authorized attester addresses.
+    AuthorizedAttesters,
 }
 
 #[contracttype]
@@ -99,6 +182,10 @@ pub enum PersistentKey {
     RootEntry(u64),
     /// root bytes -> sequence
     RootIndex,
+    /// (sequence: u64) -> OplogCommitment
+    OplogCommitment(u64),
+    /// (sequence: u64) -> Vec<OplogAttestation>
+    OplogAttestations(u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +281,312 @@ impl ZkAuditCommitment {
         );
 
         Ok(sequence)
+    }
+
+    /// Commit a Merkle root with an oplog completeness commitment.
+    ///
+    /// This is the primary commit function for the oplog-completeness
+    /// protocol. It stores both the audit log root and the oplog Merkle
+    /// root, binding them together on-chain. An auditor can later verify
+    /// that the oplog root matches what they independently computed from
+    /// their replica member.
+    ///
+    /// Timestamps are packed as `(time << 32) | increment`.
+    pub fn commit_root_with_oplog(
+        env: Env,
+        root: Bytes,
+        oplog_root: Bytes,
+        oplog_start_ts: u64,
+        oplog_end_ts: u64,
+        oplog_entry_count: u64,
+        metadata: String,
+    ) -> Result<u64, CommitmentError> {
+        // Validate oplog root is 32 bytes.
+        if oplog_root.len() != 32 {
+            return Err(CommitmentError::InvalidOplogRoot);
+        }
+
+        // Validate timestamp range.
+        if oplog_end_ts < oplog_start_ts {
+            return Err(CommitmentError::InvalidTimestampRange);
+        }
+
+        // Inlined root-commit logic so that audit root, sequence, and oplog
+        // commitment are all updated in a single atomic transaction.
+        let root_index: Map<Bytes, u64> = env
+            .storage()
+            .persistent()
+            .get(&PersistentKey::RootIndex)
+            .unwrap_or_else(|| Map::new(&env));
+
+        if root_index.contains_key(root.clone()) {
+            return Err(CommitmentError::RootAlreadyCommitted);
+        }
+
+        let mut sequence: u64 = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Sequence)
+            .unwrap_or(0);
+        sequence += 1;
+        env.storage().instance().set(&InstanceKey::Sequence, &sequence);
+
+        let timestamp = env.ledger().timestamp();
+
+        let entry = RootEntry {
+            sequence,
+            root: root.clone(),
+            timestamp,
+            metadata: metadata.clone(),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&PersistentKey::RootEntry(sequence), &entry);
+
+        let mut root_index = root_index;
+        root_index.set(root.clone(), sequence);
+        env.storage()
+            .persistent()
+            .set(&PersistentKey::RootIndex, &root_index);
+
+        env.storage()
+            .instance()
+            .set(&InstanceKey::CurrentRoot, &sequence);
+
+        // Store the oplog commitment.
+        let oplog_commitment = OplogCommitment {
+            oplog_root: oplog_root.clone(),
+            oplog_start_ts,
+            oplog_end_ts,
+            oplog_entry_count,
+        };
+
+        env.storage().persistent().set(
+            &PersistentKey::OplogCommitment(sequence),
+            &oplog_commitment,
+        );
+
+        // Emit events.
+        env.events().publish(
+            (String::from_str(&env, "commit_root"),),
+            (sequence, root, timestamp, metadata),
+        );
+        env.events().publish(
+            (String::from_str(&env, "commit_oplog"),),
+            (sequence, oplog_root, oplog_end_ts, oplog_entry_count),
+        );
+
+        Ok(sequence)
+    }
+
+    /// Get the oplog commitment for a given sequence number.
+    pub fn get_oplog_commitment(
+        env: Env,
+        sequence: u64,
+    ) -> Result<OplogCommitment, CommitmentError> {
+        env.storage()
+            .persistent()
+            .get(&PersistentKey::OplogCommitment(sequence))
+            .ok_or(CommitmentError::OplogCommitmentNotFound)
+    }
+
+    /// Authorize an attester address and its ed25519 public key. Only the admin can call this.
+    ///
+    /// The public key is the raw 32-byte ed25519 public key that will be used
+    /// to verify oplog attestations on-chain.
+    pub fn authorize_attester(env: Env, attester: Address, public_key: BytesN<32>) {
+        let admin = Self::get_admin_or_panic(&env);
+        admin.require_auth();
+
+        let mut attesters: Map<Address, BytesN<32>> = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::AuthorizedAttesters)
+            .unwrap_or_else(|| Map::new(&env));
+        attesters.set(attester, public_key);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::AuthorizedAttesters, &attesters);
+    }
+
+    /// Revoke an attester's authorization. Only the admin can call this.
+    pub fn revoke_attester(env: Env, attester: Address) {
+        let admin = Self::get_admin_or_panic(&env);
+        admin.require_auth();
+
+        if let Some(mut attesters) = env
+            .storage()
+            .instance()
+            .get::<InstanceKey, Map<Address, BytesN<32>>>(&InstanceKey::AuthorizedAttesters)
+        {
+            attesters.remove(attester.clone());
+            env.storage()
+                .instance()
+                .set(&InstanceKey::AuthorizedAttesters, &attesters);
+        }
+    }
+
+    /// Submit an oplog attestation as an independent attester.
+    ///
+    /// The attester's address must be authorized by the admin. The
+    /// transaction must be signed by the attester's key (enforced by
+    /// `require_auth`). The `signature` is an ed25519 signature over
+    /// `sha256(oplog_root || oplog_end_ts.to_be_bytes())` and is verified
+    /// on-chain against the public key registered by `authorize_attester`.
+    ///
+    /// This provides a durable, on-chain record that the attester observed
+    /// the same oplog hash — even after the oplog rolls over (C2 fix).
+    pub fn attest_oplog(
+        env: Env,
+        attester: Address,
+        sequence: u64,
+        signature: Bytes,
+    ) -> Result<(), CommitmentError> {
+        // 1. Require auth from the attester.
+        attester.require_auth();
+
+        // 2. Get the oplog commitment.
+        let oplog_commitment: OplogCommitment = env
+            .storage()
+            .persistent()
+            .get(&PersistentKey::OplogCommitment(sequence))
+            .ok_or(CommitmentError::OplogCommitmentNotFound)?;
+
+        // 3. Check attester is authorized and retrieve its registered public key.
+        let attesters: Map<Address, BytesN<32>> = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::AuthorizedAttesters)
+            .unwrap_or_else(|| Map::new(&env));
+
+        let public_key = attesters
+            .get(attester.clone())
+            .ok_or(CommitmentError::AttesterNotAuthorized)?;
+
+        // 4. Validate signature length (ed25519 = 64 bytes) and convert.
+        if signature.len() != 64 {
+            return Err(CommitmentError::InvalidSignature);
+        }
+        let signature_n64: BytesN<64> = BytesN::<64>::try_from_val(&env, &signature.to_val())
+            .map_err(|_| CommitmentError::InvalidSignature)?;
+
+        // 5. Check for duplicate attestation by this attester.
+        let existing: Vec<OplogAttestation> = env
+            .storage()
+            .persistent()
+            .get(&PersistentKey::OplogAttestations(sequence))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        for existing_att in existing.iter() {
+            if existing_att.attester == attester {
+                return Err(CommitmentError::DuplicateAttestation);
+            }
+        }
+
+        // 6. Verify the ed25519 signature over sha256(oplog_root || oplog_end_ts.to_be_bytes()).
+        let mut message = Bytes::new(&env);
+        message.append(&oplog_commitment.oplog_root);
+        message.append(&Bytes::from_array(&env, &oplog_commitment.oplog_end_ts.to_be_bytes()));
+        let message_hash = env.crypto().sha256(&message);
+        let message_hash_bytes = Bytes::from_array(&env, &message_hash.to_array());
+        env.crypto()
+            .ed25519_verify(&public_key, &message_hash_bytes, &signature_n64);
+
+        // 7. Record the attestation.
+        let timestamp = env.ledger().timestamp();
+        let attestation = OplogAttestation {
+            attester: attester.clone(),
+            signature: signature.clone(),
+            timestamp,
+        };
+
+        let mut attestations = existing;
+        attestations.push_back(attestation);
+
+        env.storage().persistent().set(
+            &PersistentKey::OplogAttestations(sequence),
+            &attestations,
+        );
+
+        // 8. Emit event.
+        env.events().publish(
+            (String::from_str(&env, "attest_oplog"),),
+            (sequence, attester, timestamp),
+        );
+
+        Ok(())
+    }
+
+    /// Get all oplog attestations for a given sequence.
+    pub fn get_oplog_attestations(
+        env: Env,
+        sequence: u64,
+    ) -> Vec<OplogAttestation> {
+        env.storage()
+            .persistent()
+            .get(&PersistentKey::OplogAttestations(sequence))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Verify oplog attestations for a given sequence.
+    ///
+    /// Retrieves the oplog commitment and all recorded attestations for the
+    /// sequence, then checks each attester against the current
+    /// `AuthorizedAttesters` map. Returns an [`AttestationVerification`]
+    /// describing how many attestations are from currently-authorized
+    /// attesters and an overall verdict.
+    pub fn verify_attestation(
+        env: Env,
+        sequence: u64,
+    ) -> Result<AttestationVerification, CommitmentError> {
+        // 1. Get the oplog commitment (return error if missing).
+        let commitment: OplogCommitment = env
+            .storage()
+            .persistent()
+            .get(&PersistentKey::OplogCommitment(sequence))
+            .ok_or(CommitmentError::OplogCommitmentNotFound)?;
+
+        // 2. Get all attestations for this sequence (default to empty).
+        let attestations: Vec<OplogAttestation> = env
+            .storage()
+            .persistent()
+            .get(&PersistentKey::OplogAttestations(sequence))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        // 3. Load the current authorized attesters map.
+        let attesters: Map<Address, BytesN<32>> = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::AuthorizedAttesters)
+            .unwrap_or_else(|| Map::new(&env));
+
+        // 4. Count attestations from currently-authorized attesters.
+        let attestation_count = attestations.len();
+        let mut authorized_count: u32 = 0;
+        for attestation in attestations.iter() {
+            if attesters.contains_key(attestation.attester.clone()) {
+                authorized_count += 1;
+            }
+        }
+
+        // 5. Compute the verdict and all_match flag.
+        let (all_match, verdict) = if attestation_count == 0 {
+            (false, String::from_str(&env, "no_attestations"))
+        } else if authorized_count == attestation_count {
+            (true, String::from_str(&env, "verified"))
+        } else {
+            (false, String::from_str(&env, "unauthorized_attester"))
+        };
+
+        Ok(AttestationVerification {
+            sequence,
+            oplog_root: commitment.oplog_root,
+            attestation_count,
+            authorized_count,
+            all_match,
+            verdict,
+        })
     }
 
     /// Verify a Groth16 inclusion proof against a committed root.

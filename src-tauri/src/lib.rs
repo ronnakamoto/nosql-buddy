@@ -229,6 +229,8 @@ pub fn run() {
             audit::commands::audit_submit_attestation,
             audit::commands::audit_list_attestations,
             audit::commands::audit_get_attestation_status,
+            audit::commands::audit_verify_oplog_integrity,
+            audit::commands::audit_get_oplog_commitment,
         ])
         .setup(|app| {
             // Native menu (macOS menu bar + Windows/Linux in-window).

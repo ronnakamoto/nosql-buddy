@@ -1,3 +1,74 @@
-// Auto-initiate the replica set on first container start.
-// Runs via docker-entrypoint-initdb.d on MongoDB first boot.
-rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "localhost:27017" }] });
+// Replica set initializer with retry logic.
+// Started with `mongosh --nodb` so we can control connection timing.
+//
+// Members:
+//   mongo1:27017 — primary (operator)
+//   mongo2:27017 — secondary (operator)
+//   mongo3:27017 — secondary (independent — auditor/regulator)
+
+function waitForHost(host, maxAttempts) {
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      const conn = new Mongo(host);
+      conn.close();
+      printjson({ ok: true, host, attempt: i + 1 });
+      return true;
+    } catch (e) {
+      if (i % 5 === 0) print("Waiting for " + host + " (attempt " + (i + 1) + ")...");
+      sleep(1000);
+    }
+  }
+  return false;
+}
+
+const maxAttempts = 60;
+const hosts = ["mongo1:27017", "mongo2:27017", "mongo3:27017"];
+
+for (const h of hosts) {
+  if (!waitForHost(h, maxAttempts)) {
+    printjson({ error: "could not reach " + h });
+    quit(1);
+  }
+}
+
+// All members reachable — connect to mongo1 and initiate.
+print("All members reachable. Initiating replica set rs0...");
+const conn = new Mongo("mongo1:27017");
+const db = conn.getDB("admin");
+
+try {
+  const result = db.adminCommand({
+    replSetInitiate: {
+      _id: "rs0",
+      members: [
+        { _id: 0, host: "mongo1:27017" },
+        { _id: 1, host: "mongo2:27017" },
+        { _id: 2, host: "mongo3:27017" },
+      ],
+    },
+  });
+  printjson(result);
+} catch (e) {
+  // Already initiated — that's fine
+  print("rs.initiate returned: " + e);
+}
+
+// Wait for primary election.
+print("Waiting for primary election...");
+for (let i = 0; i < 30; i++) {
+  try {
+    const status = conn.getDB("admin").adminCommand({ replSetGetStatus: 1 });
+    if (status.ok === 1) {
+      const primary = status.members.find((m) => m.stateStr === "PRIMARY");
+      if (primary) {
+        printjson({ primary: primary.name, ok: true });
+        break;
+      }
+    }
+  } catch (e) {
+    // rs.status() may fail before initiation completes
+  }
+  sleep(1000);
+}
+
+print("Replica set initialization complete.");
