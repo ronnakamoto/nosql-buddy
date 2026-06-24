@@ -195,6 +195,12 @@ pub async fn open_connection(
     };
     state.clients.insert(connection_id.clone(), entry).await;
     emit_connection_opened(&app, &connection_id, &profile.id, &profile.name)?;
+    // Start a change stream listener for this connection so all writes
+    // (from shell, IPC, external clients) are captured in the audit log.
+    state
+        .change_streams
+        .start_for(connection_id.clone(), (*client).clone(), state.audit_log.clone())
+        .await;
     let handle = describe_connection(&client, &connection_id, &profile.id, &profile.name).await?;
     // Drop the secret from local memory now that the client is up. The
     // driver keeps a pool internally; we don't need the string anymore.
@@ -209,6 +215,8 @@ pub async fn close_connection(
     app: AppHandle,
 ) -> AppResult<()> {
     let entry = state.clients.remove(&connection_id).await?;
+    // Stop the change stream listener for this connection.
+    state.change_streams.stop_for(&connection_id).await;
     emit_connection_closed(&app, &connection_id, &entry.profile_id)?;
     Ok(())
 }

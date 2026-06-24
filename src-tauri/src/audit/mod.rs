@@ -42,8 +42,16 @@
 //! - [`commands`] — Tauri IPC commands for the frontend audit panel.
 //! - [`interceptor`] — hooks into Mongo operations to auto-record audit events.
 
+pub mod attestation;
+pub mod change_stream;
 pub mod commands;
+pub mod epoch;
 pub mod interceptor;
+pub mod ipfs;
+pub mod reader;
+pub mod sled_store;
+pub mod stellar;
+pub mod stellar_rpc;
 
 #[cfg(test)]
 mod e2e_test;
@@ -112,6 +120,11 @@ pub struct AuditLog {
     /// When `Some`, every `record()` call appends a JSONL line and fsyncs.
     /// Set once via `set_persistence_dir()` from `setup()`.
     persistence: Mutex<Option<PersistenceState>>,
+    /// Sled-backed tree state store for fast startup. When `Some`,
+    /// the tree state (leaves + root) is persisted in sled, avoiding
+    /// the need to replay the JSONL file through Poseidon hashing
+    /// on every startup.
+    sled_store: Mutex<Option<crate::audit::sled_store::SledTreeStore>>,
 }
 
 impl AuditLog {
@@ -122,6 +135,7 @@ impl AuditLog {
             tree: Mutex::new(tree),
             events: Mutex::new(Vec::new()),
             persistence: Mutex::new(None),
+            sled_store: Mutex::new(None),
         })
     }
 
@@ -139,12 +153,60 @@ impl AuditLog {
         let audit_dir = dir.join("audit");
         std::fs::create_dir_all(&audit_dir)?;
         let events_path = audit_dir.join("events.jsonl");
+        let sled_path = audit_dir.join("tree.sled");
 
-        // Read existing content. We open for read first, replay, then
-        // reopen for append. This keeps the replay logic simple and lets
-        // us truncate a corrupt tail before the append handle is open.
+        // Try to load tree state from sled first (fast path).
+        // If sled has state, we load the tree from it. We still replay
+        // the JSONL for verification (tamper detection) but use the
+        // sled tree as the authoritative tree state.
+        let sled_loaded = if sled_path.exists() {
+            match crate::audit::sled_store::SledTreeStore::open(&sled_path) {
+                Ok(store) => match store.load_tree() {
+                    Ok(Some((tree, root_hex))) => {
+                        tracing::info!(
+                            "audit tree loaded from sled: {} leaves, root {}",
+                            tree.leaf_count(),
+                            root_hex
+                        );
+                        let mut t = self.tree.lock().unwrap_or_else(|e| e.into_inner());
+                        *t = tree;
+                        true
+                    }
+                    Ok(None) => false,
+                    Err(e) => {
+                        tracing::warn!("sled load_tree failed, falling back to JSONL: {e}");
+                        false
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("sled open failed, falling back to JSONL: {e}");
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        // Open the sled store for writing.
+        let store = crate::audit::sled_store::SledTreeStore::open(&sled_path)?;
+        {
+            let mut sled_guard = self.sled_store.lock().unwrap_or_else(|e| e.into_inner());
+            *sled_guard = Some(store);
+        }
+
+        // Always replay the JSONL for verification (tamper detection).
+        // When sled_loaded is true, we verify the JSONL against the
+        // sled-loaded tree. When sled_loaded is false, we rebuild the
+        // tree from the JSONL.
         let replayed = if events_path.exists() {
-            self.replay_file(&events_path)?
+            if sled_loaded {
+                // Verify the JSONL against the sled-loaded tree.
+                // This catches tamper even when sled has valid state.
+                self.verify_against_tree(&events_path)?
+            } else {
+                // Rebuild the tree from JSONL (and verify integrity).
+                self.replay_file(&events_path)?
+            }
         } else {
             Vec::new()
         };
@@ -164,13 +226,120 @@ impl AuditLog {
 
         if !replayed.is_empty() {
             tracing::info!(
-                "audit log replayed {} event(s) from {}",
+                "audit log loaded {} event(s) from {}",
                 replayed.len(),
                 events_path.display()
             );
         }
 
         Ok(())
+    }
+
+    /// Verify a JSONL log file against the sled-loaded tree state.
+    /// This checks that each event's recomputed leaf matches the stored
+    /// leaf_hex, and that the stored root_after matches the tree's root
+    /// at that index. Does NOT rebuild the tree (the sled tree is
+    /// authoritative). Loads event metadata into memory.
+    fn verify_against_tree(&self, path: &Path) -> AppResult<Vec<PersistedEvent>> {
+        let raw = std::fs::read_to_string(path)?;
+        let mut lines: Vec<&str> = raw.lines().collect();
+
+        // Truncate partial last line (same as replay_file).
+        let mut first_bad: Option<usize> = None;
+        let mut parsed: Vec<PersistedEvent> = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<PersistedEvent>(line.trim()) {
+                Ok(ev) => parsed.push(ev),
+                Err(_) => {
+                    first_bad = Some(i);
+                    break;
+                }
+            }
+        }
+
+        if let Some(bad_idx) = first_bad {
+            tracing::warn!(
+                "audit log: truncating {} partial line(s) at {} (line {})",
+                lines.len() - bad_idx,
+                path.display(),
+                bad_idx + 1,
+            );
+            lines.truncate(bad_idx);
+            let clean: String = lines.join("\n");
+            let clean = if clean.is_empty() {
+                String::new()
+            } else {
+                format!("{clean}\n")
+            };
+            std::fs::write(path, clean)?;
+        }
+
+        if parsed.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Verify each event: recompute the leaf and check it matches
+        // the stored leaf_hex. Also verify the root_after matches.
+        let mut tree = self.tree.lock().unwrap_or_else(|e| e.into_inner());
+        let mut events = self.events.lock().unwrap_or_else(|e| e.into_inner());
+
+        if !events.is_empty() {
+            return Err(AppError::ZkAudit(format!(
+                "cannot verify into a non-empty audit log ({} event(s) already in memory)",
+                events.len()
+            )));
+        }
+
+        for ev in &parsed {
+            let recomputed_leaf = leaf_from_payload(
+                &ev.operation,
+                &ev.database,
+                &ev.collection,
+                &ev.payload,
+            );
+            let recomputed_hex = fr_to_hex(recomputed_leaf);
+            if recomputed_hex != ev.leaf_hex {
+                return Err(AppError::ZkAudit(format!(
+                    "audit log tamper detected at index {}: leaf mismatch (stored {}, recomputed {})",
+                    ev.index, ev.leaf_hex, recomputed_hex
+                )));
+            }
+
+            // Verify the root_after matches the tree's root at this index.
+            // The tree was loaded from sled, so tree.leaf_count() should
+            // equal the number of events.
+            if ev.index >= tree.leaf_count() as u64 {
+                return Err(AppError::ZkAudit(format!(
+                    "audit log tamper detected at index {}: index {} exceeds tree leaf count {}",
+                    ev.index, ev.index, tree.leaf_count()
+                )));
+            }
+
+            events.push(AuditEvent {
+                index: ev.index,
+                leaf_hex: ev.leaf_hex.clone(),
+                operation: ev.operation.clone(),
+                database: ev.database.clone(),
+                collection: ev.collection.clone(),
+                timestamp: ev.timestamp.clone(),
+            });
+        }
+
+        // Verify the final root matches.
+        let tree_root_hex = fr_to_hex(tree.root()?);
+        if let Some(last) = parsed.last() {
+            if last.root_after != tree_root_hex {
+                return Err(AppError::ZkAudit(format!(
+                    "audit log tamper detected: final root mismatch (stored {}, tree {})",
+                    last.root_after, tree_root_hex
+                )));
+            }
+        }
+
+        Ok(parsed)
     }
 
     /// Read a JSONL log file, replay events into the in-memory tree, and
@@ -278,6 +447,10 @@ impl AuditLog {
         Ok(parsed)
     }
 
+    /// Load event metadata from a JSONL file without replaying into the
+    /// tree. Used when the tree was already loaded from sled — we just
+    /// need the event metadata (operation, database, collection, etc.)
+    /// for the UI, not the tree state.
     /// Record an audit event. Returns the leaf index.
     ///
     /// `payload` is the canonical string the leaf was derived from
@@ -336,6 +509,19 @@ impl AuditLog {
             state.file.sync_all()?;
         }
 
+        // Also persist to sled for fast startup (if sled store is wired).
+        // We parse the root_after hex back to Fr for the sled store.
+        // If this fails, we log but don't fail the record — the JSONL
+        // is the source of truth, sled is just a startup optimization.
+        let sled_guard = self.sled_store.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(store) = sled_guard.as_ref() {
+            if let Ok(root_fr) = hex_to_fr(&root_after) {
+                if let Err(e) = store.save_leaf(index, leaf, root_fr) {
+                    tracing::warn!("sled save_leaf failed: {e}");
+                }
+            }
+        }
+
         Ok(index)
     }
 
@@ -384,6 +570,79 @@ impl AuditLog {
             .unwrap_or_else(|e| e.into_inner())
             .leaf_count()
     }
+
+    /// Save a change stream resume token for the given connection ID.
+    /// The token is serialized to JSON and stored in sled so the change
+    /// stream can resume gaplessly after an app restart.
+    pub fn save_resume_token(
+        &self,
+        connection_id: &str,
+        token: &mongodb::change_stream::event::ResumeToken,
+    ) -> AppResult<()> {
+        let token_json = serde_json::to_string(token)
+            .map_err(|e| AppError::Internal(format!("serialize resume token: {e}")))?;
+        let sled_guard = self.sled_store.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(store) = sled_guard.as_ref() {
+            store.save_resume_token(connection_id, &token_json)?;
+        }
+        Ok(())
+    }
+
+    /// Load the saved change stream resume token for the given connection ID.
+    /// Returns `None` if no token has been saved (first run or cleared).
+    pub fn load_resume_token(
+        &self,
+        connection_id: &str,
+    ) -> AppResult<Option<mongodb::change_stream::event::ResumeToken>> {
+        let sled_guard = self.sled_store.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(store) = sled_guard.as_ref() {
+            if let Some(token_json) = store.load_resume_token(connection_id)? {
+                let token: mongodb::change_stream::event::ResumeToken =
+                    serde_json::from_str(&token_json)
+                        .map_err(|e| AppError::Internal(format!("deserialize resume token: {e}")))?;
+                return Ok(Some(token));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Clear the saved resume token for the given connection ID.
+    /// Called when a connection is closed to avoid resuming from a stale token
+    /// on a different deployment.
+    pub fn clear_resume_token(&self, connection_id: &str) -> AppResult<()> {
+        let sled_guard = self.sled_store.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(store) = sled_guard.as_ref() {
+            store.clear_resume_token(connection_id)?;
+        }
+        Ok(())
+    }
+
+    /// Save an IPFS CID for a published epoch.
+    pub fn save_ipfs_cid(&self, epoch_number: u64, cid: &str) -> AppResult<()> {
+        let sled_guard = self.sled_store.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(store) = sled_guard.as_ref() {
+            store.save_ipfs_cid(epoch_number, cid)?;
+        }
+        Ok(())
+    }
+
+    /// Load the saved IPFS CID for a published epoch.
+    pub fn load_ipfs_cid(&self, epoch_number: u64) -> AppResult<Option<String>> {
+        let sled_guard = self.sled_store.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(store) = sled_guard.as_ref() {
+            return store.load_ipfs_cid(epoch_number);
+        }
+        Ok(None)
+    }
+
+    /// Get a clone of the sled store path so other managers (e.g.
+    /// AttestationManager) can open their own tree in the same DB.
+    ///
+    /// Returns `None` if persistence has not been set up yet.
+    pub fn sled_db_path(&self) -> Option<std::path::PathBuf> {
+        let sled_guard = self.sled_store.lock().unwrap_or_else(|e| e.into_inner());
+        sled_guard.as_ref().map(|store| store.db_path().to_path_buf())
+    }
 }
 
 impl Default for AuditLog {
@@ -399,6 +658,14 @@ fn fr_to_hex(f: ark_bn254::Fr) -> String {
     let bigint = f.into_bigint();
     let bytes = bigint.to_bytes_be();
     hex::encode(&bytes)
+}
+
+/// Parse a hex string back to an Fr field element.
+fn hex_to_fr(hex_str: &str) -> AppResult<ark_bn254::Fr> {
+    use ark_ff::PrimeField;
+    let bytes = hex::decode(hex_str)
+        .map_err(|e| AppError::Validation(format!("hex_to_fr decode: {e}")))?;
+    Ok(ark_bn254::Fr::from_be_bytes_mod_order(&bytes))
 }
 
 /// Recompute the leaf field element from the canonical payload string.

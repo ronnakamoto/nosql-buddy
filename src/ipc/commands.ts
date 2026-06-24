@@ -374,6 +374,85 @@ export interface ProofResult {
   pubSignals: string[];
 }
 
+/** Result of committing a root to Stellar. */
+export interface CommitResult {
+  sequence: number;
+  txHash: string;
+  rootHex: string;
+}
+
+/** The latest committed root from Stellar. */
+export interface OnChainRoot {
+  sequence: number;
+  rootHex: string;
+  timestamp: number;
+  metadata: string;
+}
+
+export interface Epoch {
+  epochNumber: number;
+  startIndex: number;
+  endIndex: number | null;
+  rootHex: string | null;
+  eventCount: number;
+  committed: boolean;
+  committedAt: string | null;
+  txHash: string | null;
+}
+
+// ─── Phase 3: Reader mode, IPFS, RPC, Attestation ───────────────────
+
+/** Result of reader-mode verification against on-chain roots. */
+export interface VerificationReport {
+  onchainRootFound: boolean;
+  onchainRoot: OnChainRoot | null;
+  localRootHex: string;
+  commitmentEventIndex: number | null;
+  totalEvents: number;
+  verifiedEvents: number;
+  eventsAfterCommitment: number;
+  chainIntact: boolean;
+  tamperDetected: boolean;
+  summary: string;
+}
+
+/** Result of publishing an epoch batch to IPFS. */
+export interface IpfsPublishResult {
+  cid: string;
+  epochNumber: number;
+  eventCount: number;
+  batchSizeBytes: number;
+  gatewayUrl: string;
+}
+
+/** A registered publisher for threshold attestation. */
+export interface Publisher {
+  publicKey: string;
+  name: string;
+  registeredAt: string;
+}
+
+/** An attestation of an epoch root by a publisher. */
+export interface Attestation {
+  epochNumber: number;
+  rootHex: string;
+  publisherPublicKey: string;
+  signature: string;
+  submittedAt: string;
+}
+
+/** Threshold attestation status for an epoch. */
+export interface AttestationStatus {
+  epochNumber: number;
+  rootHex: string;
+  threshold: number;
+  totalPublishers: number;
+  validAttestations: number;
+  thresholdMet: boolean;
+  attestedBy: string[];
+  pending: string[];
+}
+
 const commands = {
   ping: (message: string) => invoke<string>("ping", { message }),
   appInfo: () => invoke<AppInfo>("app_info"),
@@ -387,8 +466,8 @@ const commands = {
   auditGetRoot: () => invoke<string>("audit_get_root"),
   auditGenerateProof: (
     index: number,
-    r1csPath: string,
-    wasmPath: string,
+    r1csPath?: string,
+    wasmPath?: string,
   ) =>
     invoke<ProofResult>("audit_generate_proof", {
       index,
@@ -406,6 +485,60 @@ const commands = {
       database,
       collection,
       payload,
+    }),
+  auditCommitRoot: (metadata?: string) =>
+    invoke<CommitResult>("audit_commit_root", { metadata }),
+  auditGetOnchainRoot: () =>
+    invoke<OnChainRoot | null>("audit_get_onchain_root"),
+
+  // --- ZK Audit: Epoch management ---
+  auditListEpochs: () => invoke<Epoch[]>("audit_list_epochs"),
+  auditCurrentEpoch: () => invoke<Epoch>("audit_current_epoch"),
+  auditCloseEpoch: () => invoke<Epoch>("audit_close_epoch"),
+  auditMarkEpochCommitted: (epochNumber: number, txHash: string) =>
+    invoke<void>("audit_mark_epoch_committed", { epochNumber, txHash }),
+
+  // --- ZK Audit: Phase 3 — Reader mode, IPFS, RPC, Attestation ---
+  auditVerifyReaderMode: () =>
+    invoke<VerificationReport>("audit_verify_reader_mode"),
+  auditPublishEpochToIpfs: (epochNumber: number, apiUrl?: string) =>
+    invoke<IpfsPublishResult>("audit_publish_epoch_to_ipfs", {
+      epochNumber,
+      apiUrl,
+    }),
+  auditGetIpfsCid: (epochNumber: number) =>
+    invoke<string | null>("audit_get_ipfs_cid", { epochNumber }),
+  auditCheckIpfsDaemon: (apiUrl?: string) =>
+    invoke<boolean>("audit_check_ipfs_daemon", { apiUrl }),
+  auditGetOnchainRootRpc: (rpcUrl?: string) =>
+    invoke<OnChainRoot | null>("audit_get_onchain_root_rpc", { rpcUrl }),
+  auditAddPublisher: (publicKey: string, name: string) =>
+    invoke<Publisher>("audit_add_publisher", { publicKey, name }),
+  auditRemovePublisher: (publicKey: string) =>
+    invoke<void>("audit_remove_publisher", { publicKey }),
+  auditListPublishers: () => invoke<Publisher[]>("audit_list_publishers"),
+  auditSetAttestationThreshold: (threshold: number) =>
+    invoke<void>("audit_set_attestation_threshold", { threshold }),
+  auditGetAttestationThreshold: () =>
+    invoke<number>("audit_get_attestation_threshold"),
+  auditSubmitAttestation: (
+    epochNumber: number,
+    rootHex: string,
+    publisherPublicKey: string,
+    signatureHex: string,
+  ) =>
+    invoke<Attestation>("audit_submit_attestation", {
+      epochNumber,
+      rootHex,
+      publisherPublicKey,
+      signatureHex,
+    }),
+  auditListAttestations: (epochNumber: number) =>
+    invoke<Attestation[]>("audit_list_attestations", { epochNumber }),
+  auditGetAttestationStatus: (epochNumber: number, rootHex: string) =>
+    invoke<AttestationStatus>("audit_get_attestation_status", {
+      epochNumber,
+      rootHex,
     }),
 
   listProfiles: () => invoke<ProfileSummary[]>("list_profiles"),

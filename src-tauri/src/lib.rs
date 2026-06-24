@@ -209,6 +209,25 @@ pub fn run() {
             audit::commands::audit_get_root,
             audit::commands::audit_generate_proof,
             audit::commands::audit_record_event,
+            audit::commands::audit_commit_root,
+            audit::commands::audit_get_onchain_root,
+            audit::commands::audit_list_epochs,
+            audit::commands::audit_current_epoch,
+            audit::commands::audit_close_epoch,
+            audit::commands::audit_mark_epoch_committed,
+            audit::commands::audit_verify_reader_mode,
+            audit::commands::audit_publish_epoch_to_ipfs,
+            audit::commands::audit_get_ipfs_cid,
+            audit::commands::audit_check_ipfs_daemon,
+            audit::commands::audit_get_onchain_root_rpc,
+            audit::commands::audit_add_publisher,
+            audit::commands::audit_remove_publisher,
+            audit::commands::audit_list_publishers,
+            audit::commands::audit_set_attestation_threshold,
+            audit::commands::audit_get_attestation_threshold,
+            audit::commands::audit_submit_attestation,
+            audit::commands::audit_list_attestations,
+            audit::commands::audit_get_attestation_status,
         ])
         .setup(|app| {
             // Native menu (macOS menu bar + Windows/Linux in-window).
@@ -236,6 +255,29 @@ pub fn run() {
                             data_dir = %dir.display(),
                             "failed to initialize audit log persistence; audit events will not survive restart"
                         );
+                    }
+
+                    // Wire the attestation manager's sled store using
+                    // the same sled DB path as the audit log. The
+                    // attestation manager uses a separate tree within
+                    // the same DB for publisher/attestation storage.
+                    if let Some(sled_path) =
+                        app.state::<AppState>().audit_log.sled_db_path()
+                    {
+                        match crate::audit::sled_store::SledTreeStore::open(&sled_path) {
+                            Ok(store) => {
+                                app.state::<AppState>()
+                                    .attestation_manager
+                                    .set_store(store);
+                                tracing::info!("attestation manager sled store initialized");
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "failed to open sled store for attestation manager"
+                                );
+                            }
+                        }
                     }
                 }
                 Err(e) => {

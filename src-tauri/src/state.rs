@@ -6,6 +6,9 @@
 
 use std::sync::Arc;
 
+use crate::audit::attestation::AttestationManager;
+use crate::audit::change_stream::ChangeStreamRegistry;
+use crate::audit::epoch::EpochManager;
 use crate::audit::AuditLog;
 use crate::mongo::client_registry::ClientRegistry;
 use crate::mongo::credentials::{InMemorySecretStore, KeyringSecretStore, SecretStore};
@@ -18,6 +21,9 @@ pub struct AppState {
     pub clients: ClientRegistry,
     pub shell_registry: ShellRegistry,
     pub audit_log: Arc<AuditLog>,
+    pub change_streams: ChangeStreamRegistry,
+    pub epoch_manager: EpochManager,
+    pub attestation_manager: AttestationManager,
 }
 
 impl AppState {
@@ -41,6 +47,9 @@ impl AppState {
             clients: ClientRegistry::new(),
             shell_registry: ShellRegistry::new(),
             audit_log: Arc::new(AuditLog::new().expect("failed to create audit log")),
+            change_streams: ChangeStreamRegistry::new(),
+            epoch_manager: EpochManager::default(),
+            attestation_manager: AttestationManager::default(),
         }
     }
 }

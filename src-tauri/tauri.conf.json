@@ -42,6 +42,10 @@
     "longDescription": "NoSQLBuddy is a professional, native MongoDB management studio with a visual query builder, aggregation pipeline editor, SQL-to-Mongo translation, schema and index tooling, and safe migration diffs.",
     "category": "DeveloperTool",
     "publisher": "NoSQLBuddy",
-    "copyright": "(c) 2026 NoSQLBuddy"
+    "copyright": "(c) 2026 NoSQLBuddy",
+    "resources": [
+      "resources/circuits/merkle_inclusion.r1cs",
+      "resources/circuits/merkle_inclusion.wasm"
+    ]
   }
 }

@@ -14,7 +14,8 @@ out/
 
 # Rust
 src-tauri/target/
-zk-audit/target/
+# Cover all nested target dirs (zk-audit/target/, zk-audit/soroban-contract/target/, etc.)
+zk-audit/**/target/
 # Cargo.lock should be committed for binary applications, so do NOT ignore it.
 # But ignore Cargo.lock for library/spike/throwaway crates that pin transitive deps.
 zk-spike/**/Cargo.lock

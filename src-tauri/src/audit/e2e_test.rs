@@ -120,3 +120,40 @@ fn test_e2e_proof_verification_with_circuit() {
     eprintln!("  Root: {}", soroban_args.pub_signals[0]);
     eprintln!("  Proof A: {}...", &soroban_args.proof.a[..32]);
 }
+
+/// Verify that proof generation works with the bundled Tauri resource
+/// artifacts (not just the zk-spike build directory). This closes the
+/// Phase 1 verification gap: "dev-mode path resolution for bundled
+/// circuit resources not tested end-to-end."
+#[test]
+fn test_e2e_proof_with_bundled_resources() {
+    // The bundled artifacts live at src-tauri/resources/circuits/.
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let r1cs_path = std::path::Path::new(manifest_dir)
+        .join("resources/circuits/merkle_inclusion.r1cs");
+    let wasm_path = std::path::Path::new(manifest_dir)
+        .join("resources/circuits/merkle_inclusion.wasm");
+
+    if !r1cs_path.exists() || !wasm_path.exists() {
+        eprintln!("Skipping bundled-resource proof test: artifacts not found");
+        return;
+    }
+
+    let audit = Arc::new(AuditLog::new().unwrap());
+    interceptor::record_insert(&audit, "db", "col", r#"{"a":1}"#).unwrap();
+    interceptor::record_insert(&audit, "db", "col", r#"{"a":2}"#).unwrap();
+
+    let inclusion = audit.prove_inclusion(0).unwrap();
+    let r1cs_str = r1cs_path.to_str().unwrap();
+    let wasm_str = wasm_path.to_str().unwrap();
+    let prover = zk_audit::AuditProver::new(r1cs_str, wasm_str).unwrap();
+    let groth16_proof = prover.prove(&inclusion).unwrap();
+
+    assert_eq!(groth16_proof.public_inputs[0], audit.root().unwrap());
+    let soroban_args = zk_audit::AuditProver::serialize_for_soroban(&groth16_proof).unwrap();
+    assert_eq!(soroban_args.proof.a.len(), 128);
+    assert_eq!(soroban_args.proof.b.len(), 256);
+    assert_eq!(soroban_args.proof.c.len(), 128);
+
+    eprintln!("✓ Proof generation with bundled resources succeeded");
+}
