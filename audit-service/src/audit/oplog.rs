@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::audit::oplog_canon::hash_oplog_entry;
-use crate::error::{AppError, AppResult};
+use crate::error::{AuditError, AuditResult};
 
 /// A BSON Timestamp as stored in the oplog `ts` field.
 /// Consists of `time` (seconds since epoch) and `increment` (counter
@@ -266,7 +266,7 @@ impl OplogMerkleTree {
 /// This is the point up to which all writes are durably replicated to
 /// a majority of voting members. Entries beyond this point may be
 /// rolled back. We only hash entries up to this timestamp (H4).
-pub async fn get_majority_commit_ts(client: &Client) -> AppResult<OplogTimestamp> {
+pub async fn get_majority_commit_ts(client: &Client) -> AuditResult<OplogTimestamp> {
     let result = client
         .database("admin")
         .run_command(bson::doc! { "hello": 1 })
@@ -292,7 +292,7 @@ pub async fn get_majority_commit_ts(client: &Client) -> AppResult<OplogTimestamp
     // running against a standalone mongod, the caller must opt into standalone
     // mode explicitly; silently using wall-clock time as an oplog position is
     // wrong and would allow hashing entries that can be rolled back.
-    Err(AppError::Validation(
+    Err(AuditError::Validation(
         "lastCommittedOpTime not found — connect to a replica set member or enable standalone mode".to_string(),
     ))
 }
@@ -310,7 +310,7 @@ pub async fn read_oplog_range(
     client: &Client,
     start_ts: OplogTimestamp,
     end_ts: OplogTimestamp,
-) -> AppResult<Vec<Document>> {
+) -> AuditResult<Vec<Document>> {
     let oplog = client
         .database("local")
         .collection::<Document>("oplog.rs");
@@ -356,7 +356,7 @@ pub async fn compute_oplog_range_hash(
     epoch_number: u64,
     start_ts: OplogTimestamp,
     end_ts: OplogTimestamp,
-) -> AppResult<OplogRange> {
+) -> AuditResult<OplogRange> {
     // Ensure end_ts is at or before the majority-committed point (H4).
     let majority_ts = get_majority_commit_ts(client).await?;
     let safe_end_ts = if end_ts > majority_ts {
@@ -391,7 +391,7 @@ pub async fn compute_oplog_range_hash(
 pub async fn read_oplog_from_beginning(
     client: &Client,
     end_ts: OplogTimestamp,
-) -> AppResult<Vec<Document>> {
+) -> AuditResult<Vec<Document>> {
     let oplog = client
         .database("local")
         .collection::<Document>("oplog.rs");
@@ -419,7 +419,7 @@ pub async fn read_oplog_from_beginning(
 /// Get the latest oplog timestamp from the connected member.
 /// This is the timestamp of the most recent oplog entry (not necessarily
 /// majority-committed). Used to determine the current end of the oplog.
-pub async fn get_latest_oplog_ts(client: &Client) -> AppResult<OplogTimestamp> {
+pub async fn get_latest_oplog_ts(client: &Client) -> AuditResult<OplogTimestamp> {
     let oplog = client
         .database("local")
         .collection::<Document>("oplog.rs");

@@ -44,7 +44,7 @@ use tokio::sync::Mutex;
 
 use crate::audit::interceptor;
 use crate::audit::AuditLog;
-use crate::error::{AppError, AppResult};
+use crate::error::{AuditError, AuditResult};
 
 /// A handle to a running change stream listener. Dropping this
 /// does NOT stop the listener — use `stop()` to cancel it.
@@ -151,7 +151,7 @@ async fn watch_once(
     cancel: &Arc<tokio::sync::Notify>,
     connection_id: &str,
     resume_token: Option<mongodb::change_stream::event::ResumeToken>,
-) -> AppResult<()> {
+) -> AuditResult<()> {
     // Use the builder API: client.watch() returns a Watch struct,
     // chain .resume_after() if we have a token, then .show_expanded_events(true).
     let mut watch_builder = client.watch().show_expanded_events(true);
@@ -160,7 +160,7 @@ async fn watch_once(
     }
     let mut stream = watch_builder
         .await
-        .map_err(|e| AppError::Mongo(format!("failed to open change stream: {e}")))?;
+        .map_err(|e| AuditError::Mongo(format!("failed to open change stream: {e}")))?;
 
     log::info!("change stream opened, listening for events (connection {connection_id})");
 
@@ -183,7 +183,7 @@ async fn watch_once(
                         }
                     }
                     Some(Err(e)) => {
-                        return Err(AppError::Mongo(format!(
+                        return Err(AuditError::Mongo(format!(
                             "change stream error: {e}"
                         )));
                     }

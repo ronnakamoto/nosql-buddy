@@ -1,4 +1,4 @@
-//! Standalone audit daemon (nosqlbuddy-auditd).
+//! Standalone audit service (nosqlbuddy-audit).
 //!
 //! One binary, two modes:
 //! - **Publisher** (`--mode publish`): connects to MongoDB, runs the change
@@ -30,8 +30,9 @@ use crate::audit::attestation::AttestationManager;
 use crate::audit::change_stream::ChangeStreamRegistry;
 use crate::audit::epoch::EpochManager;
 use crate::audit::ipfs::IpfsConfig;
+use crate::audit::stellar_native::{self, StellarKeypair, MAINNET_PASSPHRASE, TESTNET_HORIZON_URL, TESTNET_PASSPHRASE, TESTNET_RPC_URL};
 use crate::audit::AuditLog;
-use crate::error::AppError;
+use crate::error::AuditError;
 
 /// Daemon mode: publisher, reader, or attester.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -43,6 +44,48 @@ pub enum DaemonMode {
     /// member, watches for new epoch commitments on-chain, independently
     /// computes the oplog hash, and submits attestations to the contract.
     Attest,
+}
+
+/// Chain configuration for native Stellar signing.
+///
+/// Replaces the old `STELLAR_IDENTITY` env var + `stellar` CLI approach.
+/// The daemon loads a `StellarKeypair` from a secret key and uses these
+/// endpoints to sign and submit transactions natively.
+#[derive(Debug, Clone)]
+pub struct DaemonChainConfig {
+    pub network: String,
+    pub rpc_url: String,
+    pub horizon_url: String,
+    pub passphrase: String,
+    pub contract_id: String,
+}
+
+impl Default for DaemonChainConfig {
+    fn default() -> Self {
+        Self::testnet()
+    }
+}
+
+impl DaemonChainConfig {
+    pub fn testnet() -> Self {
+        Self {
+            network: "testnet".to_string(),
+            rpc_url: TESTNET_RPC_URL.to_string(),
+            horizon_url: TESTNET_HORIZON_URL.to_string(),
+            passphrase: TESTNET_PASSPHRASE.to_string(),
+            contract_id: crate::audit::stellar::CONTRACT_ID.to_string(),
+        }
+    }
+
+    pub fn mainnet(rpc_url: String, contract_id: String) -> Self {
+        Self {
+            network: "mainnet".to_string(),
+            rpc_url,
+            horizon_url: "https://horizon.stellar.org".to_string(),
+            passphrase: MAINNET_PASSPHRASE.to_string(),
+            contract_id,
+        }
+    }
 }
 
 /// Configuration for the daemon, parsed from CLI args.
@@ -60,12 +103,23 @@ pub struct DaemonConfig {
     /// Path to the ed25519 attester signing key file. Generated if missing.
     pub attester_key_file: Option<PathBuf>,
     /// Stellar CLI identity name used by the attester to sign transactions.
+    /// Deprecated — use `secret_key` instead (native signing).
     pub attester_identity: Option<String>,
     /// Stellar account address of the attester (must match the identity).
+    /// When using native signing, this is derived from the keypair.
     pub attester_address: Option<String>,
     /// If true, epoch close fails when oplog hash computation fails.
     /// If false, the epoch closes without the oplog hash (warns).
     pub oplog_hash_required: bool,
+    /// Stellar secret key (S... strkey) for the publisher to sign transactions.
+    /// Replaces the `STELLAR_IDENTITY` env var. When set, the daemon uses
+    /// native signing instead of the `stellar` CLI.
+    pub secret_key: Option<String>,
+    /// Stellar secret key for the attester's Stellar account (separate from
+    /// the ed25519 attester signing key). Required for native attestation.
+    pub attester_secret_key: Option<String>,
+    /// Chain configuration (network, RPC, Horizon, contract ID, passphrase).
+    pub chain: DaemonChainConfig,
 }
 
 impl Default for DaemonConfig {
@@ -75,7 +129,7 @@ impl Default for DaemonConfig {
             mongo_uri: None,
             data_dir: dirs::data_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join("nosqlbuddy-auditd"),
+                .join("nosqlbuddy-audit"),
             port: 9173,
             circuit_dir: None,
             ipfs_api_url: "http://127.0.0.1:5001".to_string(),
@@ -86,6 +140,9 @@ impl Default for DaemonConfig {
             attester_identity: None,
             attester_address: None,
             oplog_hash_required: false,
+            secret_key: None,
+            attester_secret_key: None,
+            chain: DaemonChainConfig::testnet(),
         }
     }
 }
@@ -107,19 +164,29 @@ pub struct DaemonState {
     /// Ed25519 signing key for the attester mode (oplog attestations).
     pub attester_key: Option<ed25519_dalek::SigningKey>,
     /// Stellar CLI identity name used to sign attester transactions.
+    /// Deprecated — `signing_keypair` is used instead when available.
     pub attester_identity: Option<String>,
     /// Stellar account address of the attester (for contract authorization).
     pub attester_address: Option<String>,
     /// If true, epoch close fails when oplog hash computation fails.
     pub oplog_hash_required: bool,
+    /// Stellar keypair for the publisher to sign transactions natively.
+    /// When set, the publisher uses `stellar_native` instead of the CLI.
+    pub signing_keypair: Option<StellarKeypair>,
+    /// Stellar keypair for the attester's Stellar account (for native
+    /// `attest_oplog` submission). Separate from `attester_key` (the ed25519
+    /// oplog signing key).
+    pub attester_stellar_keypair: Option<StellarKeypair>,
+    /// Chain configuration for native signing (network, RPC, Horizon, contract).
+    pub chain: DaemonChainConfig,
 }
 
-/// HTTP error wrapper for AppError. Converts domain errors into appropriate
-/// HTTP status codes with a JSON body matching the AppError serialization.
-pub struct ApiError(pub AppError);
+/// HTTP error wrapper for AuditError. Converts domain errors into appropriate
+/// HTTP status codes with a JSON body matching the AuditError serialization.
+pub struct ApiError(pub AuditError);
 
-impl From<AppError> for ApiError {
-    fn from(e: AppError) -> Self {
+impl From<AuditError> for ApiError {
+    fn from(e: AuditError) -> Self {
         Self(e)
     }
 }
@@ -129,16 +196,10 @@ impl IntoResponse for ApiError {
         use axum::http::StatusCode;
 
         let status = match &self.0 {
-            AppError::NotFound(_) | AppError::ConnectionNotFound(_) | AppError::ProfileNotFound(_) => {
-                StatusCode::NOT_FOUND
-            }
-            AppError::Validation(_) | AppError::InvalidBson(_) | AppError::SqlParse(_) => {
-                StatusCode::BAD_REQUEST
-            }
-            AppError::Credential(_) | AppError::ProfileExists(_) => {
-                StatusCode::CONFLICT
-            }
-            AppError::Timeout(_) => StatusCode::REQUEST_TIMEOUT,
+            AuditError::NotFound(_) => StatusCode::NOT_FOUND,
+            AuditError::Validation(_) => StatusCode::BAD_REQUEST,
+            AuditError::Credential(_) => StatusCode::CONFLICT,
+            AuditError::Timeout(_) => StatusCode::REQUEST_TIMEOUT,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
@@ -152,6 +213,44 @@ impl IntoResponse for ApiError {
 
 /// Type alias for handler results.
 pub type ApiResult<T> = Result<Json<T>, ApiError>;
+
+/// Load a `StellarKeypair` from a Stellar secret key strkey (S... format).
+///
+/// Decodes the base32 strkey, verifies the version byte and checksum, and
+/// returns the keypair. Used by the daemon bin to load keypairs from
+/// `--secret-key` / `--attester-secret-key` CLI args or env vars.
+pub fn load_keypair_from_secret_key(secret_key: &str) -> Result<StellarKeypair, String> {
+    let secret_bytes = decode_secret_key_strkey(secret_key)
+        .ok_or_else(|| format!("invalid Stellar secret key (expected S... strkey, got {} chars)", secret_key.len()))?;
+    Ok(StellarKeypair::from_secret_bytes(&secret_bytes))
+}
+
+/// Decode a Stellar secret key strkey (S...) to 32 raw bytes.
+fn decode_secret_key_strkey(s: &str) -> Option<[u8; 32]> {
+    if !s.starts_with('S') {
+        return None;
+    }
+    let decoded = stellar_native::base32_decode(s)?;
+    // Strkey format: version (1) + payload (32) + checksum (2) = 35 bytes
+    if decoded.len() != 35 {
+        return None;
+    }
+    // Verify version byte: 18 << 3 = 0x90 (ED25519 secret key)
+    if decoded[0] != 18 << 3 {
+        return None;
+    }
+    // Verify checksum (little-endian)
+    let payload = &decoded[..33];
+    let checksum = &decoded[33..];
+    let expected = stellar_native::crc16_xmodem(payload);
+    let expected_le = [(expected & 0xff) as u8, (expected >> 8) as u8];
+    if checksum != expected_le {
+        return None;
+    }
+    let mut result = [0u8; 32];
+    result.copy_from_slice(&decoded[1..33]);
+    Some(result)
+}
 
 /// Status response for the daemon itself.
 #[derive(Debug, Serialize)]
@@ -241,7 +340,7 @@ pub async fn run_server(state: Arc<DaemonState>, port: u16) -> Result<(), Box<dy
 
     let router = build_router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    log::info!("nosqlbuddy-auditd listening on http://{addr}");
+    log::info!("nosqlbuddy-audit listening on http://{addr}");
     axum::serve(listener, router).await?;
     Ok(())
 }
@@ -369,10 +468,24 @@ async fn attest_epoch_internal(
 ) -> Result<bool, String> {
     use crate::audit::oplog::{compute_oplog_range_hash, OplogTimestamp};
     use crate::audit::stellar;
+    use crate::audit::stellar_native;
     use crate::auditd::attester::sign_oplog_attestation;
 
-    let on_chain = stellar::get_oplog_commitment(sequence)
-        .map_err(|e| format!("get_oplog_commitment({sequence}): {e}"))?;
+    // 1. Get the on-chain oplog commitment (native simulation or CLI fallback).
+    let on_chain = if let Some(kp) = &state.attester_stellar_keypair {
+        let chain = &state.chain;
+        stellar_native::get_oplog_commitment_native(
+            sequence,
+            kp,
+            &chain.rpc_url,
+            &chain.contract_id,
+        )
+        .await
+        .map_err(|e| format!("get_oplog_commitment_native({sequence}): {e}"))?
+    } else {
+        stellar::get_oplog_commitment(sequence)
+            .map_err(|e| format!("get_oplog_commitment({sequence}): {e}"))?
+    };
 
     let on_chain_oplog = match on_chain {
         Some(oc) => oc,
@@ -389,18 +502,9 @@ async fn attest_epoch_internal(
     let matched = computed.oplog_merkle_root_hex == on_chain_oplog.oplog_root_hex;
 
     if matched {
-        let (attester_key, attester_identity, attester_address) = match (
-            state.attester_key.as_ref(),
-            state.attester_identity.as_ref(),
-            state.attester_address.as_ref(),
-        ) {
-            (Some(key), Some(identity), Some(address)) => (key, identity, address),
-            _ => {
-                return Err(
-                    "attester key/identity/address not configured".to_string(),
-                );
-            }
-        };
+        let attester_key = state.attester_key.as_ref().ok_or_else(|| {
+            "attester ed25519 key not configured — use --attester-key-file".to_string()
+        })?;
 
         let signature_hex = sign_oplog_attestation(
             attester_key,
@@ -408,7 +512,36 @@ async fn attest_epoch_internal(
             on_chain_oplog.oplog_end_ts,
         )?;
 
-        match stellar::attest_oplog(attester_identity, attester_address, sequence, &signature_hex) {
+        let submit_result = if let Some(stellar_kp) = &state.attester_stellar_keypair {
+            let chain = &state.chain;
+            stellar_native::attest_oplog_native(
+                stellar_kp,
+                sequence,
+                &signature_hex,
+                &chain.rpc_url,
+                &chain.horizon_url,
+                &chain.contract_id,
+                &chain.passphrase,
+            )
+            .await
+        } else {
+            let identity = state.attester_identity.as_ref().ok_or_else(|| {
+                "attester identity not configured — use --attester-secret-key".to_string()
+            })?;
+            let address = state.attester_address.as_ref().ok_or_else(|| {
+                "attester address not configured — use --attester-secret-key".to_string()
+            })?;
+            let identity = identity.clone();
+            let address = address.clone();
+            let sig = signature_hex.clone();
+            tokio::task::spawn_blocking(move || {
+                stellar::attest_oplog(&identity, &address, sequence, &sig)
+            })
+            .await
+            .map_err(|e| format!("attest_oplog task join: {e}"))?
+        };
+
+        match submit_result {
             Ok(()) => Ok(true),
             Err(e) => {
                 // Duplicate attestation is expected if we've already attested.
@@ -502,49 +635,93 @@ async fn publish_and_commit(
         None => format!("epoch={epoch_number}"),
     };
 
-    let commit_result = if let Some(oplog_root_hex) = &epoch.oplog_merkle_root_hex {
-        // Commit with oplog hash — the completeness-preserving path.
-        let oplog_start = epoch
-            .oplog_start_ts
-            .as_ref()
-            .map_or(0, |ts| ts.pack_u64());
-        let oplog_end = epoch
-            .oplog_end_ts
-            .as_ref()
-            .map_or(0, |ts| ts.pack_u64());
-        let oplog_count = epoch.oplog_entry_count.unwrap_or(0);
+    let commit_result = if let Some(kp) = &state.signing_keypair {
+        // ─── Native signing (no stellar CLI) ───────────────────────
+        let chain = &state.chain;
+        if let Some(oplog_root_hex) = &epoch.oplog_merkle_root_hex {
+            let oplog_start = epoch
+                .oplog_start_ts
+                .as_ref()
+                .map_or(0, |ts| ts.pack_u64());
+            let oplog_end = epoch
+                .oplog_end_ts
+                .as_ref()
+                .map_or(0, |ts| ts.pack_u64());
+            let oplog_count = epoch.oplog_entry_count.unwrap_or(0);
 
-        log::info!(
-            "auto-commit: epoch {epoch_number} committing with oplog hash: root={}, entries={}",
-            oplog_root_hex, oplog_count
-        );
+            log::info!(
+                "auto-commit: epoch {epoch_number} committing with oplog hash: root={}, entries={}",
+                oplog_root_hex, oplog_count
+            );
 
-        let root_clone = root_hex.clone();
-        let oplog_root_clone = oplog_root_hex.clone();
-        let metadata_clone = metadata.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::audit::stellar::commit_root_with_oplog(
-                &root_clone,
-                &oplog_root_clone,
+            stellar_native::commit_root_with_oplog_native(
+                &root_hex,
+                oplog_root_hex,
                 oplog_start,
                 oplog_end,
                 oplog_count,
-                &metadata_clone,
+                &metadata,
+                kp,
+                &chain.rpc_url,
+                &chain.horizon_url,
+                &chain.contract_id,
+                &chain.passphrase,
             )
-        })
-        .await
-        .map_err(|e| format!("commit_root_with_oplog task join: {e}"))?
-        .map_err(|e| format!("commit_root_with_oplog: {e}"))?
+            .await
+            .map_err(|e| format!("commit_root_with_oplog_native: {e}"))?
+        } else {
+            stellar_native::commit_root_native(
+                &root_hex,
+                &metadata,
+                kp,
+                &chain.rpc_url,
+                &chain.horizon_url,
+                &chain.contract_id,
+                &chain.passphrase,
+            )
+            .await
+            .map_err(|e| format!("commit_root_native: {e}"))?
+        }
     } else {
-        // Fallback: commit without oplog hash (backward compatible).
-        let root_clone = root_hex.clone();
-        let metadata_clone = metadata.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::audit::stellar::commit_root(&root_clone, &metadata_clone)
-        })
-        .await
-        .map_err(|e| format!("commit_root task join: {e}"))?
-        .map_err(|e| format!("commit_root: {e}"))?
+        // ─── Legacy CLI fallback (deprecated) ──────────────────────
+        log::warn!("auto-commit: no signing keypair — falling back to stellar CLI (deprecated; use --secret-key)");
+        if let Some(oplog_root_hex) = &epoch.oplog_merkle_root_hex {
+            let oplog_start = epoch
+                .oplog_start_ts
+                .as_ref()
+                .map_or(0, |ts| ts.pack_u64());
+            let oplog_end = epoch
+                .oplog_end_ts
+                .as_ref()
+                .map_or(0, |ts| ts.pack_u64());
+            let oplog_count = epoch.oplog_entry_count.unwrap_or(0);
+
+            let root_clone = root_hex.clone();
+            let oplog_root_clone = oplog_root_hex.clone();
+            let metadata_clone = metadata.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::audit::stellar::commit_root_with_oplog(
+                    &root_clone,
+                    &oplog_root_clone,
+                    oplog_start,
+                    oplog_end,
+                    oplog_count,
+                    &metadata_clone,
+                )
+            })
+            .await
+            .map_err(|e| format!("commit_root_with_oplog task join: {e}"))?
+            .map_err(|e| format!("commit_root_with_oplog: {e}"))?
+        } else {
+            let root_clone = root_hex.clone();
+            let metadata_clone = metadata.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::audit::stellar::commit_root(&root_clone, &metadata_clone)
+            })
+            .await
+            .map_err(|e| format!("commit_root task join: {e}"))?
+            .map_err(|e| format!("commit_root: {e}"))?
+        }
     };
 
     log::info!(
@@ -665,7 +842,7 @@ async fn generate_proof(
     let inclusion = state.audit_log.prove_inclusion(index).map_err(ApiError::from)?;
 
     let circuit_dir = state.circuit_dir.as_deref().ok_or_else(|| {
-        ApiError(AppError::Validation(
+        ApiError(AuditError::Validation(
             "circuit directory not configured — use --circuit-dir".to_string(),
         ))
     })?;
@@ -680,12 +857,12 @@ async fn generate_proof(
         .to_string();
 
     let prover = zk_audit::AuditProver::new(&r1cs, &wasm)
-        .map_err(|e| ApiError(AppError::ZkAudit(e.to_string())))?;
+        .map_err(|e| ApiError(AuditError::ZkAudit(e.to_string())))?;
     let groth16_proof = prover
         .prove(&inclusion)
-        .map_err(|e| ApiError(AppError::ZkAudit(e.to_string())))?;
+        .map_err(|e| ApiError(AuditError::ZkAudit(e.to_string())))?;
     let soroban_args = zk_audit::AuditProver::serialize_for_soroban(&groth16_proof)
-        .map_err(|e| ApiError(AppError::ZkAudit(e.to_string())))?;
+        .map_err(|e| ApiError(AuditError::ZkAudit(e.to_string())))?;
 
     let root_bigint = inclusion.root.into_bigint();
     let root_hex = hex::encode(&root_bigint.to_bytes_be());
@@ -764,5 +941,33 @@ mod tests {
 
         let batch = extract_epoch_batch(&jsonl, 0, 1);
         assert_eq!(batch.lines().count(), 2);
+    }
+
+    #[test]
+    fn test_load_keypair_from_secret_key_roundtrip() {
+        let kp = stellar_native::generate_keypair();
+        let secret_str = kp.secret_key_str();
+        let loaded = load_keypair_from_secret_key(&secret_str);
+        assert!(loaded.is_ok());
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.public_bytes(), kp.public_bytes());
+        assert_eq!(loaded.account_id(), kp.account_id());
+    }
+
+    #[test]
+    fn test_load_keypair_rejects_garbage() {
+        assert!(load_keypair_from_secret_key("not-a-key").is_err());
+        let bad = format!("S{}", "x".repeat(55));
+        assert!(load_keypair_from_secret_key(&bad).is_err());
+        assert!(load_keypair_from_secret_key("").is_err());
+    }
+
+    #[test]
+    fn test_daemon_chain_config_testnet_defaults() {
+        let c = DaemonChainConfig::testnet();
+        assert_eq!(c.network, "testnet");
+        assert!(!c.contract_id.is_empty());
+        assert!(!c.rpc_url.is_empty());
+        assert!(!c.passphrase.is_empty());
     }
 }

@@ -30,7 +30,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::audit::stellar::{self, OnChainRoot};
-use crate::error::AppResult;
+use crate::error::AuditResult;
 
 /// The result of a reader-mode verification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,7 +71,7 @@ pub struct VerificationReport {
 pub fn verify_against_onchain(
     events_jsonl: &str,
     local_root_hex: &str,
-) -> AppResult<VerificationReport> {
+) -> AuditResult<VerificationReport> {
     // Query the on-chain root.
     let onchain_root = stellar::get_current_root()?;
 
@@ -84,7 +84,7 @@ pub fn verify_with_onchain_root(
     onchain_root: Option<OnChainRoot>,
     events_jsonl: &str,
     local_root_hex: &str,
-) -> AppResult<VerificationReport> {
+) -> AuditResult<VerificationReport> {
     let total_events = count_events(events_jsonl);
 
     match &onchain_root {

@@ -14,9 +14,9 @@ NoSQLBuddy connects to MongoDB, lets you browse data, run queries, build aggrega
 - **Schema and index analysis** — Infer schema shape, cardinality, and index usage from sampled documents.
 - **Explain plan visualization** — Parse `explain` output into a navigable tree to diagnose slow queries.
 - **Driver code generation** — Export queries and pipelines to Node.js, Python, Java, C#, Ruby, Rust, and the MongoDB shell.
-- **ZK audit log** — Tamper-evident Poseidon Merkle tree, Groth16 inclusion proofs, epoch batching with IPFS publishing and Stellar testnet commitments, multi-publisher K-of-N threshold attestation, and reader-mode verification against on-chain roots.
+- **ZK audit log** — Tamper-evident Poseidon Merkle tree, Groth16 inclusion proofs, epoch batching with IPFS publishing and Stellar on-chain commitments (testnet or mainnet), multi-publisher K-of-N threshold attestation, and reader-mode verification against on-chain roots. Two modes: **Dev Mode** (full stack locally via Docker) and **Production Mode** (in-app pipeline with your own keys).
 - **Oplog completeness** — Deterministic SHA-256 Merkle tree over MongoDB's oplog (`local.oplog.rs`), binding the audit log to the same ground truth that MongoDB's replication protocol uses. An independent replica member (run by the auditor/regulator) provides a trust anchor that detects any omitted writes. The on-chain commitment stores both the audit log root and the oplog root, and independent attesters submit ed25519 attestations over the oplog root for durable, post-rollover verification.
-- **Standalone audit daemon** — `nosqlbuddy-auditd` runs independently of the desktop app, capturing MongoDB change stream events, batching into epochs, publishing to IPFS, and committing Merkle roots on-chain via an HTTP API.
+- **Standalone audit service** — `nosqlbuddy-audit` runs independently of the desktop app, capturing MongoDB change stream events, batching into epochs, publishing to IPFS, and committing Merkle roots on-chain via an HTTP API. Signs transactions natively (ed25519 + Soroban RPC) — no `stellar` CLI required. Includes an interactive `setup` wizard for one-command key generation, contract deployment, and attester authorization.
 - **Native desktop experience** — Built on Tauri v2 for a small footprint, native menus, and consistent shortcuts on macOS, Windows, and Linux.
 
 ## Tech stack
@@ -25,7 +25,7 @@ NoSQLBuddy connects to MongoDB, lets you browse data, run queries, build aggrega
 - **Backend:** Rust, Tauri v2, Tokio
 - **Database:** MongoDB driver for Rust (`mongodb` + `bson`)
 - **ZK proofs:** ark-circom, ark-groth16, ark-bn254, light-poseidon, circom circuits
-- **On-chain:** Soroban (Stellar testnet), native Rust RPC client, `stellar` CLI for writes
+- **On-chain:** Soroban (Stellar testnet + mainnet), native Rust RPC client, native ed25519 transaction signing
 - **Decentralized storage:** IPFS (Kubo HTTP API)
 - **Audit daemon:** axum HTTP server (standalone binary)
 - **Testing:** Playwright (frontend), Cargo (Rust unit + integration tests)
@@ -41,9 +41,14 @@ NoSQLBuddy connects to MongoDB, lets you browse data, run queries, build aggrega
 #### Audit daemon (optional)
 
 - A MongoDB **replica set** or **sharded cluster** (change streams require oplog; standalone mongod won't work)
-- [IPFS Kubo daemon](https://docs.ipfs.tech/install/) running locally for batch publishing (`ipfs daemon`)
-- [Stellar CLI](https://docs.stellar.org/docs/build/guides/cli) installed and configured for testnet (`stellar keys generate --global --network testnet`)
+- A Stellar **secret key** (S... strkey) for signing on-chain transactions. Generate one with `stellar keys generate --global <name> --network testnet` then export it with `stellar keys show <name> --secret-key`. The daemon signs transactions natively — no `stellar` CLI needed at runtime.
+- [IPFS](https://docs.ipfs.tech/install/) for batch publishing — either a local Kubo daemon (`ipfs daemon`) or a [Pinata](https://pinata.cloud) account (configured in-app during onboarding)
 - Circuit artifacts for Groth16 proof generation: `merkle_inclusion.r1cs` + `merkle_inclusion.wasm` (bundled in `src-tauri/resources/circuits/`)
+
+#### Dev Mode Docker stack (optional)
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) with the Compose plugin
+- The 3-node MongoDB replica set running (`docker compose up -d` from the project root)
 
 ### Installation
 
@@ -74,58 +79,189 @@ npm run build      # Production frontend build
 npm run tauri build  # Native app bundle for the current platform
 ```
 
-## Standalone audit daemon (`nosqlbuddy-auditd`)
+## ZK Audit Log — Dev Mode vs. Production Mode
 
-The audit daemon runs as a separate process from the desktop app. It captures MongoDB writes via change streams, builds a tamper-evident Poseidon Merkle tree, batches events into epochs, publishes batches to IPFS, and commits Merkle roots to a Soroban contract on Stellar testnet.
+The Audit tab in the desktop app offers two modes, shown as cards every time you open the tab:
+
+### Dev Mode (full stack locally)
+
+Runs the **complete audit system** on your machine via Docker — publisher, independent attester, and reader daemons — with K-of-N attestation, oplog completeness verification, and on-chain commitments to Stellar testnet.
+
+**Prerequisites:** Docker Desktop + the 3-node MongoDB replica set running.
+
+**Steps:**
+
+1. Start the MongoDB replica set (from the project root):
+   ```bash
+   docker compose up -d
+   ```
+
+2. Create `.env.audit` with your Stellar secret keys and Pinata credentials:
+   ```bash
+   cp audit-stack.env.example .env.audit
+   # Edit .env.audit — fill in STELLAR_SECRET_KEY, ATTESTER_SECRET_KEY, PINATA_API_KEY, PINATA_API_SECRET
+   ```
+
+3. Generate **two separate** Stellar testnet secret keys — one for the publisher (operator) and one for the attester (auditor). They must be different keys, controlled by different parties:
+   ```bash
+   # Install the stellar CLI once (only for key generation — not needed at runtime):
+   # https://docs.stellar.org/tools/developer-tools/cli/install
+
+   # Publisher key (controlled by the operator who runs MongoDB):
+   stellar keys generate --global publisher --network testnet
+   stellar keys show publisher --secret-key   # → STELLAR_SECRET_KEY in .env.audit
+
+   # Attester key (controlled by the auditor/regulator who runs the independent replica):
+   stellar keys generate --global attester --network testnet
+   stellar keys show attester --secret-key   # → ATTESTER_SECRET_KEY in .env.audit
+   ```
+
+   > **Why two keys?** The trust model requires the attester to be independent from the operator. If both use the same key, the operator could submit fake attestations themselves, defeating the independent verification.
+
+4. Authorize the attester on the contract. The attester daemon auto-generates a separate ed25519 oplog signing key on first run and logs its public key. You need both the Stellar address and the ed25519 public key to authorize:
+   ```bash
+   # Start the attester once to generate the ed25519 key, then check the logs:
+   docker compose -f docker-compose.audit.yml up -d attester
+   docker compose -f docker-compose.audit.yml logs attester | grep "public key"
+
+   # Authorize on the contract (one-time):
+   stellar contract invoke --id <testnet-contract-id> --network testnet -- \
+     authorize_attester \
+     --address <attester-stellar-address-G...> \
+     --pubkey <attester-ed25519-pubkey-hex-from-logs>
+   ```
+
+   The attester has **three** keys total:
+   - `ATTESTER_SECRET_KEY` (Stellar S...) — signs the on-chain `attest_oplog` transaction.
+   - Ed25519 oplog signing key (auto-generated at `--attester-key-file`) — signs the oplog hash itself.
+   - Contract authorization — links the Stellar address to the ed25519 pubkey so the contract accepts attestations.
+
+5. Open the app, go to the Audit tab, select **Dev Mode**, and click **Start Stack**.
+
+6. The live view shows: event feed, epoch progress, on-chain root, K-of-N attestation status, oplog completeness verification, and epoch history — all querying the Docker daemons in real time.
+
+7. Click **Commit Now** to close the epoch, pin to IPFS, and commit the root on-chain.
+
+**Manual Docker commands** (alternative to the in-app Start Stack button):
+```bash
+docker compose -f docker-compose.audit.yml up -d    # start the audit stack
+docker compose -f docker-compose.audit.yml ps       # check status
+docker compose -f docker-compose.audit.yml logs -f  # tail logs
+docker compose -f docker-compose.audit.yml down     # stop the stack
+```
+
+### Production Mode (in-app, your keys)
+
+Runs the in-app audit pipeline with **your own Stellar keypair** and contract. Choose testnet or mainnet — this is the "double check" that an audit system you deployed elsewhere works end to end. No daemon, no Docker.
+
+**Steps:**
+
+1. Open the app, go to the Audit tab, select **Production Mode**.
+
+2. Choose a network: **Testnet** (auto-funded contract) or **Mainnet** (your contract ID + RPC URL).
+
+3. Import your Stellar secret key (S... strkey). It's stored in the OS keychain and never leaves your machine.
+
+4. If mainnet: enter your contract ID (C...) and RPC URL.
+
+5. The live view shows: event feed, epoch progress, on-chain root, verify integrity, per-event proofs, and advanced details — committing via your keypair on your chosen network.
+
+6. Click **Commit Now** to close the epoch, pin to IPFS, and commit the root on-chain via native signing.
+
+**Switching modes:** Click **Settings** in the audit panel, then toggle between Dev and Production. The panel re-routes immediately.
+
+## Standalone audit service (`nosqlbuddy-audit`)
+
+The audit service runs as a separate process from the desktop app. It captures MongoDB writes via change streams, builds a tamper-evident Poseidon Merkle tree, batches events into epochs, publishes batches to IPFS, and commits Merkle roots to a Soroban contract on Stellar.
 
 ### Build
 
 ```bash
 cd src-tauri
-cargo build --bin nosqlbuddy-auditd
+cargo build --bin nosqlbuddy-audit
 ```
 
-### Run
+### Setup wizard (one-time)
+
+The `setup` subcommand is an interactive wizard that generates Stellar keypairs, optionally deploys the contract, initializes it, authorizes the attester, and writes `.env.audit`:
+
+```bash
+cd src-tauri
+cargo run --bin nosqlbuddy-audit -- setup
+```
+
+The wizard walks you through:
+1. Choosing a network (testnet or mainnet)
+2. Generating (or importing) publisher + attester Stellar keypairs
+3. Deploying a new contract or using an existing one
+4. Initializing the contract (sets the admin = publisher)
+5. Generating the attester's ed25519 oplog signing key
+6. Authorizing the attester on the contract
+7. Entering Pinata IPFS credentials (optional)
+8. Writing `.env.audit` with all values
+
+> **Contract deployment** requires the `stellar` CLI installed (one-time only). The `initialize` and `authorize_attester` calls use native signing — no CLI needed for those.
+
+### Start the service
 
 **Publisher mode** — captures writes, manages epochs, publishes to IPFS, commits roots on-chain:
 
 ```bash
-# All daemon commands run from src-tauri/
+# All commands run from src-tauri/
 cd src-tauri
 
-# Basic: connect to MongoDB and listen for changes
-cargo run --bin nosqlbuddy-auditd -- \
+# Basic: connect to MongoDB and listen for changes (no on-chain commits without a key)
+cargo run --bin nosqlbuddy-audit -- start \
   --mode publish \
   --mongo-uri "mongodb://localhost:27017"
 
-# Full: with IPFS publishing, Stellar commitment, and proof generation
-cargo run --bin nosqlbuddy-auditd -- \
+# Full: with IPFS publishing, native Stellar signing, and proof generation
+cargo run --bin nosqlbuddy-audit -- start \
   --mode publish \
   --mongo-uri "mongodb://localhost:27017" \
+  --secret-key SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX \
+  --network testnet \
   --circuit-dir ./resources/circuits \
   --ipfs-api http://127.0.0.1:5001 \
   --rpc-url https://soroban-testnet.stellar.org:443
 ```
 
+> **Tip:** You can also pass the secret key via the `STELLAR_SECRET_KEY` environment variable instead of `--secret-key`.
+
 **Reader mode** — verifies local audit log against on-chain commitments (no MongoDB connection needed):
 
 ```bash
 cd src-tauri
-cargo run --bin nosqlbuddy-auditd -- \
+cargo run --bin nosqlbuddy-audit -- start \
   --mode read \
-  --data-dir ~/.local/share/nosqlbuddy-auditd
+  --data-dir ~/.local/share/nosqlbuddy-audit
 ```
 
 **Attester mode** — independent attester that connects to the independent replica member, watches for new epoch commitments on-chain, independently computes the oplog hash, and submits attestations to the contract:
 
 ```bash
 cd src-tauri
-cargo run --bin nosqlbuddy-auditd -- \
+cargo run --bin nosqlbuddy-audit -- start \
   --mode attest \
   --mongo-uri "mongodb://localhost:27019" \
-  --rpc-url https://soroban-testnet.stellar.org:443 \
-  --attester-identity attester \
-  --attester-address GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+  --attester-secret-key SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX \
+  --network testnet \
+  --rpc-url https://soroban-testnet.stellar.org:443
+```
+
+> **Tip:** The attester's Stellar account key (`--attester-secret-key`) is separate from the ed25519 oplog signing key (auto-generated at `--attester-key-file`). The Stellar key signs the on-chain `attest_oplog` transaction; the ed25519 key signs the oplog hash itself. You can also pass the Stellar key via the `ATTESTER_SECRET_KEY` environment variable.
+
+### Stop and status
+
+```bash
+# Stop a running service
+cargo run --bin nosqlbuddy-audit -- stop
+
+# Check if the service is running + health check
+cargo run --bin nosqlbuddy-audit -- status
+
+# Stop/status with a custom data dir or port
+cargo run --bin nosqlbuddy-audit -- stop --data-dir /path/to/data --port 9174
 ```
 
 ### CLI options
@@ -139,12 +275,17 @@ cargo run --bin nosqlbuddy-auditd -- \
 | `--circuit-dir <dir>` | — | Circuit artifacts dir (for `/proof/:index`) |
 | `--ipfs-api <url>` | `http://127.0.0.1:5001` | IPFS Kubo HTTP API URL |
 | `--rpc-url <url>` | Stellar testnet | Soroban RPC URL |
+| `--network <testnet\|mainnet>` | `testnet` | Stellar network (sets passphrase + Horizon URL) |
+| `--contract-id <C...>` | Testnet contract | Soroban contract ID (required for mainnet) |
+| `--horizon-url <url>` | Testnet Horizon | Horizon API URL for account sequence lookups |
+| `--secret-key <S...>` | — | Publisher's Stellar secret key (native signing). Also reads `STELLAR_SECRET_KEY` env var |
+| `--attester-secret-key <S...>` | — | Attester's Stellar account secret key (native signing). Also reads `ATTESTER_SECRET_KEY` env var |
 | `--epoch-threshold <n>` | `100` | Auto-close epoch after N events (0=disabled) |
 | `--epoch-time-secs <s>` | `0` | Auto-close epoch after S seconds (0=disabled) |
 | `--oplog-hash-required` | — | Fail epoch close if oplog hash computation fails |
-| `--attester-key-file <path>` | `<data-dir>/audit/attester.key` | Attester ed25519 signing key (attest mode) |
-| `--attester-identity <name>` | — | Stellar CLI identity for attester transactions (attest mode) |
-| `--attester-address <addr>` | — | Stellar address of the attester (attest mode) |
+| `--attester-key-file <path>` | `<data-dir>/audit/attester.key` | Attester ed25519 oplog signing key (attest mode; generated if missing) |
+| `--attester-identity <name>` | — | **Deprecated.** Stellar CLI identity for attester transactions. Use `--attester-secret-key` instead |
+| `--attester-address <addr>` | — | Stellar address of the attester (attest mode; derived from keypair if not set) |
 | `--help` | — | Show help |
 
 ### HTTP API
@@ -205,7 +346,7 @@ All endpoints are on `http://localhost:9173`. Both modes share common endpoints;
 ipfs daemon &
 
 # 2. Start the audit daemon in publisher mode (from src-tauri/)
-cd src-tauri && cargo run --bin nosqlbuddy-auditd -- \
+cd src-tauri && cargo run --bin nosqlbuddy-audit -- start \
   --mode publish \
   --mongo-uri "mongodb://localhost:27017"
 
@@ -245,11 +386,11 @@ cargo clippy --all-targets --all-features -- -D warnings
 # Rust tests
 cargo test --all-targets
 
-# Audit daemon tests only
-cargo test --lib auditd
+# Audit service tests only
+cargo test -p nosqlbuddy-audit-service
 
-# Full audit module tests (92 tests)
-cargo test --lib audit::
+# Full audit module tests
+cargo test -p nosqlbuddy-audit-service --all-targets
 ```
 
 ## Security
@@ -342,10 +483,11 @@ cargo test --lib audit::oplog_omission -- --ignored --nocapture     # Omission d
 #### Known limitations and production notes
 
 - **Replica set required.** The oplog completeness protocol reads `lastCommittedOpTime` from `hello` / `lastWrite.majorityOpTime`. Standalone `mongod` does not expose this and is not supported for on-chain oplog commitments.
-- **Attester key setup.** The attester daemon generates an ed25519 signing key on first run (or reads one from `--attester-key-file`). The admin must authorize the attester's Stellar address together with that public key on the contract (`authorize_attester <address> <pubkey>`). The daemon still needs a separate Stellar CLI identity (`--attester-identity`) to sign the invoke transaction.
+- **Attester key setup.** The attester daemon generates an ed25519 signing key on first run (or reads one from `--attester-key-file`). The admin must authorize the attester's Stellar address together with that public key on the contract (`authorize_attester <address> <pubkey>`). The daemon signs the `attest_oplog` transaction natively using the Stellar keypair from `--attester-secret-key` (or the `ATTESTER_SECRET_KEY` env var) — no `stellar` CLI needed.
+- **Native signing.** The daemon signs Stellar transactions natively (ed25519 + Soroban RPC simulation + submission). Pass the secret key via `--secret-key` (publisher) or `--attester-secret-key` (attester), or via the `STELLAR_SECRET_KEY` / `ATTESTER_SECRET_KEY` environment variables. The legacy `stellar` CLI fallback (`--attester-identity`) still works but is deprecated.
 - **Network and replication lag.** The publisher hashes only entries up to the current majority-committed point. If replication is lagging or the publisher loses its MongoDB connection, epoch close may fail to attach an oplog hash. Use `--oplog-hash-required` to make this fail-fast, or leave it as a warning if the operator wants to close epochs manually.
 - **Trust anchor.** The protocol detects an operator that omits writes from the audit log. It does not protect against an attacker who controls the MongoDB primary *and* all independent replica members simultaneously. The auditor's replica must be operated independently.
-- **Testnet.** The contract and example scripts target Stellar testnet. Mainnet deployment requires funded accounts, a different `--rpc-url`, and updated contract deployment.
+- **Testnet and mainnet.** The bundled contract ID targets Stellar testnet. For mainnet, pass `--network mainnet --contract-id <your-contract-id> --rpc-url <your-mainnet-rpc>` and ensure your account is funded. The desktop app's Production Mode supports both networks.
 - **Deprecation of bare `commit_root`.** The contract still exposes `commit_root` (audit log root only) for backward compatibility. New commitments should use `commit_root_with_oplog` so every audit root is bound to an oplog completeness proof.
 
 ## Contributing

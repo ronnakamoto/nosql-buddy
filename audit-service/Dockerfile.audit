@@ -1,0 +1,59 @@
+# ─── Dockerfile for nosqlbuddy-audit ────────────────────────────────────
+# Builds the standalone audit service binary from the audit-service crate.
+# The build context is the project root (mongo-buddy/) so the workspace
+# Cargo.toml, zk-audit/ path dependency, and audit-service/ are all available.
+#
+# The service signs Stellar transactions natively (ed25519 + Soroban RPC).
+# No `stellar` CLI is needed — pass the secret key via --secret-key or
+# the STELLAR_SECRET_KEY / ATTESTER_SECRET_KEY env vars.
+
+# ─── Build stage ────────────────────────────────────────────────────────
+FROM rust:1.83-bookworm AS builder
+
+# Build dependencies first (cached layer). We copy the manifests and a
+# dummy src so cargo fetches/builds deps without rebuilding on every code
+# change. zk-audit is a path dependency, so its manifest must be present too.
+WORKDIR /build
+
+COPY Cargo.toml ./Cargo.toml
+COPY zk-audit/Cargo.toml ./zk-audit/Cargo.toml
+COPY zk-audit/src ./zk-audit/src
+COPY audit-service/Cargo.toml ./audit-service/Cargo.toml
+
+# Create a dummy lib + bin so the dependency layer compiles.
+RUN mkdir -p audit-service/src/audit audit-service/src/auditd audit-service/src/bin && \
+    echo 'pub mod audit; pub mod auditd; pub mod error;' > audit-service/src/lib.rs && \
+    echo '' > audit-service/src/error.rs && \
+    echo 'pub mod mod_rs {}' > audit-service/src/audit/mod.rs && \
+    echo 'pub mod mod_rs {}' > audit-service/src/auditd/mod.rs && \
+    echo 'fn main() {}' > audit-service/src/bin/nosqlbuddy-audit.rs
+
+RUN cargo build --release --bin nosqlbuddy-audit --manifest-path audit-service/Cargo.toml || true
+
+# Now copy the real source and build the actual binary.
+COPY audit-service/src ./audit-service/src
+
+RUN touch audit-service/src/lib.rs audit-service/src/bin/nosqlbuddy-audit.rs && \
+    cargo build --release --bin nosqlbuddy-audit --manifest-path audit-service/Cargo.toml
+
+# ─── Runtime stage ──────────────────────────────────────────────────────
+FROM debian:bookworm-slim
+
+# Install runtime libs only (libssl, ca-certs). No stellar CLI needed —
+# the daemon signs transactions natively via ed25519 + Soroban RPC.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the built binary.
+COPY --from=builder /build/target/release/nosqlbuddy-audit /usr/local/bin/nosqlbuddy-audit
+
+# Default data directory inside the container.
+ENV AUDITD_DATA_DIR=/data
+RUN mkdir -p /data
+
+# The publisher/attester expose an HTTP API.
+EXPOSE 9173 9174 9175
+
+ENTRYPOINT ["nosqlbuddy-audit"]

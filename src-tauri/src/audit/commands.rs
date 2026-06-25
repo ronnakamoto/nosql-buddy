@@ -55,7 +55,7 @@ pub async fn audit_list_events(
 /// hashing, which is CPU-intensive and must not block the main thread.
 #[tauri::command]
 pub async fn audit_get_root(state: State<'_, AppState>) -> AppResult<String> {
-    state.audit_log.root_hex()
+    Ok(state.audit_log.root_hex()?)
 }
 
 /// Generate a Groth16 inclusion proof for the event at the given index.
@@ -178,9 +178,9 @@ pub async fn audit_record_event(
     // is stored on disk so replay can recompute and verify the leaf.
     let leaf = crate::audit::leaf_from_payload(&operation, &database, &collection, &payload);
 
-    state
+    Ok(state
         .audit_log
-        .record(&operation, &database, &collection, &payload, leaf)
+        .record(&operation, &database, &collection, &payload, leaf)?)
 }
 
 /// Commit the current Merkle root to the Soroban contract on Stellar testnet.
@@ -263,7 +263,7 @@ pub async fn audit_current_epoch(state: State<'_, AppState>) -> AppResult<crate:
 /// Manually close the current epoch and freeze its root.
 #[tauri::command]
 pub async fn audit_close_epoch(state: State<'_, AppState>) -> AppResult<crate::audit::epoch::Epoch> {
-    state.epoch_manager.close_current_epoch(&state.audit_log)
+    Ok(state.epoch_manager.close_current_epoch(&state.audit_log)?)
 }
 
 /// Mark an epoch as committed on-chain with the given tx hash.
@@ -273,7 +273,7 @@ pub async fn audit_mark_epoch_committed(
     tx_hash: String,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
-    state.epoch_manager.mark_committed(epoch_number, tx_hash)
+    Ok(state.epoch_manager.mark_committed(epoch_number, tx_hash)?)
 }
 
 // ─── Reader mode commands ─────────────────────────────────────────────
@@ -392,7 +392,7 @@ pub async fn audit_get_ipfs_cid(
     state: State<'_, AppState>,
     epoch_number: u64,
 ) -> AppResult<Option<String>> {
-    state.audit_log.load_ipfs_cid(epoch_number)
+    Ok(state.audit_log.load_ipfs_cid(epoch_number)?)
 }
 
 /// Check if an IPFS daemon is reachable.
@@ -404,7 +404,7 @@ pub async fn audit_check_ipfs_daemon(
         api_url: api_url.unwrap_or_else(|| "http://127.0.0.1:5001".to_string()),
         cid_version: 1,
     };
-    crate::audit::ipfs::check_daemon(&config).await
+    Ok(crate::audit::ipfs::check_daemon(&config).await?)
 }
 
 // ─── Stellar RPC client commands ──────────────────────────────────────
@@ -424,7 +424,293 @@ pub async fn audit_get_onchain_root_rpc(
         Some(url) => crate::audit::stellar_rpc::StellarRpcClient::with_url(&url),
         None => crate::audit::stellar_rpc::StellarRpcClient::new(),
     };
-    client.get_current_root().await
+    Ok(client.get_current_root().await?)
+}
+
+// ─── Dev mode onboarding commands ─────────────────────────────────────
+
+/// Check the onboarding status — whether a keypair and Pinata config
+/// are already saved in the OS keychain.
+#[tauri::command]
+pub async fn audit_check_onboarding() -> AppResult<crate::audit::dev_setup::OnboardingStatus> {
+    Ok(crate::audit::dev_setup::check_onboarding_status()?)
+}
+
+/// Save Pinata API credentials to the OS keychain and test the connection.
+#[tauri::command]
+pub async fn audit_save_pinata_config(
+    api_key: String,
+    api_secret: String,
+) -> AppResult<bool> {
+    let config = crate::audit::pinata::PinataConfig {
+        api_key,
+        api_secret,
+        gateway_url: "https://gateway.pinata.cloud".to_string(),
+    };
+
+    // Test the connection before saving.
+    let ok = crate::audit::pinata::check(&config).await?;
+    if !ok {
+        return Err(AppError::Validation(
+            "Pinata authentication failed — check your API key and secret".to_string(),
+        ));
+    }
+
+    crate::audit::dev_setup::save_pinata_to_keychain(&config)?;
+    Ok(true)
+}
+
+/// Test a Pinata connection without saving credentials.
+#[tauri::command]
+pub async fn audit_test_pinata_connection(
+    api_key: String,
+    api_secret: String,
+) -> AppResult<bool> {
+    let config = crate::audit::pinata::PinataConfig {
+        api_key,
+        api_secret,
+        gateway_url: "https://gateway.pinata.cloud".to_string(),
+    };
+    Ok(crate::audit::pinata::check(&config).await?)
+}
+
+/// Generate and fund a new Stellar testnet account, saving the keypair
+/// to the OS keychain.
+#[tauri::command]
+pub async fn audit_generate_stellar_account() -> AppResult<String> {
+    let kp = crate::audit::dev_setup::generate_and_fund_account().await?;
+    let account_id = kp.account_id();
+    crate::audit::dev_setup::save_keypair_to_keychain(&kp)?;
+    Ok(account_id)
+}
+
+/// Check if the given MongoDB connection is a replica set
+/// (required for change streams).
+#[tauri::command]
+pub async fn audit_check_replica_set(
+    state: State<'_, AppState>,
+    connection_id: String,
+) -> AppResult<bool> {
+    let entry = state.clients.get(&connection_id).await?;
+    Ok(crate::audit::dev_setup::check_mongodb_rs(&entry.client).await?)
+}
+
+/// Commit a root to Stellar using native signing (no CLI subprocess).
+///
+/// This is the dev mode replacement for `audit_commit_root` that uses
+/// the keypair from the OS keychain instead of the `stellar` CLI identity.
+#[tauri::command]
+pub async fn audit_commit_root_native(
+    state: State<'_, AppState>,
+    metadata: Option<String>,
+) -> AppResult<CommitResult> {
+    let audit = &state.audit_log;
+    let root = audit.root()?;
+
+    use ark_ff::{BigInteger, PrimeField};
+    let root_bigint = root.into_bigint();
+    let root_bytes = root_bigint.to_bytes_be();
+    let root_hex = hex::encode(&root_bytes);
+
+    // Check if this root is already committed on-chain to avoid
+    // RootAlreadyCommitted errors (same guard as audit_commit_root).
+    let root_hex_check = root_hex.clone();
+    let rpc_client = crate::audit::stellar_rpc::StellarRpcClient::new();
+    let onchain = rpc_client.get_current_root().await?;
+    if let Some(ref entry) = onchain {
+        if entry.root_hex == root_hex_check {
+            return Err(AppError::Validation(format!(
+                "root 0x{}.. is already committed on-chain (seq #{}). New audit events are needed to produce a different root.",
+                &root_hex_check[..16],
+                entry.sequence
+            )));
+        }
+    }
+
+    let meta = metadata.unwrap_or_else(|| {
+        format!(
+            "events={} leaves={}",
+            audit.event_count(),
+            audit.leaf_count()
+        )
+    });
+
+    // Load keypair from keychain.
+    let kp = crate::audit::dev_setup::load_keypair_from_keychain()?
+        .ok_or_else(|| {
+            AppError::Validation(
+                "no Stellar keypair found — run onboarding first".to_string(),
+            )
+        })?;
+
+    // Use testnet config (dev mode).
+    let chain = crate::audit::dev_setup::ChainConfig::testnet();
+
+    // Commit via native signing.
+    let result = crate::audit::stellar_native::commit_root_native(
+        &root_hex,
+        &meta,
+        &kp,
+        &chain.rpc_url,
+        &chain.horizon_url,
+        &chain.contract_id,
+        &chain.passphrase,
+    )
+    .await?;
+
+    Ok(result)
+}
+
+/// Commit a root to Stellar using the **production** keypair + chosen network.
+///
+/// Production mode: the user imports their own keypair and picks testnet or
+/// mainnet. This is the "double check" — they run the in-app pipeline against
+/// the same network their remote deployment uses, to verify it works.
+///
+/// - Testnet: uses the bundled testnet contract ID + testnet RPC/Horizon.
+/// - Mainnet: uses the user's contract ID + mainnet RPC/Horizon.
+#[tauri::command]
+pub async fn audit_commit_root_production(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    metadata: Option<String>,
+) -> AppResult<CommitResult> {
+    use crate::audit::audit_mode::{load_mode_config, load_production_keypair, AuditNetwork};
+    use crate::audit::dev_setup::ChainConfig;
+    use crate::audit::stellar_native;
+
+    let audit = &state.audit_log;
+    let root = audit.root()?;
+
+    use ark_ff::{BigInteger, PrimeField};
+    let root_bigint = root.into_bigint();
+    let root_bytes = root_bigint.to_bytes_be();
+    let root_hex = hex::encode(&root_bytes);
+
+    // Load mode config to pick the network + contract/rpc.
+    let config = load_mode_config(&app)?;
+
+    let chain = match config.network {
+        AuditNetwork::Testnet => ChainConfig::testnet(),
+        AuditNetwork::Mainnet => {
+            if config.mainnet_contract_id.is_empty() {
+                return Err(AppError::Validation(
+                    "mainnet contract ID is not configured — set it in Audit Settings".to_string(),
+                ));
+            }
+            ChainConfig::mainnet(config.mainnet_rpc_url.clone(), config.mainnet_contract_id.clone())
+        }
+    };
+
+    // Check if this root is already committed on-chain.
+    let root_hex_check = root_hex.clone();
+    let rpc_url = chain.rpc_url.clone();
+    let rpc_client = crate::audit::stellar_rpc::StellarRpcClient::with_url(&rpc_url);
+    let onchain = rpc_client.get_current_root().await?;
+    if let Some(ref entry) = onchain {
+        if entry.root_hex == root_hex_check {
+            return Err(AppError::Validation(format!(
+                "root 0x{}.. is already committed on-chain (seq #{}). New audit events are needed to produce a different root.",
+                &root_hex_check[..16],
+                entry.sequence
+            )));
+        }
+    }
+
+    let meta = metadata.unwrap_or_else(|| {
+        format!(
+            "events={} leaves={} network={}",
+            audit.event_count(),
+            audit.leaf_count(),
+            chain.network
+        )
+    });
+
+    // Load the production keypair from the keychain.
+    let kp = load_production_keypair()?.ok_or_else(|| {
+        AppError::Validation(
+            "no production keypair found — import your Stellar secret key in Audit Settings"
+                .to_string(),
+        )
+    })?;
+
+    let result = stellar_native::commit_root_native(
+        &root_hex,
+        &meta,
+        &kp,
+        &chain.rpc_url,
+        &chain.horizon_url,
+        &chain.contract_id,
+        &chain.passphrase,
+    )
+    .await?;
+
+    Ok(result)
+}
+
+/// Publish an epoch batch to IPFS via Pinata (no daemon required).
+///
+/// Uses the Pinata API key from the OS keychain.
+#[tauri::command]
+pub async fn audit_publish_epoch_to_pinata(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    epoch_number: u64,
+) -> AppResult<crate::audit::ipfs::IpfsPublishResult> {
+    use tauri::Manager;
+
+    // Load Pinata config from keychain.
+    let pinata_config = crate::audit::dev_setup::load_pinata_from_keychain()?
+        .ok_or_else(|| {
+            AppError::Validation(
+                "no Pinata config found — run onboarding first".to_string(),
+            )
+        })?;
+
+    // Find the epoch and get its event range.
+    let epochs = state.epoch_manager.list_epochs();
+    let epoch = epochs
+        .iter()
+        .find(|e| e.epoch_number == epoch_number)
+        .ok_or_else(|| AppError::Validation(format!("epoch {} not found", epoch_number)))?;
+
+    let start_index = epoch.start_index;
+    let end_index = epoch.end_index.ok_or_else(|| {
+        AppError::Validation(format!(
+            "epoch {} is still open — close it before publishing to IPFS",
+            epoch_number
+        ))
+    })?;
+
+    // Read the JSONL log and extract the events for this epoch.
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::Validation(format!("resolve app data dir: {e}")))?;
+    let events_path = data_dir.join("audit").join("events.jsonl");
+    let events_jsonl = if events_path.exists() {
+        std::fs::read_to_string(&events_path)?
+    } else {
+        String::new()
+    };
+
+    let batch_content = extract_epoch_batch(&events_jsonl, start_index, end_index);
+    if batch_content.is_empty() {
+        return Err(AppError::Validation(format!(
+            "no events found for epoch {} (range {}-{})",
+            epoch_number, start_index, end_index
+        )));
+    }
+
+    // Publish to Pinata.
+    let result =
+        crate::audit::pinata::publish_epoch_batch(&pinata_config, epoch_number, &batch_content)
+            .await?;
+
+    // Save the CID to sled.
+    state.audit_log.save_ipfs_cid(epoch_number, &result.cid)?;
+
+    Ok(result)
 }
 
 // ─── Multi-publisher threshold attestation commands ───────────────────
@@ -436,7 +722,7 @@ pub async fn audit_add_publisher(
     public_key: String,
     name: String,
 ) -> AppResult<crate::audit::attestation::Publisher> {
-    state.attestation_manager.add_publisher(public_key, name)
+    Ok(state.attestation_manager.add_publisher(public_key, name)?)
 }
 
 /// Remove a registered publisher.
@@ -445,7 +731,7 @@ pub async fn audit_remove_publisher(
     state: State<'_, AppState>,
     public_key: String,
 ) -> AppResult<()> {
-    state.attestation_manager.remove_publisher(&public_key)
+    Ok(state.attestation_manager.remove_publisher(&public_key)?)
 }
 
 /// List all registered publishers.
@@ -453,7 +739,7 @@ pub async fn audit_remove_publisher(
 pub async fn audit_list_publishers(
     state: State<'_, AppState>,
 ) -> AppResult<Vec<crate::audit::attestation::Publisher>> {
-    state.attestation_manager.list_publishers()
+    Ok(state.attestation_manager.list_publishers()?)
 }
 
 /// Set the threshold K for K-of-N attestation.
@@ -492,12 +778,12 @@ pub async fn audit_submit_attestation(
     publisher_public_key: String,
     signature_hex: String,
 ) -> AppResult<crate::audit::attestation::Attestation> {
-    state.attestation_manager.submit_attestation(
+    Ok(state.attestation_manager.submit_attestation(
         epoch_number,
         &root_hex,
         &publisher_public_key,
         &signature_hex,
-    )
+    )?)
 }
 
 /// List all attestations for an epoch.
@@ -506,7 +792,7 @@ pub async fn audit_list_attestations(
     state: State<'_, AppState>,
     epoch_number: u64,
 ) -> AppResult<Vec<crate::audit::attestation::Attestation>> {
-    state.attestation_manager.list_attestations(epoch_number)
+    Ok(state.attestation_manager.list_attestations(epoch_number)?)
 }
 
 /// Get the attestation status for an epoch (threshold met? who attested?).
@@ -516,7 +802,7 @@ pub async fn audit_get_attestation_status(
     epoch_number: u64,
     root_hex: String,
 ) -> AppResult<crate::audit::attestation::AttestationStatus> {
-    state.attestation_manager.get_status(epoch_number, &root_hex)
+    Ok(state.attestation_manager.get_status(epoch_number, &root_hex)?)
 }
 
 // ─── Oplog completeness verification commands ─────────────────────────

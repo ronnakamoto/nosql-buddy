@@ -23,8 +23,9 @@ use serde::Serialize;
 
 use crate::audit::oplog::{compute_oplog_range_hash, OplogTimestamp};
 use crate::audit::stellar;
+use crate::audit::stellar_native;
 use crate::audit::stellar_rpc::StellarRpcClient;
-use crate::error::AppError;
+use crate::error::AuditError;
 
 use super::{ApiError, ApiResult, DaemonState};
 
@@ -160,7 +161,7 @@ pub async fn scan_and_attest(
     state: State<Arc<DaemonState>>,
 ) -> ApiResult<Vec<AttestResult>> {
     let client = state.mongo_client.as_ref().ok_or_else(|| {
-        ApiError(AppError::Validation(
+        ApiError(AuditError::Validation(
             "attester mode requires a MongoDB connection — use --mongo-uri".to_string(),
         ))
     })?;
@@ -201,8 +202,23 @@ async fn attest_epoch(
     sequence: u64,
 ) -> Result<AttestResult, String> {
     // 1. Get the on-chain oplog commitment.
-    let on_chain = stellar::get_oplog_commitment(sequence)
-        .map_err(|e| format!("get_oplog_commitment({sequence}): {e}"))?;
+    //    Use native simulation when a Stellar keypair is available; fall back
+    //    to the CLI for backward compat.
+    let on_chain = if let Some(kp) = &state.attester_stellar_keypair {
+        let chain = &state.chain;
+        stellar_native::get_oplog_commitment_native(
+            sequence,
+            kp,
+            &chain.rpc_url,
+            &chain.contract_id,
+        )
+        .await
+        .map_err(|e| format!("get_oplog_commitment_native({sequence}): {e}"))?
+    } else {
+        log::warn!("attest: no attester Stellar keypair — falling back to stellar CLI for read (deprecated; use --attester-secret-key)");
+        stellar::get_oplog_commitment(sequence)
+            .map_err(|e| format!("get_oplog_commitment({sequence}): {e}"))?
+    };
 
     let on_chain_oplog = match on_chain {
         Some(oc) => oc,
@@ -235,20 +251,13 @@ async fn attest_epoch(
     let mut attested = false;
 
     if matched {
-        // Submit attestation to the contract. The attester must have a signing
-        // key and a Stellar address/identity configured.
-        let (attester_key, attester_identity, attester_address) = match (
-            state.attester_key.as_ref(),
-            state.attester_identity.as_ref(),
-            state.attester_address.as_ref(),
-        ) {
-            (Some(key), Some(identity), Some(address)) => (key, identity, address),
-            _ => {
-                return Err(
-                    "attester key/identity/address not configured — use --attester-key-file, --attester-identity, and --attester-address".to_string(),
-                );
-            }
-        };
+        // Submit attestation to the contract. The attester needs:
+        // - `attester_key`: the ed25519 oplog signing key (produces the signature)
+        // - `attester_stellar_keypair`: the Stellar account key (signs the tx)
+        // When no Stellar keypair is set, fall back to the CLI.
+        let attester_key = state.attester_key.as_ref().ok_or_else(|| {
+            "attester ed25519 key not configured — use --attester-key-file".to_string()
+        })?;
 
         let signature_hex = sign_oplog_attestation(
             attester_key,
@@ -256,7 +265,40 @@ async fn attest_epoch(
             on_chain_oplog.oplog_end_ts,
         )?;
 
-        match stellar::attest_oplog(attester_identity, attester_address, sequence, &signature_hex) {
+        let submit_result = if let Some(stellar_kp) = &state.attester_stellar_keypair {
+            // ─── Native signing (no stellar CLI) ───────────────────
+            let chain = &state.chain;
+            stellar_native::attest_oplog_native(
+                stellar_kp,
+                sequence,
+                &signature_hex,
+                &chain.rpc_url,
+                &chain.horizon_url,
+                &chain.contract_id,
+                &chain.passphrase,
+            )
+            .await
+        } else {
+            // ─── Legacy CLI fallback (deprecated) ──────────────────
+            log::warn!("attest: no attester Stellar keypair — falling back to stellar CLI (deprecated; use --attester-secret-key)");
+            let identity = state.attester_identity.as_ref().ok_or_else(|| {
+                "attester identity not configured — use --attester-secret-key or --attester-identity".to_string()
+            })?;
+            let address = state.attester_address.as_ref().ok_or_else(|| {
+                "attester address not configured — use --attester-secret-key or --attester-address".to_string()
+            })?;
+            // spawn_blocking because the CLI is sync
+            let identity = identity.clone();
+            let address = address.clone();
+            let sig = signature_hex.clone();
+            tokio::task::spawn_blocking(move || {
+                stellar::attest_oplog(&identity, &address, sequence, &sig)
+            })
+            .await
+            .map_err(|e| format!("attest_oplog task join: {e}"))?
+        };
+
+        match submit_result {
             Ok(()) => {
                 attested = true;
                 log::info!(

@@ -12,7 +12,7 @@ use axum::Json;
 use crate::audit::reader::VerificationReport;
 use crate::audit::stellar::OnChainRoot;
 use crate::audit::stellar_rpc::StellarRpcClient;
-use crate::error::AppError;
+use crate::error::AuditError;
 
 use super::{ApiError, ApiResult, DaemonState};
 
@@ -27,7 +27,7 @@ pub async fn verify(
     // Read the JSONL log file.
     let events_path = state.data_dir.join("audit").join("events.jsonl");
     let events_jsonl = if events_path.exists() {
-        std::fs::read_to_string(&events_path).map_err(AppError::from).map_err(ApiError::from)?
+        std::fs::read_to_string(&events_path).map_err(AuditError::from).map_err(ApiError::from)?
     } else {
         String::new()
     };
@@ -46,7 +46,7 @@ pub async fn verify(
         )
     })
     .await
-    .map_err(|e| AppError::Validation(format!("verify task join: {e}")))
+    .map_err(|e| AuditError::Validation(format!("verify task join: {e}")))
     .map_err(ApiError::from)??;
 
     Ok(Json(report))
@@ -159,9 +159,18 @@ pub async fn verify_oplog(
         }
     };
 
-    // 2. Get the on-chain oplog commitment.
-    let on_chain_oplog = crate::audit::stellar::get_oplog_commitment(sequence)
-        .map_err(ApiError::from)?;
+    // 2. Get the on-chain oplog commitment via native simulation.
+    //    The reader has no signing keypair, so we generate a temporary one
+    //    for the read-only simulation (no funding needed).
+    let temp_kp = crate::audit::stellar_native::generate_keypair();
+    let on_chain_oplog = crate::audit::stellar_native::get_oplog_commitment_native(
+        sequence,
+        &temp_kp,
+        &state.rpc_url,
+        crate::audit::stellar::CONTRACT_ID,
+    )
+    .await
+    .map_err(ApiError::from)?;
 
     let on_chain_oplog_root = match on_chain_oplog {
         Some(ref oc) => oc.oplog_root_hex.clone(),

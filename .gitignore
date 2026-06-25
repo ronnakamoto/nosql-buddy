@@ -53,6 +53,10 @@ zk-spike/verifier-contract/test_snapshots/
 .DS_Store
 Thumbs.db
 
+# Audit stack local env (credentials — never commit)
+.env.audit
+
+
 # Editor
 .vscode/
 .idea/

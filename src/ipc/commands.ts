@@ -441,6 +441,55 @@ export interface IpfsPublishResult {
   gatewayUrl: string;
 }
 
+/** Onboarding status — which components are already provisioned. */
+export interface OnboardingStatus {
+  hasKeypair: boolean;
+  hasPinata: boolean;
+  isComplete: boolean;
+}
+
+/** Which audit experience the user selected. */
+export type AuditMode = "dev" | "production";
+
+/** Which Stellar network to anchor commitments to. */
+export type AuditNetwork = "testnet" | "mainnet";
+
+/** The full audit mode configuration. */
+export interface AuditModeConfig {
+  mode: AuditMode;
+  network: AuditNetwork;
+  mainnetContractId: string;
+  mainnetRpcUrl: string;
+  hasProductionKeypair: boolean;
+}
+
+/** Dev-mode prerequisite check result. */
+export interface DevPrerequisites {
+  dockerInstalled: boolean;
+  dockerComposeAvailable: boolean;
+  composeFilePresent: boolean;
+  portsFree: boolean;
+  publisherPortFree: boolean;
+  attesterPortFree: boolean;
+  readerPortFree: boolean;
+  auditStackRunning: boolean;
+  dockerDaemonRunning: boolean;
+  summary: string;
+}
+
+/** One audit-stack container. */
+export interface DevStackService {
+  name: string;
+  state: string;
+  ports: string;
+}
+
+/** Audit-stack container status. */
+export interface DevStackStatus {
+  running: boolean;
+  services: DevStackService[];
+}
+
 /** A registered publisher for threshold attestation. */
 export interface Publisher {
   publicKey: string;
@@ -590,6 +639,65 @@ const commands = {
     invoke<OnChainOplogCommitment | null>("audit_get_oplog_commitment", {
       sequence,
     }),
+
+  // --- ZK Audit: Dev mode onboarding ---
+  auditCheckOnboarding: () =>
+    invoke<OnboardingStatus>("audit_check_onboarding"),
+  auditSavePinataConfig: (apiKey: string, apiSecret: string) =>
+    invoke<boolean>("audit_save_pinata_config", { apiKey, apiSecret }),
+  auditTestPinataConnection: (apiKey: string, apiSecret: string) =>
+    invoke<boolean>("audit_test_pinata_connection", { apiKey, apiSecret }),
+  auditGenerateStellarAccount: () =>
+    invoke<string>("audit_generate_stellar_account"),
+  auditCheckReplicaSet: (connectionId: string) =>
+    invoke<boolean>("audit_check_replica_set", { connectionId }),
+  auditCommitRootNative: (metadata?: string) =>
+    invoke<CommitResult>("audit_commit_root_native", { metadata }),
+  auditPublishEpochToPinata: (epochNumber: number) =>
+    invoke<IpfsPublishResult>("audit_publish_epoch_to_pinata", {
+      epochNumber,
+    }),
+
+  // --- ZK Audit: Production mode (in-app pipeline, user's own keys) ---
+  auditCommitRootProduction: (metadata?: string) =>
+    invoke<CommitResult>("audit_commit_root_production", { metadata }),
+
+  // --- ZK Audit: Mode selection (dev / production) ---
+  auditGetModeConfig: () => invoke<AuditModeConfig>("audit_get_mode_config"),
+  auditSetAuditMode: (mode: AuditMode) =>
+    invoke<void>("audit_set_audit_mode", { mode }),
+  auditSetProductionNetwork: (
+    network: AuditNetwork,
+    contractId: string,
+    rpcUrl: string,
+  ) =>
+    invoke<void>("audit_set_production_network", {
+      network,
+      contractId,
+      rpcUrl,
+    }),
+  auditImportProductionKeypair: (secretKey: string) =>
+    invoke<string>("audit_import_production_keypair", { secretKey }),
+  auditClearProductionKeypair: () =>
+    invoke<void>("audit_clear_production_keypair"),
+  auditGetActiveAccount: () =>
+    invoke<string | null>("audit_get_active_account"),
+
+  // --- ZK Audit: Dev mode Docker orchestration ---
+  auditCheckDevPrerequisites: () =>
+    invoke<DevPrerequisites>("audit_check_dev_prerequisites"),
+  auditDevStackStatus: () =>
+    invoke<DevStackStatus>("audit_dev_stack_status"),
+  auditDevStackUp: () => invoke<string>("audit_dev_stack_up"),
+  auditDevStackDown: () => invoke<string>("audit_dev_stack_down"),
+  auditDevStackLogs: (tail?: number) =>
+    invoke<string>("audit_dev_stack_logs", { tail }),
+
+  // --- ZK Audit: Dev mode audit service HTTP proxy (to docker) ---
+  auditDevProxyGet: (port: number, path: string) =>
+    invoke<unknown>("audit_dev_proxy_get", { port, path }),
+  auditDevProxyPost: (port: number, path: string, body?: unknown) =>
+    invoke<unknown>("audit_dev_proxy_post", { port, path, body }),
 
   listProfiles: () => invoke<ProfileSummary[]>("list_profiles"),
   saveProfile: (request: SaveProfileRequest) =>

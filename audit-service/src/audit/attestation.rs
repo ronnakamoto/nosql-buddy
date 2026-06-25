@@ -37,7 +37,7 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use crate::audit::sled_store::SledTreeStore;
-use crate::error::{AppError, AppResult};
+use crate::error::{AuditError, AuditResult};
 
 /// A registered publisher that can attest epoch roots.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,23 +122,23 @@ impl AttestationManager {
     }
 
     /// Register a new publisher.
-    pub fn add_publisher(&self, public_key: String, name: String) -> AppResult<Publisher> {
+    pub fn add_publisher(&self, public_key: String, name: String) -> AuditResult<Publisher> {
         // Validate the public key is a valid ed25519 key.
         let pk_bytes = hex::decode(&public_key)
-            .map_err(|e| AppError::Validation(format!("invalid public key hex: {e}")))?;
+            .map_err(|e| AuditError::Validation(format!("invalid public key hex: {e}")))?;
         if pk_bytes.len() != 32 {
-            return Err(AppError::Validation(format!(
+            return Err(AuditError::Validation(format!(
                 "public key must be 32 bytes, got {}",
                 pk_bytes.len()
             )));
         }
         // Verify it's a valid ed25519 verifying key.
         VerifyingKey::from_bytes(&pk_bytes.try_into().unwrap())
-            .map_err(|e| AppError::Validation(format!("invalid ed25519 key: {e}")))?;
+            .map_err(|e| AuditError::Validation(format!("invalid ed25519 key: {e}")))?;
 
         // Check for duplicate.
         if self.get_publisher(&public_key)?.is_some() {
-            return Err(AppError::Validation(format!(
+            return Err(AuditError::Validation(format!(
                 "publisher {} already registered",
                 public_key
             )));
@@ -155,7 +155,7 @@ impl AttestationManager {
     }
 
     /// Remove a publisher.
-    pub fn remove_publisher(&self, public_key: &str) -> AppResult<()> {
+    pub fn remove_publisher(&self, public_key: &str) -> AuditResult<()> {
         let guard = self.store.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(store) = guard.as_ref() {
             let key = publisher_key(public_key);
@@ -165,13 +165,13 @@ impl AttestationManager {
     }
 
     /// Get a publisher by public key.
-    pub fn get_publisher(&self, public_key: &str) -> AppResult<Option<Publisher>> {
+    pub fn get_publisher(&self, public_key: &str) -> AuditResult<Option<Publisher>> {
         let guard = self.store.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(store) = guard.as_ref() {
             let key = publisher_key(public_key);
             if let Some(data) = store.get_raw(&key)? {
                 let publisher: Publisher = serde_json::from_slice(&data)
-                    .map_err(|e| AppError::Internal(format!("deserialize publisher: {e}")))?;
+                    .map_err(|e| AuditError::Internal(format!("deserialize publisher: {e}")))?;
                 return Ok(Some(publisher));
             }
         }
@@ -179,7 +179,7 @@ impl AttestationManager {
     }
 
     /// List all registered publishers.
-    pub fn list_publishers(&self) -> AppResult<Vec<Publisher>> {
+    pub fn list_publishers(&self) -> AuditResult<Vec<Publisher>> {
         let guard = self.store.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(store) = guard.as_ref() {
             return store.scan_prefix(PUBLISHER_PREFIX);
@@ -199,10 +199,10 @@ impl AttestationManager {
         root_hex: &str,
         publisher_public_key: &str,
         signature_hex: &str,
-    ) -> AppResult<Attestation> {
+    ) -> AuditResult<Attestation> {
         // 1. Check the publisher is registered.
         let publisher = self.get_publisher(publisher_public_key)?
-            .ok_or_else(|| AppError::Validation(format!(
+            .ok_or_else(|| AuditError::Validation(format!(
                 "publisher {} not registered",
                 publisher_public_key
             )))?;
@@ -212,7 +212,7 @@ impl AttestationManager {
 
         // 3. Check for duplicate attestation.
         if self.get_attestation(epoch_number, publisher_public_key)?.is_some() {
-            return Err(AppError::Validation(format!(
+            return Err(AuditError::Validation(format!(
                 "publisher {} has already attested epoch {}",
                 publisher_public_key, epoch_number
             )));
@@ -235,13 +235,13 @@ impl AttestationManager {
         &self,
         epoch_number: u64,
         publisher_public_key: &str,
-    ) -> AppResult<Option<Attestation>> {
+    ) -> AuditResult<Option<Attestation>> {
         let guard = self.store.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(store) = guard.as_ref() {
             let key = attestation_key(epoch_number, publisher_public_key);
             if let Some(data) = store.get_raw(&key)? {
                 let attestation: Attestation = serde_json::from_slice(&data)
-                    .map_err(|e| AppError::Internal(format!("deserialize attestation: {e}")))?;
+                    .map_err(|e| AuditError::Internal(format!("deserialize attestation: {e}")))?;
                 return Ok(Some(attestation));
             }
         }
@@ -249,7 +249,7 @@ impl AttestationManager {
     }
 
     /// List all attestations for an epoch.
-    pub fn list_attestations(&self, epoch_number: u64) -> AppResult<Vec<Attestation>> {
+    pub fn list_attestations(&self, epoch_number: u64) -> AuditResult<Vec<Attestation>> {
         let guard = self.store.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(store) = guard.as_ref() {
             let prefix = attestation_prefix(epoch_number);
@@ -259,7 +259,7 @@ impl AttestationManager {
     }
 
     /// Get the attestation status for an epoch.
-    pub fn get_status(&self, epoch_number: u64, root_hex: &str) -> AppResult<AttestationStatus> {
+    pub fn get_status(&self, epoch_number: u64, root_hex: &str) -> AuditResult<AttestationStatus> {
         let threshold = self.threshold();
         let publishers = self.list_publishers()?;
         let total_publishers = publishers.len();
@@ -292,7 +292,7 @@ impl AttestationManager {
 
     // ─── Internal storage helpers ─────────────────────────────────────
 
-    fn save_publisher(&self, publisher: &Publisher) -> AppResult<()> {
+    fn save_publisher(&self, publisher: &Publisher) -> AuditResult<()> {
         let guard = self.store.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(store) = guard.as_ref() {
             let key = publisher_key(&publisher.public_key);
@@ -302,7 +302,7 @@ impl AttestationManager {
         Ok(())
     }
 
-    fn save_attestation(&self, attestation: &Attestation) -> AppResult<()> {
+    fn save_attestation(&self, attestation: &Attestation) -> AuditResult<()> {
         let guard = self.store.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(store) = guard.as_ref() {
             let key = attestation_key(attestation.epoch_number, &attestation.publisher_public_key);
@@ -326,22 +326,22 @@ fn verify_signature(
     public_key_hex: &str,
     root_hex: &str,
     signature_hex: &str,
-) -> AppResult<()> {
+) -> AuditResult<()> {
     let pk_bytes = hex::decode(public_key_hex)
-        .map_err(|e| AppError::Validation(format!("decode public key: {e}")))?;
+        .map_err(|e| AuditError::Validation(format!("decode public key: {e}")))?;
     let sig_bytes = hex::decode(signature_hex)
-        .map_err(|e| AppError::Validation(format!("decode signature: {e}")))?;
+        .map_err(|e| AuditError::Validation(format!("decode signature: {e}")))?;
     let root_bytes = hex::decode(root_hex)
-        .map_err(|e| AppError::Validation(format!("decode root: {e}")))?;
+        .map_err(|e| AuditError::Validation(format!("decode root: {e}")))?;
 
     if pk_bytes.len() != 32 {
-        return Err(AppError::Validation(format!(
+        return Err(AuditError::Validation(format!(
             "public key must be 32 bytes, got {}",
             pk_bytes.len()
         )));
     }
     if sig_bytes.len() != 64 {
-        return Err(AppError::Validation(format!(
+        return Err(AuditError::Validation(format!(
             "signature must be 64 bytes, got {}",
             sig_bytes.len()
         )));
@@ -351,12 +351,12 @@ fn verify_signature(
     let sig_array: [u8; 64] = sig_bytes.as_slice().try_into().unwrap();
 
     let verifying_key = VerifyingKey::from_bytes(&pk_array)
-        .map_err(|e| AppError::Validation(format!("invalid public key: {e}")))?;
+        .map_err(|e| AuditError::Validation(format!("invalid public key: {e}")))?;
     let signature = Signature::from_bytes(&sig_array);
 
     verifying_key
         .verify(&root_bytes, &signature)
-        .map_err(|e| AppError::Validation(format!("signature verification failed: {e}")))
+        .map_err(|e| AuditError::Validation(format!("signature verification failed: {e}")))
 }
 
 // ─── Sled key helpers ─────────────────────────────────────────────────

@@ -107,5 +107,21 @@ impl From<zk_audit::ZkAuditError> for AppError {
     }
 }
 
+impl From<audit_service::AuditError> for AppError {
+    fn from(err: audit_service::AuditError) -> Self {
+        use audit_service::AuditError;
+        match err {
+            AuditError::Io(msg) => AppError::Io(msg),
+            AuditError::NotFound(msg) => AppError::NotFound(msg),
+            AuditError::Validation(msg) => AppError::Validation(msg),
+            AuditError::Internal(msg) => AppError::Internal(msg),
+            AuditError::Mongo(msg) => AppError::Mongo(msg),
+            AuditError::Credential(msg) => AppError::Credential(msg),
+            AuditError::Timeout(msg) => AppError::Timeout(msg),
+            AuditError::ZkAudit(msg) => AppError::ZkAudit(msg),
+        }
+    }
+}
+
 /// Convenience alias used across command handlers.
 pub type AppResult<T> = Result<T, AppError>;

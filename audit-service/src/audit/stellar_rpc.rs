@@ -30,7 +30,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use crate::audit::stellar::{OnChainRoot, CONTRACT_ID};
-use crate::error::{AppError, AppResult};
+use crate::error::{AuditError, AuditResult};
 
 /// The Soroban RPC endpoint for Stellar testnet.
 pub const TESTNET_RPC_URL: &str = "https://soroban-testnet.stellar.org:443";
@@ -70,7 +70,7 @@ impl StellarRpcClient {
     /// This reads the `CurrentRoot` instance storage key to get the
     /// sequence number, then reads the `RootEntry(sequence)` persistent
     /// storage key to get the full root entry.
-    pub async fn get_current_root(&self) -> AppResult<Option<OnChainRoot>> {
+    pub async fn get_current_root(&self) -> AuditResult<Option<OnChainRoot>> {
         // Step 1: Read the CurrentRoot instance key to get the sequence.
         let key_xdr = encode_instance_key_current_root();
         let response = self
@@ -103,7 +103,7 @@ impl StellarRpcClient {
         &self,
         key_xdr: &str,
         durability: &str,
-    ) -> AppResult<Option<Vec<u8>>> {
+    ) -> AuditResult<Option<Vec<u8>>> {
         let request = JsonRpcRequest {
             jsonrpc: "2.0",
             id: 1,
@@ -121,12 +121,12 @@ impl StellarRpcClient {
             .json(&request)
             .send()
             .await
-            .map_err(|e| AppError::Validation(format!("RPC request failed: {e}")))?;
+            .map_err(|e| AuditError::Validation(format!("RPC request failed: {e}")))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(AppError::Validation(format!(
+            return Err(AuditError::Validation(format!(
                 "RPC returned error: {} {}",
                 status, text
             )));
@@ -135,7 +135,7 @@ impl StellarRpcClient {
         let result: JsonRpcResponse = resp
             .json()
             .await
-            .map_err(|e| AppError::Validation(format!("failed to parse RPC response: {e}")))?;
+            .map_err(|e| AuditError::Validation(format!("failed to parse RPC response: {e}")))?;
 
         if let Some(err) = result.error {
             // If the key doesn't exist, the RPC returns an error.
@@ -143,7 +143,7 @@ impl StellarRpcClient {
             if err.code == -32600 || err.message.contains("not found") {
                 return Ok(None);
             }
-            return Err(AppError::Validation(format!(
+            return Err(AuditError::Validation(format!(
                 "RPC error: code {} message {}",
                 err.code, err.message
             )));
@@ -153,7 +153,7 @@ impl StellarRpcClient {
             Some(res) if !res.xdr.is_empty() => {
                 let bytes = base64::engine::general_purpose::STANDARD
                     .decode(&res.xdr)
-                    .map_err(|e| AppError::Validation(format!("base64 decode: {e}")))?;
+                    .map_err(|e| AuditError::Validation(format!("base64 decode: {e}")))?;
                 Ok(Some(bytes))
             }
             _ => Ok(None),
@@ -218,7 +218,7 @@ fn encode_symbol(buf: &mut Vec<u8>, name: &str) {
 /// The response from `getContractData` is a `LedgerEntryData` XDR.
 /// For instance storage, the value is directly the `ScVal`.
 /// We search for the `ScVal::U64` pattern in the XDR bytes.
-fn decode_scval_u64(data: &[u8]) -> AppResult<u64> {
+fn decode_scval_u64(data: &[u8]) -> AuditResult<u64> {
     // The LedgerEntryData XDR is a union with discriminant.
     // For ContractData (discriminant = 6), the structure is:
     //   - discriminant (4 bytes)
@@ -242,7 +242,7 @@ fn decode_scval_u64(data: &[u8]) -> AppResult<u64> {
     let key_pattern = encode_instance_key_current_root();
     let key_bytes = base64::engine::general_purpose::STANDARD
         .decode(&key_pattern)
-        .map_err(|e| AppError::Validation(format!("base64 decode key: {e}")))?;
+        .map_err(|e| AuditError::Validation(format!("base64 decode key: {e}")))?;
 
     // Find the key in the data, then read the val after it.
     if let Some(pos) = find_subsequence(data, &key_bytes) {
@@ -262,7 +262,7 @@ fn decode_scval_u64(data: &[u8]) -> AppResult<u64> {
         }
     }
 
-    Err(AppError::Validation(
+    Err(AuditError::Validation(
         "could not decode ScVal::U64 from XDR response".to_string(),
     ))
 }
@@ -278,7 +278,7 @@ fn decode_scval_u64(data: &[u8]) -> AppResult<u64> {
 ///   (Symbol("metadata"), String(metadata_str)),
 /// ])
 /// ```
-fn decode_root_entry(data: &[u8], expected_sequence: u64) -> AppResult<Option<OnChainRoot>> {
+fn decode_root_entry(data: &[u8], expected_sequence: u64) -> AuditResult<Option<OnChainRoot>> {
     // Find the ScVal::Map pattern in the data.
     // The map discriminant is SCV_MAP = 17.
     let map_pos = find_scval_map(data);
@@ -354,25 +354,25 @@ fn find_scval_map(data: &[u8]) -> Option<usize> {
 
 /// Read an `ScVal::Symbol` from the data at the given offset.
 /// Returns (symbol_string, new_offset).
-fn read_scval_symbol(data: &[u8], offset: usize) -> AppResult<(String, usize)> {
+fn read_scval_symbol(data: &[u8], offset: usize) -> AuditResult<(String, usize)> {
     if offset + 4 > data.len() {
-        return Err(AppError::Validation("XTR: symbol discriminant out of bounds".to_string()));
+        return Err(AuditError::Validation("XTR: symbol discriminant out of bounds".to_string()));
     }
     let disc = read_u32(&data[offset..]);
     if disc != SCV_SYMBOL {
-        return Err(AppError::Validation(format!(
+        return Err(AuditError::Validation(format!(
             "expected ScVal::Symbol (disc {}), got {}",
             SCV_SYMBOL, disc
         )));
     }
     let mut pos = offset + 4;
     if pos + 4 > data.len() {
-        return Err(AppError::Validation("XDR: symbol length out of bounds".to_string()));
+        return Err(AuditError::Validation("XDR: symbol length out of bounds".to_string()));
     }
     let len = read_u32(&data[pos..]) as usize;
     pos += 4;
     if pos + len > data.len() {
-        return Err(AppError::Validation("XDR: symbol bytes out of bounds".to_string()));
+        return Err(AuditError::Validation("XDR: symbol bytes out of bounds".to_string()));
     }
     let s = String::from_utf8_lossy(&data[pos..pos + len]).to_string();
     pos += len;
@@ -384,13 +384,13 @@ fn read_scval_symbol(data: &[u8], offset: usize) -> AppResult<(String, usize)> {
 
 /// Read an `ScVal::U64` from the data at the given offset.
 /// Returns (value, new_offset).
-fn read_scval_u64(data: &[u8], offset: usize) -> AppResult<(u64, usize)> {
+fn read_scval_u64(data: &[u8], offset: usize) -> AuditResult<(u64, usize)> {
     if offset + 12 > data.len() {
-        return Err(AppError::Validation("XDR: U64 out of bounds".to_string()));
+        return Err(AuditError::Validation("XDR: U64 out of bounds".to_string()));
     }
     let disc = read_u32(&data[offset..]);
     if disc != SCV_U64 {
-        return Err(AppError::Validation(format!(
+        return Err(AuditError::Validation(format!(
             "expected ScVal::U64 (disc {}), got {}",
             SCV_U64, disc
         )));
@@ -401,25 +401,25 @@ fn read_scval_u64(data: &[u8], offset: usize) -> AppResult<(u64, usize)> {
 
 /// Read an `ScVal::Bytes` from the data at the given offset.
 /// Returns (bytes, new_offset).
-fn read_scval_bytes(data: &[u8], offset: usize) -> AppResult<(Vec<u8>, usize)> {
+fn read_scval_bytes(data: &[u8], offset: usize) -> AuditResult<(Vec<u8>, usize)> {
     if offset + 4 > data.len() {
-        return Err(AppError::Validation("XDR: Bytes discriminant out of bounds".to_string()));
+        return Err(AuditError::Validation("XDR: Bytes discriminant out of bounds".to_string()));
     }
     let disc = read_u32(&data[offset..]);
     if disc != SCV_BYTES {
-        return Err(AppError::Validation(format!(
+        return Err(AuditError::Validation(format!(
             "expected ScVal::Bytes (disc {}), got {}",
             SCV_BYTES, disc
         )));
     }
     let mut pos = offset + 4;
     if pos + 4 > data.len() {
-        return Err(AppError::Validation("XDR: Bytes length out of bounds".to_string()));
+        return Err(AuditError::Validation("XDR: Bytes length out of bounds".to_string()));
     }
     let len = read_u32(&data[pos..]) as usize;
     pos += 4;
     if pos + len > data.len() {
-        return Err(AppError::Validation("XDR: Bytes data out of bounds".to_string()));
+        return Err(AuditError::Validation("XDR: Bytes data out of bounds".to_string()));
     }
     let bytes = data[pos..pos + len].to_vec();
     pos += len;
@@ -430,25 +430,25 @@ fn read_scval_bytes(data: &[u8], offset: usize) -> AppResult<(Vec<u8>, usize)> {
 
 /// Read an `ScVal::String` from the data at the given offset.
 /// Returns (string, new_offset).
-fn read_scval_string(data: &[u8], offset: usize) -> AppResult<(String, usize)> {
+fn read_scval_string(data: &[u8], offset: usize) -> AuditResult<(String, usize)> {
     if offset + 4 > data.len() {
-        return Err(AppError::Validation("XDR: String discriminant out of bounds".to_string()));
+        return Err(AuditError::Validation("XDR: String discriminant out of bounds".to_string()));
     }
     let disc = read_u32(&data[offset..]);
     if disc != SCV_STRING {
-        return Err(AppError::Validation(format!(
+        return Err(AuditError::Validation(format!(
             "expected ScVal::String (disc {}), got {}",
             SCV_STRING, disc
         )));
     }
     let mut pos = offset + 4;
     if pos + 4 > data.len() {
-        return Err(AppError::Validation("XDR: String length out of bounds".to_string()));
+        return Err(AuditError::Validation("XDR: String length out of bounds".to_string()));
     }
     let len = read_u32(&data[pos..]) as usize;
     pos += 4;
     if pos + len > data.len() {
-        return Err(AppError::Validation("XDR: String data out of bounds".to_string()));
+        return Err(AuditError::Validation("XDR: String data out of bounds".to_string()));
     }
     let s = String::from_utf8_lossy(&data[pos..pos + len]).to_string();
     pos += len;

@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use crate::audit::{leaf_from_payload, AuditLog};
-use crate::error::AppResult;
+use crate::error::AuditResult;
 
 /// Record an insert operation in the audit log.
 pub fn record_insert(
@@ -17,7 +17,7 @@ pub fn record_insert(
     database: &str,
     collection: &str,
     document_json: &str,
-) -> AppResult<u64> {
+) -> AuditResult<u64> {
     let payload = format!("insert|{}|{}|{}", database, collection, document_json);
     let leaf = leaf_from_payload("insert", database, collection, &payload);
     audit.record("insert", database, collection, &payload, leaf)
@@ -30,7 +30,7 @@ pub fn record_update(
     collection: &str,
     filter_json: &str,
     update_json: &str,
-) -> AppResult<u64> {
+) -> AuditResult<u64> {
     let payload = format!("update|{}|{}|{}|{}", database, collection, filter_json, update_json);
     let leaf = leaf_from_payload("update", database, collection, &payload);
     audit.record("update", database, collection, &payload, leaf)
@@ -42,7 +42,7 @@ pub fn record_delete(
     database: &str,
     collection: &str,
     filter_json: &str,
-) -> AppResult<u64> {
+) -> AuditResult<u64> {
     let payload = format!("delete|{}|{}|{}", database, collection, filter_json);
     let leaf = leaf_from_payload("delete", database, collection, &payload);
     audit.record("delete", database, collection, &payload, leaf)
@@ -53,7 +53,7 @@ pub fn record_drop_collection(
     audit: &Arc<AuditLog>,
     database: &str,
     collection: &str,
-) -> AppResult<u64> {
+) -> AuditResult<u64> {
     let payload = format!("drop_collection|{}|{}", database, collection);
     let leaf = leaf_from_payload("drop_collection", database, collection, &payload);
     audit.record("drop_collection", database, collection, &payload, leaf)
@@ -63,7 +63,7 @@ pub fn record_drop_collection(
 pub fn record_drop_database(
     audit: &Arc<AuditLog>,
     database: &str,
-) -> AppResult<u64> {
+) -> AuditResult<u64> {
     let payload = format!("drop_database|{}", database);
     let leaf = leaf_from_payload("drop_database", database, "", &payload);
     audit.record("drop_database", database, "", &payload, leaf)
@@ -75,7 +75,7 @@ pub fn record_rename_collection(
     database: &str,
     collection: &str,
     new_name: &str,
-) -> AppResult<u64> {
+) -> AuditResult<u64> {
     let payload = format!("rename|{}|{}|{}", database, collection, new_name);
     let leaf = leaf_from_payload("rename", database, collection, &payload);
     audit.record("rename", database, collection, &payload, leaf)
@@ -88,7 +88,7 @@ pub fn record_create_index(
     collection: &str,
     keys_json: &str,
     options_json: &str,
-) -> AppResult<u64> {
+) -> AuditResult<u64> {
     let payload = format!("create_index|{}|{}|{}|{}", database, collection, keys_json, options_json);
     let leaf = leaf_from_payload("create_index", database, collection, &payload);
     audit.record("create_index", database, collection, &payload, leaf)
@@ -100,7 +100,7 @@ pub fn record_drop_index(
     database: &str,
     collection: &str,
     index_name: &str,
-) -> AppResult<u64> {
+) -> AuditResult<u64> {
     let payload = format!("drop_index|{}|{}|{}", database, collection, index_name);
     let leaf = leaf_from_payload("drop_index", database, collection, &payload);
     audit.record("drop_index", database, collection, &payload, leaf)

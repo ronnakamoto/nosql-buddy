@@ -23,7 +23,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{AppError, AppResult};
+use crate::error::{AuditError, AuditResult};
 
 /// Configuration for the IPFS client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,9 +69,9 @@ pub async fn publish_epoch_batch(
     config: &IpfsConfig,
     epoch_number: u64,
     batch_content: &str,
-) -> AppResult<IpfsPublishResult> {
+) -> AuditResult<IpfsPublishResult> {
     if batch_content.is_empty() {
-        return Err(AppError::Validation(
+        return Err(AuditError::Validation(
             "cannot publish empty batch to IPFS".to_string(),
         ));
     }
@@ -102,12 +102,12 @@ pub async fn publish_epoch_batch(
         .body(body)
         .send()
         .await
-        .map_err(|e| AppError::Validation(format!("IPFS API request failed: {e}")))?;
+        .map_err(|e| AuditError::Validation(format!("IPFS API request failed: {e}")))?;
 
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
-        return Err(AppError::Validation(format!(
+        return Err(AuditError::Validation(format!(
             "IPFS API returned error: {} {}",
             status, text
         )));
@@ -118,11 +118,11 @@ pub async fn publish_epoch_batch(
     let ipfs_response: IpfsAddResponse = response
         .json()
         .await
-        .map_err(|e| AppError::Validation(format!("failed to parse IPFS response: {e}")))?;
+        .map_err(|e| AuditError::Validation(format!("failed to parse IPFS response: {e}")))?;
 
     let cid = ipfs_response.hash;
     if cid.is_empty() {
-        return Err(AppError::Validation(
+        return Err(AuditError::Validation(
             "IPFS API returned empty CID".to_string(),
         ));
     }
@@ -139,7 +139,7 @@ pub async fn publish_epoch_batch(
 }
 
 /// Check if an IPFS daemon is reachable at the configured URL.
-pub async fn check_daemon(config: &IpfsConfig) -> AppResult<bool> {
+pub async fn check_daemon(config: &IpfsConfig) -> AuditResult<bool> {
     let url = format!("{}/api/v0/version", config.api_url.trim_end_matches('/'));
     let client = reqwest::Client::new();
     match client.post(&url).send().await {

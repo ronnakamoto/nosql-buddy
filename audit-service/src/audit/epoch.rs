@@ -45,7 +45,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::audit::AuditLog;
 use crate::audit::oplog::OplogTimestamp;
-use crate::error::{AppError, AppResult};
+use crate::error::{AuditError, AuditResult};
 
 /// Configuration for when an epoch auto-closes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,13 +171,13 @@ impl EpochManager {
         oplog_entry_count: u64,
         oplog_merkle_root_hex: String,
         oplog_majority_commit_ts: OplogTimestamp,
-    ) -> AppResult<Epoch> {
+    ) -> AuditResult<Epoch> {
         let mut epochs = self.epochs.lock().unwrap_or_else(|e| e.into_inner());
 
         for epoch in epochs.iter_mut() {
             if epoch.epoch_number == epoch_number {
                 if epoch.is_open() {
-                    return Err(AppError::Validation(format!(
+                    return Err(AuditError::Validation(format!(
                         "epoch {epoch_number} is still open — close it before attaching oplog hash"
                     )));
                 }
@@ -198,7 +198,7 @@ impl EpochManager {
             }
         }
 
-        Err(AppError::Validation(format!(
+        Err(AuditError::Validation(format!(
             "epoch {epoch_number} not found"
         )))
     }
@@ -207,14 +207,14 @@ impl EpochManager {
     /// index. This updates the current epoch's event count. If the
     /// event threshold is reached, the epoch is auto-closed.
     /// Returns `Some(closed_epoch)` if an epoch was closed.
-    pub fn record_event(&self, index: u64, audit_log: &AuditLog) -> AppResult<Option<Epoch>> {
+    pub fn record_event(&self, index: u64, audit_log: &AuditLog) -> AuditResult<Option<Epoch>> {
         let config = self.config.lock().unwrap_or_else(|e| e.into_inner());
         let mut epochs = self.epochs.lock().unwrap_or_else(|e| e.into_inner());
 
         let current = epochs.last_mut().expect("always at least one epoch");
         if !current.is_open() {
             // Shouldn't happen — we always keep an open epoch.
-            return Err(AppError::Validation(
+            return Err(AuditError::Validation(
                 "no open epoch to record event into".to_string(),
             ));
         }
@@ -243,18 +243,18 @@ impl EpochManager {
 
     /// Manually close the current epoch and commit its root.
     /// Returns the closed epoch with the frozen root.
-    pub fn close_current_epoch(&self, audit_log: &AuditLog) -> AppResult<Epoch> {
+    pub fn close_current_epoch(&self, audit_log: &AuditLog) -> AuditResult<Epoch> {
         let mut epochs = self.epochs.lock().unwrap_or_else(|e| e.into_inner());
 
         let current = epochs.last_mut().expect("always at least one epoch");
         if !current.is_open() {
-            return Err(AppError::Validation(
+            return Err(AuditError::Validation(
                 "current epoch is already closed".to_string(),
             ));
         }
 
         if current.event_count == 0 {
-            return Err(AppError::Validation(
+            return Err(AuditError::Validation(
                 "cannot close an empty epoch".to_string(),
             ));
         }
@@ -277,7 +277,7 @@ impl EpochManager {
         &self,
         epoch_number: u64,
         tx_hash: String,
-    ) -> AppResult<()> {
+    ) -> AuditResult<()> {
         let mut epochs = self.epochs.lock().unwrap_or_else(|e| e.into_inner());
         for epoch in epochs.iter_mut() {
             if epoch.epoch_number == epoch_number {
@@ -287,7 +287,7 @@ impl EpochManager {
                 return Ok(());
             }
         }
-        Err(AppError::Validation(format!(
+        Err(AuditError::Validation(format!(
             "epoch {epoch_number} not found"
         )))
     }

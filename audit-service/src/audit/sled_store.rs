@@ -26,7 +26,7 @@ use sled::Db;
 // Note: PrimeField is needed for from_be_bytes_mod_order in load_tree.
 
 use crate::audit::AuditMerkleTree;
-use crate::error::{AppError, AppResult};
+use crate::error::{AuditError, AuditResult};
 
 const META_LEAF_COUNT: &[u8] = b"meta:leaf_count";
 const META_ROOT_HEX: &[u8] = b"meta:root_hex";
@@ -42,9 +42,9 @@ pub struct SledTreeStore {
 
 impl SledTreeStore {
     /// Open or create a sled database at the given path.
-    pub fn open(path: &Path) -> AppResult<Self> {
+    pub fn open(path: &Path) -> AuditResult<Self> {
         let db = sled::open(path)
-            .map_err(|e| AppError::Validation(format!("open sled tree store: {e}")))?;
+            .map_err(|e| AuditError::Validation(format!("open sled tree store: {e}")))?;
         Ok(Self {
             db,
             path: path.to_path_buf(),
@@ -57,28 +57,28 @@ impl SledTreeStore {
     }
 
     /// Save a leaf at the given index and update the metadata.
-    pub fn save_leaf(&self, index: u64, leaf: Fr, root: Fr) -> AppResult<()> {
+    pub fn save_leaf(&self, index: u64, leaf: Fr, root: Fr) -> AuditResult<()> {
         // Store the leaf as 32-byte big-endian.
         let leaf_bytes = leaf.into_bigint().to_bytes_be();
         let key = leaf_key(index);
         self.db
             .insert(key.as_slice(), leaf_bytes.as_slice())
-            .map_err(|e| AppError::Validation(format!("sled insert leaf: {e}")))?;
+            .map_err(|e| AuditError::Validation(format!("sled insert leaf: {e}")))?;
 
         // Update metadata. Leaf count is index + 1 (index is 0-based).
         let leaf_count = index + 1;
         self.db
             .insert(META_LEAF_COUNT, &leaf_count.to_be_bytes())
-            .map_err(|e| AppError::Validation(format!("sled insert leaf_count: {e}")))?;
+            .map_err(|e| AuditError::Validation(format!("sled insert leaf_count: {e}")))?;
 
         let root_hex = hex::encode(root.into_bigint().to_bytes_be());
         self.db
             .insert(META_ROOT_HEX, root_hex.as_bytes())
-            .map_err(|e| AppError::Validation(format!("sled insert root_hex: {e}")))?;
+            .map_err(|e| AuditError::Validation(format!("sled insert root_hex: {e}")))?;
 
         self.db
             .flush()
-            .map_err(|e| AppError::Validation(format!("sled flush: {e}")))?;
+            .map_err(|e| AuditError::Validation(format!("sled flush: {e}")))?;
 
         Ok(())
     }
@@ -86,15 +86,15 @@ impl SledTreeStore {
     /// Load all leaves from sled and rebuild the tree.
     /// This is O(n) in the number of leaves, but avoids the Poseidon
     /// hashing that JSONL replay requires.
-    pub fn load_tree(&self) -> AppResult<Option<(AuditMerkleTree, String)>> {
+    pub fn load_tree(&self) -> AuditResult<Option<(AuditMerkleTree, String)>> {
         let leaf_count_bytes = self.db.get(META_LEAF_COUNT).map_err(|e| {
-            AppError::Validation(format!("sled get leaf_count: {e}"))
+            AuditError::Validation(format!("sled get leaf_count: {e}"))
         })?;
 
         let leaf_count = match leaf_count_bytes {
             Some(bytes) => {
                 let arr: [u8; 8] = bytes.as_ref().try_into().map_err(|_| {
-                    AppError::Validation("leaf_count is not 8 bytes".to_string())
+                    AuditError::Validation("leaf_count is not 8 bytes".to_string())
                 })?;
                 u64::from_be_bytes(arr)
             }
@@ -104,7 +104,7 @@ impl SledTreeStore {
         let root_hex = self
             .db
             .get(META_ROOT_HEX)
-            .map_err(|e| AppError::Validation(format!("sled get root_hex: {e}")))?
+            .map_err(|e| AuditError::Validation(format!("sled get root_hex: {e}")))?
             .map(|v| String::from_utf8_lossy(&v).to_string())
             .unwrap_or_default();
 
@@ -115,9 +115,9 @@ impl SledTreeStore {
             let leaf_bytes = self
                 .db
                 .get(key.as_slice())
-                .map_err(|e| AppError::Validation(format!("sled get leaf {i}: {e}")))?
+                .map_err(|e| AuditError::Validation(format!("sled get leaf {i}: {e}")))?
                 .ok_or_else(|| {
-                    AppError::Validation(format!("missing leaf {i} in sled store"))
+                    AuditError::Validation(format!("missing leaf {i} in sled store"))
                 })?;
 
             // Convert bytes back to Fr using from_be_bytes_mod_order.
@@ -130,14 +130,14 @@ impl SledTreeStore {
     }
 
     /// Get the stored leaf count (without loading the tree).
-    pub fn leaf_count(&self) -> AppResult<u64> {
+    pub fn leaf_count(&self) -> AuditResult<u64> {
         let bytes = self.db.get(META_LEAF_COUNT).map_err(|e| {
-            AppError::Validation(format!("sled get leaf_count: {e}"))
+            AuditError::Validation(format!("sled get leaf_count: {e}"))
         })?;
         match bytes {
             Some(v) => {
                 let arr: [u8; 8] = v.as_ref().try_into().map_err(|_| {
-                    AppError::Validation("leaf_count is not 8 bytes".to_string())
+                    AuditError::Validation("leaf_count is not 8 bytes".to_string())
                 })?;
                 Ok(u64::from_be_bytes(arr))
             }
@@ -146,110 +146,110 @@ impl SledTreeStore {
     }
 
     /// Clear all data from the store.
-    pub fn clear(&self) -> AppResult<()> {
+    pub fn clear(&self) -> AuditResult<()> {
         self.db
             .clear()
-            .map_err(|e| AppError::Validation(format!("sled clear: {e}")))?;
+            .map_err(|e| AuditError::Validation(format!("sled clear: {e}")))?;
         Ok(())
     }
 
     /// Save a change stream resume token for the given connection ID.
     /// The token is stored as a JSON string so it can be deserialized back
     /// into a `ResumeToken` on startup.
-    pub fn save_resume_token(&self, connection_id: &str, token_json: &str) -> AppResult<()> {
+    pub fn save_resume_token(&self, connection_id: &str, token_json: &str) -> AuditResult<()> {
         let key = resume_token_key(connection_id);
         self.db
             .insert(key.as_slice(), token_json.as_bytes())
-            .map_err(|e| AppError::Validation(format!("sled insert resume_token: {e}")))?;
+            .map_err(|e| AuditError::Validation(format!("sled insert resume_token: {e}")))?;
         self.db
             .flush()
-            .map_err(|e| AppError::Validation(format!("sled flush resume_token: {e}")))?;
+            .map_err(|e| AuditError::Validation(format!("sled flush resume_token: {e}")))?;
         Ok(())
     }
 
     /// Load the saved change stream resume token for the given connection ID.
     /// Returns `None` if no token has been saved for this connection.
-    pub fn load_resume_token(&self, connection_id: &str) -> AppResult<Option<String>> {
+    pub fn load_resume_token(&self, connection_id: &str) -> AuditResult<Option<String>> {
         let key = resume_token_key(connection_id);
         let val = self
             .db
             .get(key.as_slice())
-            .map_err(|e| AppError::Validation(format!("sled get resume_token: {e}")))?;
+            .map_err(|e| AuditError::Validation(format!("sled get resume_token: {e}")))?;
         Ok(val.map(|v| String::from_utf8_lossy(&v).to_string()))
     }
 
     /// Clear the saved resume token for the given connection ID.
-    pub fn clear_resume_token(&self, connection_id: &str) -> AppResult<()> {
+    pub fn clear_resume_token(&self, connection_id: &str) -> AuditResult<()> {
         let key = resume_token_key(connection_id);
         self.db
             .remove(key.as_slice())
-            .map_err(|e| AppError::Validation(format!("sled remove resume_token: {e}")))?;
+            .map_err(|e| AuditError::Validation(format!("sled remove resume_token: {e}")))?;
         Ok(())
     }
 
     /// Save an IPFS CID for a published epoch.
-    pub fn save_ipfs_cid(&self, epoch_number: u64, cid: &str) -> AppResult<()> {
+    pub fn save_ipfs_cid(&self, epoch_number: u64, cid: &str) -> AuditResult<()> {
         let key = ipfs_cid_key(epoch_number);
         self.db
             .insert(key.as_slice(), cid.as_bytes())
-            .map_err(|e| AppError::Validation(format!("sled insert ipfs_cid: {e}")))?;
+            .map_err(|e| AuditError::Validation(format!("sled insert ipfs_cid: {e}")))?;
         self.db
             .flush()
-            .map_err(|e| AppError::Validation(format!("sled flush ipfs_cid: {e}")))?;
+            .map_err(|e| AuditError::Validation(format!("sled flush ipfs_cid: {e}")))?;
         Ok(())
     }
 
     /// Load the saved IPFS CID for a published epoch.
-    pub fn load_ipfs_cid(&self, epoch_number: u64) -> AppResult<Option<String>> {
+    pub fn load_ipfs_cid(&self, epoch_number: u64) -> AuditResult<Option<String>> {
         let key = ipfs_cid_key(epoch_number);
         let val = self
             .db
             .get(key.as_slice())
-            .map_err(|e| AppError::Validation(format!("sled get ipfs_cid: {e}")))?;
+            .map_err(|e| AuditError::Validation(format!("sled get ipfs_cid: {e}")))?;
         Ok(val.map(|v| String::from_utf8_lossy(&v).to_string()))
     }
 
     /// Insert a raw key-value pair into the sled store.
     /// Used by the attestation module for publisher/attestation storage.
-    pub fn insert_raw(&self, key: &[u8], value: &[u8]) -> AppResult<()> {
+    pub fn insert_raw(&self, key: &[u8], value: &[u8]) -> AuditResult<()> {
         self.db
             .insert(key, value)
-            .map_err(|e| AppError::Validation(format!("sled insert raw: {e}")))?;
+            .map_err(|e| AuditError::Validation(format!("sled insert raw: {e}")))?;
         self.db
             .flush()
-            .map_err(|e| AppError::Validation(format!("sled flush: {e}")))?;
+            .map_err(|e| AuditError::Validation(format!("sled flush: {e}")))?;
         Ok(())
     }
 
     /// Get a raw value by key from the sled store.
-    pub fn get_raw(&self, key: &[u8]) -> AppResult<Option<Vec<u8>>> {
+    pub fn get_raw(&self, key: &[u8]) -> AuditResult<Option<Vec<u8>>> {
         let val = self
             .db
             .get(key)
-            .map_err(|e| AppError::Validation(format!("sled get raw: {e}")))?;
+            .map_err(|e| AuditError::Validation(format!("sled get raw: {e}")))?;
         Ok(val.map(|v| v.to_vec()))
     }
 
     /// Remove a raw key from the sled store.
-    pub fn remove_raw(&self, key: &[u8]) -> AppResult<()> {
+    pub fn remove_raw(&self, key: &[u8]) -> AuditResult<()> {
         self.db
             .remove(key)
-            .map_err(|e| AppError::Validation(format!("sled remove raw: {e}")))?;
+            .map_err(|e| AuditError::Validation(format!("sled remove raw: {e}")))?;
         self.db
             .flush()
-            .map_err(|e| AppError::Validation(format!("sled flush: {e}")))?;
+            .map_err(|e| AuditError::Validation(format!("sled flush: {e}")))?;
         Ok(())
     }
 
     /// Scan all keys with the given prefix and deserialize values as T.
     /// Used by the attestation module to list publishers/attestations.
-    pub fn scan_prefix<T: serde::de::DeserializeOwned>(&self, prefix: &[u8]) -> AppResult<Vec<T>> {
+    pub fn scan_prefix<T: serde::de::DeserializeOwned>(&self, prefix: &[u8]) -> AuditResult<Vec<T>> {
         let mut results = Vec::new();
         for item in self.db.scan_prefix(prefix) {
             let (_key, value) = item
-                .map_err(|e| AppError::Validation(format!("sled scan: {e}")))?;
+                .map_err(|e| AuditError::Validation(format!("sled scan: {e}")))?;
             let item: T = serde_json::from_slice(&value)
-                .map_err(|e| AppError::Internal(format!("deserialize scan result: {e}")))?;
+                .map_err(|e| AuditError::Internal(format!("deserialize scan result: {e}")))?;
             results.push(item);
         }
         Ok(results)

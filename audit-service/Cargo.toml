@@ -1,0 +1,70 @@
+[package]
+name = "nosqlbuddy-audit-service"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+publish = false
+description = "NoSQLBuddy audit service: tamper-evident Merkle audit log with Stellar on-chain roots"
+
+[lib]
+name = "audit_service"
+crate-type = ["rlib"]
+
+[dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+# Async runtime
+tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time"] }
+futures-util = "0.3"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+log = "0.4"
+
+# Database
+mongodb = { version = "3", default-features = false, features = ["rustls-tls", "compat-3-0-0"] }
+bson = { version = "2", features = ["chrono-0_4", "uuid-1"] }
+
+# Storage
+sled = "0.34.7"
+
+# HTTP
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+axum = { version = "0.7", features = ["json"] }
+tower = "0.5"
+
+# Crypto / encoding
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+
+# Math (ZK)
+ark-bn254 = "0.5"
+ark-ff = "0.5"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Stellar
+stellar-xdr = { version = "25", default-features = false, features = ["std", "curr"] }
+
+# System
+dirs = "5"
+uuid = { version = "1", features = ["v4", "serde"] }
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "vendored"] }
+
+# ZK audit log (local path dependency)
+zk-audit = { path = "../zk-audit" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[[bin]]
+name = "nosqlbuddy-audit"
+path = "src/bin/nosqlbuddy-audit.rs"

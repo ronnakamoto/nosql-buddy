@@ -14,8 +14,9 @@ use crate::audit::attestation::{Attestation, AttestationStatus, Publisher};
 use crate::audit::epoch::Epoch;
 use crate::audit::ipfs::IpfsPublishResult;
 use crate::audit::stellar::{self, CommitResult, OnChainRoot};
+use crate::audit::stellar_native;
 use crate::audit::stellar_rpc::StellarRpcClient;
-use crate::error::AppError;
+use crate::error::AuditError;
 
 use super::{ApiError, ApiResult, DaemonState};
 
@@ -46,7 +47,7 @@ pub async fn close_epoch(
             }
             Err(e) => {
                 if state.oplog_hash_required {
-                    return Err(ApiError(AppError::Validation(format!(
+                    return Err(ApiError(AuditError::Validation(format!(
                         "close_epoch: oplog hash computation failed for epoch {}: {e}",
                         epoch.epoch_number
                     ))));
@@ -86,13 +87,13 @@ pub async fn commit_epoch(
         .iter()
         .find(|e| e.epoch_number == epoch_number)
         .ok_or_else(|| {
-            ApiError(AppError::Validation(format!(
+            ApiError(AuditError::Validation(format!(
                 "epoch {epoch_number} not found"
             )))
         })?;
 
     if epoch.is_open() {
-        return Err(ApiError(AppError::Validation(format!(
+        return Err(ApiError(AuditError::Validation(format!(
             "epoch {epoch_number} is still open — close it before committing"
         ))));
     }
@@ -122,44 +123,91 @@ pub async fn commit_epoch(
         (None, None) => format!("epoch={epoch_number}"),
     };
 
-    // Commit via stellar CLI. Use commit_root_with_oplog if the epoch
-    // has an oplog hash, otherwise fall back to commit_root.
-    let result = if let Some(oplog_root_hex) = &epoch.oplog_merkle_root_hex {
-        let oplog_start = epoch
-            .oplog_start_ts
-            .map(|t| ((t.time as u64) << 32) | (t.increment as u64))
-            .unwrap_or(0);
-        let oplog_end = epoch
-            .oplog_end_ts
-            .map(|t| ((t.time as u64) << 32) | (t.increment as u64))
-            .unwrap_or(0);
-        let oplog_count = epoch.oplog_entry_count.unwrap_or(0);
+    // Commit on-chain. Use native signing when a keypair is available
+    // (no stellar CLI dependency). Fall back to the CLI only if no keypair
+    // is configured (backward compat for old deployments).
+    let result = if let Some(kp) = &state.signing_keypair {
+        // ─── Native signing (no stellar CLI) ───────────────────────
+        let chain = &state.chain;
+        if let Some(oplog_root_hex) = &epoch.oplog_merkle_root_hex {
+            let oplog_start = epoch
+                .oplog_start_ts
+                .map(|t| ((t.time as u64) << 32) | (t.increment as u64))
+                .unwrap_or(0);
+            let oplog_end = epoch
+                .oplog_end_ts
+                .map(|t| ((t.time as u64) << 32) | (t.increment as u64))
+                .unwrap_or(0);
+            let oplog_count = epoch.oplog_entry_count.unwrap_or(0);
 
-        let root_clone = root_hex.clone();
-        let oplog_root_clone = oplog_root_hex.clone();
-        let metadata_clone = metadata.clone();
-        tokio::task::spawn_blocking(move || {
-            stellar::commit_root_with_oplog(
-                &root_clone,
-                &oplog_root_clone,
+            stellar_native::commit_root_with_oplog_native(
+                &root_hex,
+                oplog_root_hex,
                 oplog_start,
                 oplog_end,
                 oplog_count,
-                &metadata_clone,
+                &metadata,
+                kp,
+                &chain.rpc_url,
+                &chain.horizon_url,
+                &chain.contract_id,
+                &chain.passphrase,
             )
-        })
-        .await
-        .map_err(|e| AppError::Validation(format!("commit_root_with_oplog task join: {e}")))
-        .map_err(ApiError::from)??
+            .await
+            .map_err(ApiError::from)?
+        } else {
+            stellar_native::commit_root_native(
+                &root_hex,
+                &metadata,
+                kp,
+                &chain.rpc_url,
+                &chain.horizon_url,
+                &chain.contract_id,
+                &chain.passphrase,
+            )
+            .await
+            .map_err(ApiError::from)?
+        }
     } else {
-        let root_hex_clone = root_hex.clone();
-        let metadata_clone = metadata.clone();
-        tokio::task::spawn_blocking(move || {
-            stellar::commit_root(&root_hex_clone, &metadata_clone)
-        })
-        .await
-        .map_err(|e| AppError::Validation(format!("commit_root task join: {e}")))
-        .map_err(ApiError::from)??
+        // ─── Legacy CLI fallback (deprecated) ──────────────────────
+        log::warn!("commit_epoch: no signing keypair — falling back to stellar CLI (deprecated; use --secret-key)");
+        if let Some(oplog_root_hex) = &epoch.oplog_merkle_root_hex {
+            let oplog_start = epoch
+                .oplog_start_ts
+                .map(|t| ((t.time as u64) << 32) | (t.increment as u64))
+                .unwrap_or(0);
+            let oplog_end = epoch
+                .oplog_end_ts
+                .map(|t| ((t.time as u64) << 32) | (t.increment as u64))
+                .unwrap_or(0);
+            let oplog_count = epoch.oplog_entry_count.unwrap_or(0);
+
+            let root_clone = root_hex.clone();
+            let oplog_root_clone = oplog_root_hex.clone();
+            let metadata_clone = metadata.clone();
+            tokio::task::spawn_blocking(move || {
+                stellar::commit_root_with_oplog(
+                    &root_clone,
+                    &oplog_root_clone,
+                    oplog_start,
+                    oplog_end,
+                    oplog_count,
+                    &metadata_clone,
+                )
+            })
+            .await
+            .map_err(|e| AuditError::Validation(format!("commit_root_with_oplog task join: {e}")))
+            .map_err(ApiError::from)??
+        } else {
+            let root_hex_clone = root_hex.clone();
+            let metadata_clone = metadata.clone();
+            tokio::task::spawn_blocking(move || {
+                stellar::commit_root(&root_hex_clone, &metadata_clone)
+            })
+            .await
+            .map_err(|e| AuditError::Validation(format!("commit_root task join: {e}")))
+            .map_err(ApiError::from)??
+        }
     };
 
     // Mark the epoch as committed.
@@ -191,13 +239,13 @@ pub async fn publish_ipfs(
         .iter()
         .find(|e| e.epoch_number == epoch_number)
         .ok_or_else(|| {
-            ApiError(AppError::Validation(format!(
+            ApiError(AuditError::Validation(format!(
                 "epoch {epoch_number} not found"
             )))
         })?;
 
     let end_index = epoch.end_index.ok_or_else(|| {
-        ApiError(AppError::Validation(format!(
+        ApiError(AuditError::Validation(format!(
             "epoch {epoch_number} is still open — close it before publishing to IPFS"
         )))
     })?;
@@ -205,14 +253,14 @@ pub async fn publish_ipfs(
     // Read the JSONL log and extract events for this epoch.
     let events_path = state.data_dir.join("audit").join("events.jsonl");
     let events_jsonl = if events_path.exists() {
-        std::fs::read_to_string(&events_path).map_err(AppError::from)?
+        std::fs::read_to_string(&events_path).map_err(AuditError::from)?
     } else {
         String::new()
     };
 
     let batch_content = super::extract_epoch_batch(&events_jsonl, epoch.start_index, end_index);
     if batch_content.is_empty() {
-        return Err(ApiError(AppError::Validation(format!(
+        return Err(ApiError(AuditError::Validation(format!(
             "no events found for epoch {epoch_number} (range {}-{})",
             epoch.start_index, end_index
         ))));
@@ -339,7 +387,7 @@ pub async fn attestation_status(
         .iter()
         .find(|e| e.epoch_number == epoch_number)
         .ok_or_else(|| {
-            ApiError(AppError::Validation(format!(
+            ApiError(AuditError::Validation(format!(
                 "epoch {epoch_number} not found"
             )))
         })?;

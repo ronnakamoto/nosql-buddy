@@ -6,7 +6,6 @@
 //! Mongo domain in [`mongo`].
 
 pub mod audit;
-pub mod auditd;
 pub mod commands;
 pub mod error;
 pub mod events;
@@ -221,6 +220,13 @@ pub fn run() {
             audit::commands::audit_get_ipfs_cid,
             audit::commands::audit_check_ipfs_daemon,
             audit::commands::audit_get_onchain_root_rpc,
+            audit::commands::audit_check_onboarding,
+            audit::commands::audit_save_pinata_config,
+            audit::commands::audit_test_pinata_connection,
+            audit::commands::audit_generate_stellar_account,
+            audit::commands::audit_check_replica_set,
+            audit::commands::audit_commit_root_native,
+            audit::commands::audit_publish_epoch_to_pinata,
             audit::commands::audit_add_publisher,
             audit::commands::audit_remove_publisher,
             audit::commands::audit_list_publishers,
@@ -231,6 +237,23 @@ pub fn run() {
             audit::commands::audit_get_attestation_status,
             audit::commands::audit_verify_oplog_integrity,
             audit::commands::audit_get_oplog_commitment,
+            audit::commands::audit_commit_root_production,
+            // ─── Audit mode selection (dev / production) ───────────────
+            audit::audit_mode::audit_get_mode_config,
+            audit::audit_mode::audit_set_audit_mode,
+            audit::audit_mode::audit_set_production_network,
+            audit::audit_mode::audit_import_production_keypair,
+            audit::audit_mode::audit_clear_production_keypair,
+            audit::audit_mode::audit_get_active_account,
+            // ─── Dev mode Docker orchestration ─────────────────────────
+            audit::dev_stack::audit_check_dev_prerequisites,
+            audit::dev_stack::audit_dev_stack_status,
+            audit::dev_stack::audit_dev_stack_up,
+            audit::dev_stack::audit_dev_stack_down,
+            audit::dev_stack::audit_dev_stack_logs,
+            // ─── Dev mode daemon HTTP proxy ────────────────────────────
+            audit::audit_dev_proxy_get,
+            audit::audit_dev_proxy_post,
         ])
         .setup(|app| {
             // Native menu (macOS menu bar + Windows/Linux in-window).

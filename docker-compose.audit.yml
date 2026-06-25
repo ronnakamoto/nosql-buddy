@@ -1,0 +1,128 @@
+# ─── Audit services stack (Dev Mode) ────────────────────────────────────
+# Brings up the full nosqlbuddy audit system locally:
+#   - publisher: change stream → Merkle tree → IPFS (Pinata) → Stellar
+#   - attester:  independent replica → oplog hash → on-chain attestation
+#   - reader:    on-chain root query → local verification
+#
+# This is SEPARATE from docker-compose.yml (the 3-node MongoDB replica set +
+# seeder). Run the replica set first:
+#   docker compose up -d            # brings up mongo1/2/3 + rs-init + seeder
+#   docker compose -f docker-compose.audit.yml up -d   # brings up the audit stack
+#
+# The audit containers connect to the replica set via the host network
+# (host.docker.internal) on ports 27017/27019.
+#
+# The daemon signs Stellar transactions natively (ed25519 + Soroban RPC).
+# No `stellar` CLI or identity mount is needed — pass the secret keys via
+# environment variables (STELLAR_SECRET_KEY, ATTESTER_SECRET_KEY) in .env.audit.
+#
+# Credentials are read from .env.audit (gitignored). Copy audit-stack.env.example
+# to .env.audit and fill in your Pinata keys + Stellar secret keys.
+
+services:
+  # ─── Publisher ────────────────────────────────────────────────────────
+  # Watches the primary's change stream, builds the Merkle tree, manages
+  # epochs, publishes batches to Pinata, and commits roots to Stellar.
+  publisher:
+    build:
+      context: .
+      dockerfile: audit-service/Dockerfile.audit
+    image: nosqlbuddy-audit:dev
+    container_name: audit-publisher
+    ports:
+      - "9173:9173"
+    command:
+      - "start"
+      - "--mode"
+      - "publish"
+      - "--mongo-uri"
+      - "mongodb://host.docker.internal:27017"
+      - "--port"
+      - "9173"
+      - "--data-dir"
+      - "/data/publisher"
+      - "--rpc-url"
+      - "https://soroban-testnet.stellar.org:443"
+      - "--network"
+      - "testnet"
+      - "--epoch-threshold"
+      - "100"
+    environment:
+      # Stellar secret key for native signing (S... strkey, 56 chars).
+      STELLAR_SECRET_KEY: ${STELLAR_SECRET_KEY:-}
+      # Pinata credentials for IPFS publishing.
+      PINATA_API_KEY: ${PINATA_API_KEY:-}
+      PINATA_API_SECRET: ${PINATA_API_SECRET:-}
+      PINATA_GATEWAY_URL: ${PINATA_GATEWAY_URL:-https://gateway.pinata.cloud}
+    volumes:
+      - audit-publisher-data:/data/publisher
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # ─── Independent Attester ─────────────────────────────────────────────
+  # Connects to the INDEPENDENT replica member (mongo3, port 27019),
+  # independently computes the oplog hash, and submits attestations to the
+  # contract. This is the trust anchor for oplog completeness verification.
+  attester:
+    image: nosqlbuddy-audit:dev
+    build:
+      context: .
+      dockerfile: audit-service/Dockerfile.audit
+    container_name: audit-attester
+    ports:
+      - "9174:9174"
+    command:
+      - "start"
+      - "--mode"
+      - "attest"
+      - "--mongo-uri"
+      - "mongodb://host.docker.internal:27019"
+      - "--port"
+      - "9174"
+      - "--data-dir"
+      - "/data/attester"
+      - "--rpc-url"
+      - "https://soroban-testnet.stellar.org:443"
+      - "--network"
+      - "testnet"
+    environment:
+      # Stellar secret key for the attester's account (native signing).
+      ATTESTER_SECRET_KEY: ${ATTESTER_SECRET_KEY:-}
+    volumes:
+      - audit-attester-data:/data/attester
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # ─── Reader ───────────────────────────────────────────────────────────
+  # Reads on-chain commitments from Stellar, fetches batches from IPFS,
+  # rebuilds the Merkle tree in local sled, and verifies roots match.
+  reader:
+    image: nosqlbuddy-audit:dev
+    build:
+      context: .
+      dockerfile: audit-service/Dockerfile.audit
+    container_name: audit-reader
+    ports:
+      - "9175:9175"
+    command:
+      - "start"
+      - "--mode"
+      - "read"
+      - "--port"
+      - "9175"
+      - "--data-dir"
+      - "/data/reader"
+      - "--rpc-url"
+      - "https://soroban-testnet.stellar.org:443"
+    volumes:
+      - audit-reader-data:/data/reader
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  audit-publisher-data:
+  audit-attester-data:
+  audit-reader-data:

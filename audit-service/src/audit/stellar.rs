@@ -14,7 +14,7 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{AppError, AppResult};
+use crate::error::{AuditError, AuditResult};
 
 /// The deployed Soroban contract ID on Stellar testnet.
 pub const CONTRACT_ID: &str = "CCUCFDRF6IMY3STBIFRBBGFFPETBSAPPTDACNOBYWKNPG5QUCAMGGUQ5";
@@ -59,7 +59,7 @@ pub struct OnChainRoot {
 /// This calls `commit_root(root, metadata)` on the contract. The `root_hex`
 /// must be a 64-character hex string (32 bytes). The `metadata` is an
 /// arbitrary string stored on-chain with the commitment.
-pub fn commit_root(root_hex: &str, metadata: &str) -> AppResult<CommitResult> {
+pub fn commit_root(root_hex: &str, metadata: &str) -> AuditResult<CommitResult> {
     // The stellar CLI expects the root as a hex-encoded byte string.
     // The contract's `commit_root` takes `Bytes` which the CLI accepts
     // as a hex string.
@@ -82,7 +82,7 @@ pub fn commit_root(root_hex: &str, metadata: &str) -> AppResult<CommitResult> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let sequence: u64 = parse_u64_output(stdout.trim())
-        .map_err(|e| AppError::Validation(format!("failed to parse commit_root sequence: {e} (stdout: {stdout})")))?;
+        .map_err(|e| AuditError::Validation(format!("failed to parse commit_root sequence: {e} (stdout: {stdout})")))?;
 
     // Extract the tx hash from stderr (the CLI prints it to stderr).
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -96,7 +96,7 @@ pub fn commit_root(root_hex: &str, metadata: &str) -> AppResult<CommitResult> {
 }
 
 /// Get the current committed root from the Soroban contract.
-pub fn get_current_root() -> AppResult<Option<OnChainRoot>> {
+pub fn get_current_root() -> AuditResult<Option<OnChainRoot>> {
     let output = run_stellar_cli(&[
         "contract",
         "invoke",
@@ -140,7 +140,7 @@ pub fn commit_root_with_oplog(
     oplog_end_ts: u64,
     oplog_entry_count: u64,
     metadata: &str,
-) -> AppResult<CommitResult> {
+) -> AuditResult<CommitResult> {
     let output = run_stellar_cli(&[
         "contract",
         "invoke",
@@ -168,7 +168,7 @@ pub fn commit_root_with_oplog(
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let sequence: u64 = parse_u64_output(stdout.trim())
-        .map_err(|e| AppError::Validation(format!("failed to parse commit_root_with_oplog sequence: {e} (stdout: {stdout})")))?;
+        .map_err(|e| AuditError::Validation(format!("failed to parse commit_root_with_oplog sequence: {e} (stdout: {stdout})")))?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let tx_hash = extract_tx_hash(&stderr).unwrap_or_default();
@@ -184,7 +184,7 @@ pub fn commit_root_with_oplog(
 ///
 /// `public_key_hex` is the 32-byte ed25519 public key (64 hex chars) that the
 /// attester will use to sign oplog attestations.
-pub fn authorize_attester(attester_address: &str, public_key_hex: &str) -> AppResult<()> {
+pub fn authorize_attester(attester_address: &str, public_key_hex: &str) -> AuditResult<()> {
     let _output = run_stellar_cli(&[
         "contract",
         "invoke",
@@ -214,7 +214,7 @@ pub fn attest_oplog(
     attester_address: &str,
     sequence: u64,
     signature_hex: &str,
-) -> AppResult<()> {
+) -> AuditResult<()> {
     let _output = run_stellar_cli(&[
         "contract",
         "invoke",
@@ -248,7 +248,7 @@ pub struct OnChainOplogCommitment {
 }
 
 /// Get the oplog commitment for a given sequence from the contract.
-pub fn get_oplog_commitment(sequence: u64) -> AppResult<Option<OnChainOplogCommitment>> {
+pub fn get_oplog_commitment(sequence: u64) -> AuditResult<Option<OnChainOplogCommitment>> {
     let output = run_stellar_cli(&[
         "contract",
         "invoke",
@@ -298,7 +298,7 @@ pub fn get_oplog_commitment(sequence: u64) -> AppResult<Option<OnChainOplogCommi
 }
 
 /// Get the root history from the Soroban contract.
-pub fn get_root_history(limit: u32) -> AppResult<Vec<OnChainRoot>> {
+pub fn get_root_history(limit: u32) -> AuditResult<Vec<OnChainRoot>> {
     let output = run_stellar_cli(&[
         "contract",
         "invoke",
@@ -330,18 +330,18 @@ pub fn get_root_history(limit: u32) -> AppResult<Vec<OnChainRoot>> {
 }
 
 /// Run the `stellar` CLI with the given arguments.
-fn run_stellar_cli(args: &[&str]) -> AppResult<std::process::Output> {
+fn run_stellar_cli(args: &[&str]) -> AuditResult<std::process::Output> {
     let identity = source_identity();
     Command::new("stellar")
         .args(args)
         .output()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                AppError::Validation(
+                AuditError::Validation(
                     "stellar CLI not found in PATH. Install it: https://docs.stellar.org/tools/developer-tools/cli/install".to_string(),
                 )
             } else {
-                AppError::Validation(format!("failed to run stellar CLI: {e}"))
+                AuditError::Validation(format!("failed to run stellar CLI: {e}"))
             }
         })
         .and_then(|output| {
@@ -358,7 +358,7 @@ fn run_stellar_cli(args: &[&str]) -> AppResult<std::process::Output> {
                 } else if !stdout.is_empty() {
                     msg = format!("{msg}\nstdout: {stdout}");
                 }
-                Err(AppError::Validation(msg))
+                Err(AuditError::Validation(msg))
             }
         })
 }
@@ -393,7 +393,7 @@ fn extract_tx_hash(stderr: &str) -> Option<String> {
 ///
 /// We try the new flat-JSON format first (via serde_json), then fall back to
 /// the legacy typed-vec parser so both CLI versions keep working.
-fn parse_root_entry(s: &str) -> AppResult<OnChainRoot> {
+fn parse_root_entry(s: &str) -> AuditResult<OnChainRoot> {
     let s = s.trim();
 
     // Try the new flat-JSON format first.
@@ -406,7 +406,7 @@ fn parse_root_entry(s: &str) -> AppResult<OnChainRoot> {
 }
 
 /// Parse the new (stellar CLI >=22) flat JSON output format.
-fn parse_root_entry_flat(s: &str) -> AppResult<OnChainRoot> {
+fn parse_root_entry_flat(s: &str) -> AuditResult<OnChainRoot> {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct FlatRoot {
@@ -418,16 +418,16 @@ fn parse_root_entry_flat(s: &str) -> AppResult<OnChainRoot> {
     }
 
     let flat: FlatRoot = serde_json::from_str(s)
-        .map_err(|e| AppError::Validation(format!("parse flat root entry: {e}")))?;
+        .map_err(|e| AuditError::Validation(format!("parse flat root entry: {e}")))?;
 
     let sequence = flat
         .sequence
         .as_u64()
-        .ok_or_else(|| AppError::Validation(format!("sequence is not a u64: {}", flat.sequence)))?;
+        .ok_or_else(|| AuditError::Validation(format!("sequence is not a u64: {}", flat.sequence)))?;
     let timestamp = flat
         .timestamp
         .as_u64()
-        .ok_or_else(|| AppError::Validation(format!("timestamp is not a u64: {}", flat.timestamp)))?;
+        .ok_or_else(|| AuditError::Validation(format!("timestamp is not a u64: {}", flat.timestamp)))?;
 
     // The CLI may print the root as a hex string (with or without a "0x"
     // prefix). Normalize to bare lowercase hex.
@@ -443,11 +443,11 @@ fn parse_root_entry_flat(s: &str) -> AppResult<OnChainRoot> {
 
 /// Parse the legacy (stellar CLI <=21) typed-vec output format:
 ///   {"vec":[{"u64":"1"},{"bytes":"0000..."},{"u64":"1782..."},{"string":"metadata"}]}
-fn parse_root_entry_legacy(s: &str) -> AppResult<OnChainRoot> {
+fn parse_root_entry_legacy(s: &str) -> AuditResult<OnChainRoot> {
     // Extract the sequence (first u64)
     let sequence = extract_typed_value(s, "u64", 0)?
         .parse::<u64>()
-        .map_err(|e| AppError::Validation(format!("parse sequence: {e}")))?;
+        .map_err(|e| AuditError::Validation(format!("parse sequence: {e}")))?;
 
     // Extract the root bytes (first bytes field)
     let root_hex = extract_typed_value(s, "bytes", 0)?;
@@ -455,7 +455,7 @@ fn parse_root_entry_legacy(s: &str) -> AppResult<OnChainRoot> {
     // Extract the timestamp (second u64)
     let timestamp = extract_typed_value(s, "u64", 1)?
         .parse::<u64>()
-        .map_err(|e| AppError::Validation(format!("parse timestamp: {e}")))?;
+        .map_err(|e| AuditError::Validation(format!("parse timestamp: {e}")))?;
 
     // Extract the metadata (first string field)
     let metadata = extract_typed_value(s, "string", 0).unwrap_or_default();
@@ -498,7 +498,7 @@ fn parse_u64_output(s: &str) -> Result<u64, String> {
 
 
 /// e.g., extract_typed_value(s, "u64", 0) extracts the first {"u64":"..."} value.
-fn extract_typed_value(s: &str, type_name: &str, n: usize) -> AppResult<String> {
+fn extract_typed_value(s: &str, type_name: &str, n: usize) -> AuditResult<String> {
     let pattern = format!("\"{type_name}\":\"");
     let mut count = 0;
     let mut start = 0;
@@ -514,7 +514,7 @@ fn extract_typed_value(s: &str, type_name: &str, n: usize) -> AppResult<String> 
             break;
         }
     }
-    Err(AppError::Validation(format!(
+    Err(AuditError::Validation(format!(
         "could not find {type_name} #{n} in CLI output"
     )))
 }

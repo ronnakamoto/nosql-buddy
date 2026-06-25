@@ -41,25 +41,13 @@ dirs = "5"
 regex = "1"
 boa_engine = "0.21"
 
-# ZK audit log (local path dependency)
+# Audit service (extracted standalone crate)
+audit-service = { package = "nosqlbuddy-audit-service", path = "../audit-service" }
+
+# ZK audit log — used directly by audit/commands.rs for proof generation
 zk-audit = { path = "../zk-audit" }
-ark-bn254 = "0.5"
 ark-ff = "0.5"
-sha2 = "0.10"
 hex = "0.4"
-sled = "0.34.7"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-base64 = "0.22"
-ed25519-dalek = { version = "2", features = ["rand_core"] }
-rand = "0.8"
-
-# Standalone audit daemon (nosqlbuddy-auditd)
-axum = { version = "0.7", features = ["json"] }
-tower = "0.5"
-
-[[bin]]
-name = "nosqlbuddy-auditd"
-path = "src/bin/nosqlbuddy-auditd.rs"
 
 [features]
 # This feature is used for production builds where `devUrl` is not used.
