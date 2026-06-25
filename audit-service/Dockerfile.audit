@@ -8,7 +8,7 @@
 # the STELLAR_SECRET_KEY / ATTESTER_SECRET_KEY env vars.
 
 # ─── Build stage ────────────────────────────────────────────────────────
-FROM rust:1.83-bookworm AS builder
+FROM rust:1.89-bookworm AS builder
 
 # Build dependencies first (cached layer). We copy the manifests and a
 # dummy src so cargo fetches/builds deps without rebuilding on every code
@@ -16,8 +16,10 @@ FROM rust:1.83-bookworm AS builder
 WORKDIR /build
 
 COPY Cargo.toml ./Cargo.toml
+COPY Cargo.lock ./Cargo.lock
 COPY zk-audit/Cargo.toml ./zk-audit/Cargo.toml
 COPY zk-audit/src ./zk-audit/src
+COPY src-tauri/Cargo.toml ./src-tauri/Cargo.toml
 COPY audit-service/Cargo.toml ./audit-service/Cargo.toml
 
 # Create a dummy lib + bin so the dependency layer compiles.
@@ -27,6 +29,12 @@ RUN mkdir -p audit-service/src/audit audit-service/src/auditd audit-service/src/
     echo 'pub mod mod_rs {}' > audit-service/src/audit/mod.rs && \
     echo 'pub mod mod_rs {}' > audit-service/src/auditd/mod.rs && \
     echo 'fn main() {}' > audit-service/src/bin/nosqlbuddy-audit.rs
+
+# src-tauri is a workspace member, but we only need its manifest to exist.
+# Create a minimal lib + bin so cargo validates the workspace without building it.
+RUN mkdir -p src-tauri/src && \
+    echo '// dummy' > src-tauri/src/lib.rs && \
+    echo 'fn main() {}' > src-tauri/src/main.rs
 
 RUN cargo build --release --bin nosqlbuddy-audit --manifest-path audit-service/Cargo.toml || true
 

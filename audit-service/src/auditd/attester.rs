@@ -22,7 +22,6 @@ use axum::Json;
 use serde::Serialize;
 
 use crate::audit::oplog::{compute_oplog_range_hash, OplogTimestamp};
-use crate::audit::stellar;
 use crate::audit::stellar_native;
 use crate::audit::stellar_rpc::StellarRpcClient;
 use crate::error::AuditError;
@@ -201,24 +200,19 @@ async fn attest_epoch(
     client: &mongodb::Client,
     sequence: u64,
 ) -> Result<AttestResult, String> {
-    // 1. Get the on-chain oplog commitment.
-    //    Use native simulation when a Stellar keypair is available; fall back
-    //    to the CLI for backward compat.
-    let on_chain = if let Some(kp) = &state.attester_stellar_keypair {
-        let chain = &state.chain;
-        stellar_native::get_oplog_commitment_native(
-            sequence,
-            kp,
-            &chain.rpc_url,
-            &chain.contract_id,
-        )
-        .await
-        .map_err(|e| format!("get_oplog_commitment_native({sequence}): {e}"))?
-    } else {
-        log::warn!("attest: no attester Stellar keypair — falling back to stellar CLI for read (deprecated; use --attester-secret-key)");
-        stellar::get_oplog_commitment(sequence)
-            .map_err(|e| format!("get_oplog_commitment({sequence}): {e}"))?
-    };
+    // 1. Get the on-chain oplog commitment via native contract simulation.
+    let stellar_kp = state.attester_stellar_keypair.as_ref().ok_or_else(|| {
+        "no attester Stellar keypair configured — use --attester-secret-key or ATTESTER_SECRET_KEY env var".to_string()
+    })?;
+    let chain = &state.chain;
+    let on_chain = stellar_native::get_oplog_commitment_native(
+        sequence,
+        stellar_kp,
+        &chain.rpc_url,
+        &chain.contract_id,
+    )
+    .await
+    .map_err(|e| format!("get_oplog_commitment_native({sequence}): {e}"))?;
 
     let on_chain_oplog = match on_chain {
         Some(oc) => oc,
@@ -251,10 +245,6 @@ async fn attest_epoch(
     let mut attested = false;
 
     if matched {
-        // Submit attestation to the contract. The attester needs:
-        // - `attester_key`: the ed25519 oplog signing key (produces the signature)
-        // - `attester_stellar_keypair`: the Stellar account key (signs the tx)
-        // When no Stellar keypair is set, fall back to the CLI.
         let attester_key = state.attester_key.as_ref().ok_or_else(|| {
             "attester ed25519 key not configured — use --attester-key-file".to_string()
         })?;
@@ -265,38 +255,16 @@ async fn attest_epoch(
             on_chain_oplog.oplog_end_ts,
         )?;
 
-        let submit_result = if let Some(stellar_kp) = &state.attester_stellar_keypair {
-            // ─── Native signing (no stellar CLI) ───────────────────
-            let chain = &state.chain;
-            stellar_native::attest_oplog_native(
-                stellar_kp,
-                sequence,
-                &signature_hex,
-                &chain.rpc_url,
-                &chain.horizon_url,
-                &chain.contract_id,
-                &chain.passphrase,
-            )
-            .await
-        } else {
-            // ─── Legacy CLI fallback (deprecated) ──────────────────
-            log::warn!("attest: no attester Stellar keypair — falling back to stellar CLI (deprecated; use --attester-secret-key)");
-            let identity = state.attester_identity.as_ref().ok_or_else(|| {
-                "attester identity not configured — use --attester-secret-key or --attester-identity".to_string()
-            })?;
-            let address = state.attester_address.as_ref().ok_or_else(|| {
-                "attester address not configured — use --attester-secret-key or --attester-address".to_string()
-            })?;
-            // spawn_blocking because the CLI is sync
-            let identity = identity.clone();
-            let address = address.clone();
-            let sig = signature_hex.clone();
-            tokio::task::spawn_blocking(move || {
-                stellar::attest_oplog(&identity, &address, sequence, &sig)
-            })
-            .await
-            .map_err(|e| format!("attest_oplog task join: {e}"))?
-        };
+        let submit_result = stellar_native::attest_oplog_native(
+            stellar_kp,
+            sequence,
+            &signature_hex,
+            &chain.rpc_url,
+            &chain.horizon_url,
+            &chain.contract_id,
+            &chain.passphrase,
+        )
+        .await;
 
         match submit_result {
             Ok(()) => {
@@ -343,15 +311,25 @@ async fn attest_epoch(
 
 /// GET /attest/attestations/:sequence — get attestations for an epoch.
 pub async fn list_attestations(
-    _state: State<Arc<DaemonState>>,
+    state: State<Arc<DaemonState>>,
     Path(sequence): Path<u64>,
 ) -> ApiResult<serde_json::Value> {
-    // Query the contract for attestations.
-    // For the hackathon, we return a placeholder.
+    use crate::audit::stellar_native;
+
+    let kp = stellar_native::generate_keypair();
+    let attesters = stellar_native::get_oplog_attestations_native(
+        &kp,
+        &state.rpc_url,
+        &state.chain.contract_id,
+        sequence,
+    )
+    .await
+    .unwrap_or_default();
+
     Ok(Json(serde_json::json!({
         "sequence": sequence,
-        "attestations": [],
-        "note": "Use stellar CLI to query on-chain attestations"
+        "count": attesters.len(),
+        "attesters": attesters,
     })))
 }
 

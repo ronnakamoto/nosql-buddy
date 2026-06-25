@@ -229,17 +229,16 @@ export function AuditSettings({
         display: "flex",
         flexDirection: "column",
         gap: "var(--space-3)",
-        padding: "var(--space-4)",
-        maxWidth: "640px",
-        margin: "0 auto",
-        animation: "audit-fade-in 0.2s ease",
+        padding: "var(--space-3)",
+        flex: 1,
+        overflow: "auto",
       }}
     >
       {/* Header */}
       <div style={{ display: "flex", alignItems: "center", gap: "var(--space-3)" }}>
-        <h2 style={{ margin: 0, fontSize: "var(--font-size-xl)", fontWeight: 700 }}>Audit Settings</h2>
+        <h2 style={{ margin: 0, fontSize: "var(--font-size-xl)", fontWeight: 700, color: "var(--ink)" }}>Audit Settings</h2>
         <div style={{ flex: 1 }} />
-        <Button variant="secondary" onClick={onBack}>← Back</Button>
+        <Button variant="secondary" onClick={onBack}>Back</Button>
       </div>
 
       {error && <Alert tone="danger">{error}</Alert>}

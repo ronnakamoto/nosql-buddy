@@ -96,13 +96,7 @@ Runs the **complete audit system** on your machine via Docker — publisher, ind
    docker compose up -d
    ```
 
-2. Create `.env.audit` with your Stellar secret keys and Pinata credentials:
-   ```bash
-   cp audit-stack.env.example .env.audit
-   # Edit .env.audit — fill in STELLAR_SECRET_KEY, ATTESTER_SECRET_KEY, PINATA_API_KEY, PINATA_API_SECRET
-   ```
-
-3. Generate **two separate** Stellar testnet secret keys — one for the publisher (operator) and one for the attester (auditor). They must be different keys, controlled by different parties:
+2. Generate **two separate** Stellar testnet secret keys — one for the publisher (operator) and one for the attester (auditor). They must be different keys, controlled by different parties:
    ```bash
    # Install the stellar CLI once (only for key generation — not needed at runtime):
    # https://docs.stellar.org/tools/developer-tools/cli/install
@@ -118,10 +112,16 @@ Runs the **complete audit system** on your machine via Docker — publisher, ind
 
    > **Why two keys?** The trust model requires the attester to be independent from the operator. If both use the same key, the operator could submit fake attestations themselves, defeating the independent verification.
 
+3. Create `.env.audit` with the keys you just generated:
+   ```bash
+   cp audit-stack.env.example .env.audit
+   # Edit .env.audit — fill in STELLAR_SECRET_KEY, ATTESTER_SECRET_KEY, PINATA_API_KEY, PINATA_API_SECRET
+   ```
+
 4. Authorize the attester on the contract. The attester daemon auto-generates a separate ed25519 oplog signing key on first run and logs its public key. You need both the Stellar address and the ed25519 public key to authorize:
    ```bash
-   # Start the attester once to generate the ed25519 key, then check the logs:
-   docker compose -f docker-compose.audit.yml up -d attester
+   # Build and start the attester once to generate the ed25519 key, then check the logs:
+   docker compose -f docker-compose.audit.yml up -d --build attester
    docker compose -f docker-compose.audit.yml logs attester | grep "public key"
 
    # Authorize on the contract (one-time):
@@ -144,7 +144,7 @@ Runs the **complete audit system** on your machine via Docker — publisher, ind
 
 **Manual Docker commands** (alternative to the in-app Start Stack button):
 ```bash
-docker compose -f docker-compose.audit.yml up -d    # start the audit stack
+docker compose -f docker-compose.audit.yml up -d    # start the audit stack (add --build on first run)
 docker compose -f docker-compose.audit.yml ps       # check status
 docker compose -f docker-compose.audit.yml logs -f  # tail logs
 docker compose -f docker-compose.audit.yml down     # stop the stack
@@ -180,6 +180,62 @@ The audit service runs as a separate process from the desktop app. It captures M
 cd src-tauri
 cargo build --bin nosqlbuddy-audit
 ```
+
+### Run via Docker Compose (alternative to building from source)
+
+If you don't want to install the Rust toolchain, you can run the full audit stack (publisher + attester + reader) via Docker. This uses the same binary, containerized with the Dockerfile at `audit-service/Dockerfile.audit`.
+
+**Prerequisites:** Docker Desktop + the 3-node MongoDB replica set running.
+
+1. Start the MongoDB replica set (from the project root):
+   ```bash
+   docker compose up -d
+   ```
+
+2. Generate two separate Stellar testnet secret keys (publisher + attester) — see the [Dev Mode](#dev-mode-full-stack-locally) section for detailed key generation steps.
+
+3. Create `.env.audit` with the keys you just generated:
+   ```bash
+   cp audit-stack.env.example .env.audit
+   # Edit .env.audit — fill in STELLAR_SECRET_KEY, ATTESTER_SECRET_KEY, PINATA_API_KEY, PINATA_API_SECRET
+   ```
+
+4. Build and start the attester to auto-generate its ed25519 oplog key, then authorize it on the contract (one-time):
+   ```bash
+   docker compose -f docker-compose.audit.yml up -d --build attester
+   docker compose -f docker-compose.audit.yml logs attester | grep "public key"
+
+   # Authorize on the contract:
+   stellar contract invoke --id <testnet-contract-id> --network testnet -- \
+     authorize_attester \
+     --address <attester-stellar-address-G...> \
+     --pubkey <attester-ed25519-pubkey-hex-from-logs>
+   ```
+
+5. Start the full audit stack:
+   ```bash
+   docker compose -f docker-compose.audit.yml up -d --build
+   ```
+
+   This brings up three containers:
+
+   | Service | Port | Mode | Connects to | Role |
+   |---|---|---|---|---|
+   | `publisher` | 9173 | publish | mongo1 (port 27017) | Captures change stream events, manages epochs, publishes to IPFS, commits roots on-chain |
+   | `attester` | 9174 | attest | mongo3 (port 27019) | Independently computes oplog hash, submits ed25519 attestations to the contract |
+   | `reader` | 9175 | read | mongo3 (port 27019) | Verifies on-chain roots against local audit log and oplog |
+
+6. Manage the stack:
+   ```bash
+   docker compose -f docker-compose.audit.yml ps       # check status
+   docker compose -f docker-compose.audit.yml logs -f  # tail all logs
+   docker compose -f docker-compose.audit.yml logs -f publisher  # tail one service
+   docker compose -f docker-compose.audit.yml down     # stop the stack (run this before restarting)
+   ```
+
+> **Restarting:** Always run `docker compose -f docker-compose.audit.yml down` before `up` if you made changes to `.env.audit` or the Dockerfile. Use `--build` on first run or after code changes.
+>
+> **Tip:** The audit stack uses a separate Compose project name (`nosqlbuddy-audit`) so it won't trigger orphan-container warnings from the MongoDB replica set. The audit containers connect to the replica set via `host.docker.internal` — on Linux, Docker Compose automatically adds the `host-gateway` mapping.
 
 ### Setup wizard (one-time)
 

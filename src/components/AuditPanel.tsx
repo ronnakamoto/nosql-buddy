@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useCallback } from "react";
 import type { AuditMode } from "../ipc/commands";
 import { AuditModeChooser } from "./AuditModeChooser";
 import { AuditDevFlow } from "./AuditDevFlow";
@@ -7,52 +7,111 @@ import { AuditSettings } from "./AuditSettings";
 import { injectAuditKeyframes } from "./AuditUi";
 
 /**
- * ZK Audit Log panel — the redesigned router.
- *
- * The mode chooser is always shown when the user opens the Audit tab. After
- * they pick Dev or Production, the panel routes to the corresponding flow.
- * Settings is reachable from either flow; Back returns to the active flow.
- * Switching mode in Settings re-routes immediately.
- *
- * Hook order is fixed: this component owns exactly two useState hooks plus
- * one useCallback, all called unconditionally before any early return.
+ * ZK Audit Log panel — state is owned by the App tab so it survives tab
+ * switches. The parent passes the current mode/view and notifies us when
+ * either changes.
  */
 type View = "chooser" | "dev" | "production" | "settings";
 
-export default function AuditPanel() {
+export interface AuditPanelProps {
+  mode: AuditMode;
+  view: View;
+  connectionId?: string | null;
+  onModeChange: (mode: AuditMode) => void;
+  onViewChange: (view: View) => void;
+}
+
+export default function AuditPanel({
+  mode,
+  view,
+  connectionId,
+  onModeChange,
+  onViewChange,
+}: AuditPanelProps) {
   injectAuditKeyframes();
 
-  // The selected mode drives which flow we return to from Settings.
-  const [mode, setMode] = useState<AuditMode>("dev");
-  // The active view. Starts at the chooser every time the tab opens.
-  const [view, setView] = useState<View>("chooser");
+  const handleChoose = useCallback(
+    (m: AuditMode) => {
+      onModeChange(m);
+      onViewChange(m === "dev" ? "dev" : "production");
+    },
+    [onModeChange, onViewChange]
+  );
 
-  const handleChoose = useCallback((m: AuditMode) => {
-    setMode(m);
-    setView(m === "dev" ? "dev" : "production");
-  }, []);
+  const switchMode = useCallback(
+    (m: AuditMode) => {
+      onModeChange(m);
+      onViewChange(m === "dev" ? "dev" : "production");
+    },
+    [onModeChange, onViewChange]
+  );
 
-  const handleModeChanged = useCallback((m: AuditMode) => {
-    setMode(m);
-    setView(m === "dev" ? "dev" : "production");
-  }, []);
-
-  const showSettings = useCallback(() => setView("settings"), []);
+  const showSettings = useCallback(() => onViewChange("settings"), [onViewChange]);
   const backFromSettings = useCallback(() => {
-    setView(mode === "dev" ? "dev" : "production");
-  }, [mode]);
+    onViewChange(mode === "dev" ? "dev" : "production");
+  }, [mode, onViewChange]);
 
+  let body: React.ReactNode;
   if (view === "chooser") {
-    return <AuditModeChooser onChoose={handleChoose} />;
+    body = <AuditModeChooser onChoose={handleChoose} />;
+  } else if (view === "settings") {
+    body = <AuditSettings onBack={backFromSettings} onModeChanged={switchMode} />;
+  } else if (view === "dev") {
+    body = <AuditDevFlow onShowSettings={showSettings} onSwitchMode={() => switchMode("production")} />;
+  } else {
+    body = <AuditProductionFlow onShowSettings={showSettings} onSwitchMode={() => switchMode("dev")} connectionId={connectionId} />;
   }
 
-  if (view === "settings") {
-    return <AuditSettings onBack={backFromSettings} onModeChanged={handleModeChanged} />;
-  }
+  return (
+    <div className="pane">
+      <div className="pane__header audit-pane-header">
+        {/* Left: title + subtitle */}
+        <div className="audit-pane-header__title-group">
+          <h2 className="pane__title">Audit Log</h2>
+          <span className="pane__sub">
+            {view === "settings"
+              ? "Settings"
+              : view === "dev"
+                ? "Local Docker stack"
+                : view === "production"
+                  ? "Production pipeline"
+                  : "Choose a mode"}
+          </span>
+        </div>
 
-  if (view === "dev") {
-    return <AuditDevFlow onShowSettings={showSettings} />;
-  }
+        {/* Center: inline mode tabs (hidden in chooser/settings views) */}
+        {view !== "chooser" && view !== "settings" && (
+          <div className="audit-mode-tabs">
+            <button
+              className={`audit-mode-tab ${view === "dev" ? "is-active" : ""}`}
+              onClick={() => switchMode("dev")}
+            >
+              Dev
+            </button>
+            <button
+              className={`audit-mode-tab ${view === "production" ? "is-active" : ""}`}
+              onClick={() => switchMode("production")}
+            >
+              Production
+            </button>
+          </div>
+        )}
 
-  return <AuditProductionFlow onShowSettings={showSettings} />;
+        {/* Right: settings link */}
+        <div className="pane__actions">
+          {view !== "chooser" && (
+            <button
+              className={`audit-mode-tab ${view === "settings" ? "is-active" : ""}`}
+              onClick={view === "settings" ? backFromSettings : showSettings}
+            >
+              Settings
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="pane__body" style={{ padding: 0, display: "flex", flexDirection: "column" }}>
+        {body}
+      </div>
+    </div>
+  );
 }

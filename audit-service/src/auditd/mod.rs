@@ -30,6 +30,7 @@ use crate::audit::attestation::AttestationManager;
 use crate::audit::change_stream::ChangeStreamRegistry;
 use crate::audit::epoch::EpochManager;
 use crate::audit::ipfs::IpfsConfig;
+use crate::audit::pinata::PinataConfig;
 use crate::audit::stellar_native::{self, StellarKeypair, MAINNET_PASSPHRASE, TESTNET_HORIZON_URL, TESTNET_PASSPHRASE, TESTNET_RPC_URL};
 use crate::audit::AuditLog;
 use crate::error::AuditError;
@@ -73,7 +74,8 @@ impl DaemonChainConfig {
             rpc_url: TESTNET_RPC_URL.to_string(),
             horizon_url: TESTNET_HORIZON_URL.to_string(),
             passphrase: TESTNET_PASSPHRASE.to_string(),
-            contract_id: crate::audit::stellar::CONTRACT_ID.to_string(),
+            contract_id: std::env::var("CONTRACT_ID")
+                .unwrap_or_else(|_| crate::audit::stellar::CONTRACT_ID.to_string()),
         }
     }
 
@@ -102,12 +104,6 @@ pub struct DaemonConfig {
     pub epoch_time_secs: u64,
     /// Path to the ed25519 attester signing key file. Generated if missing.
     pub attester_key_file: Option<PathBuf>,
-    /// Stellar CLI identity name used by the attester to sign transactions.
-    /// Deprecated — use `secret_key` instead (native signing).
-    pub attester_identity: Option<String>,
-    /// Stellar account address of the attester (must match the identity).
-    /// When using native signing, this is derived from the keypair.
-    pub attester_address: Option<String>,
     /// If true, epoch close fails when oplog hash computation fails.
     /// If false, the epoch closes without the oplog hash (warns).
     pub oplog_hash_required: bool,
@@ -118,6 +114,9 @@ pub struct DaemonConfig {
     /// Stellar secret key for the attester's Stellar account (separate from
     /// the ed25519 attester signing key). Required for native attestation.
     pub attester_secret_key: Option<String>,
+    /// Pinata IPFS credentials. When present, the publisher pins epoch
+    /// batches to Pinata instead of requiring a local IPFS daemon.
+    pub pinata_config: Option<PinataConfig>,
     /// Chain configuration (network, RPC, Horizon, contract ID, passphrase).
     pub chain: DaemonChainConfig,
 }
@@ -137,11 +136,10 @@ impl Default for DaemonConfig {
             epoch_threshold: 100,
             epoch_time_secs: 0,
             attester_key_file: None,
-            attester_identity: None,
-            attester_address: None,
             oplog_hash_required: false,
             secret_key: None,
             attester_secret_key: None,
+            pinata_config: None,
             chain: DaemonChainConfig::testnet(),
         }
     }
@@ -157,16 +155,14 @@ pub struct DaemonState {
     pub data_dir: PathBuf,
     pub circuit_dir: Option<PathBuf>,
     pub ipfs_config: IpfsConfig,
+    pub pinata_config: Option<PinataConfig>,
     pub rpc_url: String,
     /// MongoDB client for oplog hashing (publisher mode only).
     /// When present, epoch closes will compute and attach the oplog hash.
     pub mongo_client: Option<mongodb::Client>,
     /// Ed25519 signing key for the attester mode (oplog attestations).
     pub attester_key: Option<ed25519_dalek::SigningKey>,
-    /// Stellar CLI identity name used to sign attester transactions.
-    /// Deprecated — `signing_keypair` is used instead when available.
-    pub attester_identity: Option<String>,
-    /// Stellar account address of the attester (for contract authorization).
+    /// Stellar account address of the attester (derived from the keypair).
     pub attester_address: Option<String>,
     /// If true, epoch close fails when oplog hash computation fails.
     pub oplog_hash_required: bool,
@@ -315,7 +311,7 @@ pub fn build_router(state: Arc<DaemonState>) -> axum::Router {
 /// Start the HTTP server on the configured port.
 /// In publisher mode, also spawns the auto-commit background task.
 pub async fn run_server(state: Arc<DaemonState>, port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
     // Spawn auto-commit loop in publisher mode.
     if state.mode == DaemonMode::Publish {
@@ -343,6 +339,31 @@ pub async fn run_server(state: Arc<DaemonState>, port: u16) -> Result<(), Box<dy
     log::info!("nosqlbuddy-audit listening on http://{addr}");
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+/// Publish an epoch batch to IPFS, preferring Pinata when credentials are
+/// configured, otherwise falling back to the local Kubo daemon.
+async fn publish_epoch_batch_to_ipfs(
+    state: &DaemonState,
+    epoch_number: u64,
+    batch_content: &str,
+) -> Result<crate::audit::ipfs::IpfsPublishResult, crate::error::AuditError> {
+    if let Some(pinata) = &state.pinata_config {
+        if !pinata.api_key.is_empty() || !pinata.api_secret.is_empty() {
+            return crate::audit::pinata::publish_epoch_batch(pinata, epoch_number, batch_content).await;
+        }
+    }
+    crate::audit::ipfs::publish_epoch_batch(&state.ipfs_config, epoch_number, batch_content).await
+}
+
+/// Check whether the configured IPFS backend is reachable.
+async fn check_ipfs_backend(state: &DaemonState) -> Result<bool, crate::error::AuditError> {
+    if let Some(pinata) = &state.pinata_config {
+        if !pinata.api_key.is_empty() || !pinata.api_secret.is_empty() {
+            return crate::audit::pinata::check(pinata).await;
+        }
+    }
+    crate::audit::ipfs::check_daemon(&state.ipfs_config).await
 }
 
 /// Background task that monitors the audit log for new events, feeds them
@@ -424,7 +445,7 @@ async fn auto_attest_loop(state: Arc<DaemonState>) {
             None => continue,
         };
 
-        let rpc = StellarRpcClient::with_url(&state.rpc_url);
+        let rpc = StellarRpcClient::with_url_and_contract(&state.rpc_url, &state.chain.contract_id);
         let current_root = match rpc.get_current_root().await {
             Ok(Some(root)) => root,
             Ok(None) => continue,
@@ -467,31 +488,29 @@ async fn attest_epoch_internal(
     sequence: u64,
 ) -> Result<bool, String> {
     use crate::audit::oplog::{compute_oplog_range_hash, OplogTimestamp};
-    use crate::audit::stellar;
     use crate::audit::stellar_native;
     use crate::auditd::attester::sign_oplog_attestation;
 
-    // 1. Get the on-chain oplog commitment (native simulation or CLI fallback).
-    let on_chain = if let Some(kp) = &state.attester_stellar_keypair {
-        let chain = &state.chain;
-        stellar_native::get_oplog_commitment_native(
-            sequence,
-            kp,
-            &chain.rpc_url,
-            &chain.contract_id,
-        )
-        .await
-        .map_err(|e| format!("get_oplog_commitment_native({sequence}): {e}"))?
-    } else {
-        stellar::get_oplog_commitment(sequence)
-            .map_err(|e| format!("get_oplog_commitment({sequence}): {e}"))?
-    };
+    // 1. Get the on-chain oplog commitment via native contract simulation.
+    let stellar_kp = state.attester_stellar_keypair.as_ref().ok_or_else(|| {
+        "no attester Stellar keypair configured — use --attester-secret-key or ATTESTER_SECRET_KEY env var".to_string()
+    })?;
+    let chain = &state.chain;
+    let on_chain = stellar_native::get_oplog_commitment_native(
+        sequence,
+        stellar_kp,
+        &chain.rpc_url,
+        &chain.contract_id,
+    )
+    .await
+    .map_err(|e| format!("get_oplog_commitment_native({sequence}): {e}"))?;
 
     let on_chain_oplog = match on_chain {
         Some(oc) => oc,
         None => return Ok(false),
     };
 
+    // On-chain timestamps are packed as (time << 32) | increment via pack_u64().
     let oplog_start_ts = OplogTimestamp::unpack_u64(on_chain_oplog.oplog_start_ts);
     let oplog_end_ts = OplogTimestamp::unpack_u64(on_chain_oplog.oplog_end_ts);
 
@@ -512,34 +531,16 @@ async fn attest_epoch_internal(
             on_chain_oplog.oplog_end_ts,
         )?;
 
-        let submit_result = if let Some(stellar_kp) = &state.attester_stellar_keypair {
-            let chain = &state.chain;
-            stellar_native::attest_oplog_native(
-                stellar_kp,
-                sequence,
-                &signature_hex,
-                &chain.rpc_url,
-                &chain.horizon_url,
-                &chain.contract_id,
-                &chain.passphrase,
-            )
-            .await
-        } else {
-            let identity = state.attester_identity.as_ref().ok_or_else(|| {
-                "attester identity not configured — use --attester-secret-key".to_string()
-            })?;
-            let address = state.attester_address.as_ref().ok_or_else(|| {
-                "attester address not configured — use --attester-secret-key".to_string()
-            })?;
-            let identity = identity.clone();
-            let address = address.clone();
-            let sig = signature_hex.clone();
-            tokio::task::spawn_blocking(move || {
-                stellar::attest_oplog(&identity, &address, sequence, &sig)
-            })
-            .await
-            .map_err(|e| format!("attest_oplog task join: {e}"))?
-        };
+        let submit_result = stellar_native::attest_oplog_native(
+            stellar_kp,
+            sequence,
+            &signature_hex,
+            &chain.rpc_url,
+            &chain.horizon_url,
+            &chain.contract_id,
+            &chain.passphrase,
+        )
+        .await;
 
         match submit_result {
             Ok(()) => Ok(true),
@@ -611,7 +612,7 @@ async fn publish_and_commit(
 
     let batch_content = extract_epoch_batch(&events_jsonl, epoch.start_index, end_index);
     if !batch_content.is_empty() {
-        match crate::audit::ipfs::publish_epoch_batch(&state.ipfs_config, epoch_number, &batch_content).await {
+        match publish_epoch_batch_to_ipfs(state, epoch_number, &batch_content).await {
             Ok(result) => {
                 log::info!("auto-commit: epoch {epoch_number} published to IPFS, CID: {}", result.cid);
                 let _ = state.audit_log.save_ipfs_cid(epoch_number, &result.cid);
@@ -635,93 +636,51 @@ async fn publish_and_commit(
         None => format!("epoch={epoch_number}"),
     };
 
-    let commit_result = if let Some(kp) = &state.signing_keypair {
-        // ─── Native signing (no stellar CLI) ───────────────────────
-        let chain = &state.chain;
-        if let Some(oplog_root_hex) = &epoch.oplog_merkle_root_hex {
-            let oplog_start = epoch
-                .oplog_start_ts
-                .as_ref()
-                .map_or(0, |ts| ts.pack_u64());
-            let oplog_end = epoch
-                .oplog_end_ts
-                .as_ref()
-                .map_or(0, |ts| ts.pack_u64());
-            let oplog_count = epoch.oplog_entry_count.unwrap_or(0);
+    let kp = state.signing_keypair.as_ref().ok_or_else(|| {
+        "no signing keypair configured — use --secret-key or STELLAR_SECRET_KEY env var".to_string()
+    })?;
+    let chain = &state.chain;
+    let commit_result = if let Some(oplog_root_hex) = &epoch.oplog_merkle_root_hex {
+        let oplog_start = epoch
+            .oplog_start_ts
+            .map_or(0, |ts| ts.pack_u64());
+        let oplog_end = epoch
+            .oplog_end_ts
+            .map_or(0, |ts| ts.pack_u64());
+        let oplog_count = epoch.oplog_entry_count.unwrap_or(0);
 
-            log::info!(
-                "auto-commit: epoch {epoch_number} committing with oplog hash: root={}, entries={}",
-                oplog_root_hex, oplog_count
-            );
+        log::info!(
+            "auto-commit: epoch {epoch_number} committing with oplog hash: root={}, entries={}",
+            oplog_root_hex, oplog_count
+        );
 
-            stellar_native::commit_root_with_oplog_native(
-                &root_hex,
-                oplog_root_hex,
-                oplog_start,
-                oplog_end,
-                oplog_count,
-                &metadata,
-                kp,
-                &chain.rpc_url,
-                &chain.horizon_url,
-                &chain.contract_id,
-                &chain.passphrase,
-            )
-            .await
-            .map_err(|e| format!("commit_root_with_oplog_native: {e}"))?
-        } else {
-            stellar_native::commit_root_native(
-                &root_hex,
-                &metadata,
-                kp,
-                &chain.rpc_url,
-                &chain.horizon_url,
-                &chain.contract_id,
-                &chain.passphrase,
-            )
-            .await
-            .map_err(|e| format!("commit_root_native: {e}"))?
-        }
+        stellar_native::commit_root_with_oplog_native(
+            &root_hex,
+            oplog_root_hex,
+            oplog_start,
+            oplog_end,
+            oplog_count,
+            &metadata,
+            kp,
+            &chain.rpc_url,
+            &chain.horizon_url,
+            &chain.contract_id,
+            &chain.passphrase,
+        )
+        .await
+        .map_err(|e| format!("commit_root_with_oplog_native: {e}"))?
     } else {
-        // ─── Legacy CLI fallback (deprecated) ──────────────────────
-        log::warn!("auto-commit: no signing keypair — falling back to stellar CLI (deprecated; use --secret-key)");
-        if let Some(oplog_root_hex) = &epoch.oplog_merkle_root_hex {
-            let oplog_start = epoch
-                .oplog_start_ts
-                .as_ref()
-                .map_or(0, |ts| ts.pack_u64());
-            let oplog_end = epoch
-                .oplog_end_ts
-                .as_ref()
-                .map_or(0, |ts| ts.pack_u64());
-            let oplog_count = epoch.oplog_entry_count.unwrap_or(0);
-
-            let root_clone = root_hex.clone();
-            let oplog_root_clone = oplog_root_hex.clone();
-            let metadata_clone = metadata.clone();
-            tokio::task::spawn_blocking(move || {
-                crate::audit::stellar::commit_root_with_oplog(
-                    &root_clone,
-                    &oplog_root_clone,
-                    oplog_start,
-                    oplog_end,
-                    oplog_count,
-                    &metadata_clone,
-                )
-            })
-            .await
-            .map_err(|e| format!("commit_root_with_oplog task join: {e}"))?
-            .map_err(|e| format!("commit_root_with_oplog: {e}"))?
-        } else {
-            let root_clone = root_hex.clone();
-            let metadata_clone = metadata.clone();
-            tokio::task::spawn_blocking(move || {
-                crate::audit::stellar::commit_root(&root_clone, &metadata_clone)
-            })
-            .await
-            .map_err(|e| format!("commit_root task join: {e}"))?
-            .map_err(|e| format!("commit_root: {e}"))?
-        }
+        stellar_native::commit_root_native(
+            &root_hex,
+            &metadata,
+            kp,
+            &chain.rpc_url,
+            &chain.horizon_url,
+            &chain.contract_id,
+            &chain.passphrase,
+        )
+        .await
+        .map_err(|e| format!("commit_root_native: {e}"))?
     };
 
     log::info!(

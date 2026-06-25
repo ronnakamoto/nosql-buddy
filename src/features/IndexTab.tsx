@@ -470,7 +470,7 @@ export function IndexTab({ connectionId, database, collection }: IndexTabProps) 
                         <div className="usage-bar">
                           <div
                             className="usage-bar__fill"
-                            style={{ width: `${opsPct}%` }}
+                            style={{ transform: `scaleX(${Math.max(opsPct, 0.001) / 100})` }}
                             title={`${st.ops} ops`}
                           />
                           <span className="usage-bar__label">{st.ops.toLocaleString()}</span>

@@ -29,7 +29,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::audit::stellar::{self, OnChainRoot};
+use crate::audit::stellar::OnChainRoot;
+use crate::audit::stellar_native;
 use crate::error::AuditResult;
 
 /// The result of a reader-mode verification.
@@ -62,18 +63,21 @@ pub struct VerificationReport {
 /// Verify the local audit log against the latest on-chain root.
 ///
 /// This is the main entry point for reader mode. It:
-/// 1. Queries the latest committed root from Stellar.
+/// 1. Queries the latest committed root from Stellar via native contract simulation.
 /// 2. Searches the local JSONL for the matching `root_after`.
 /// 3. Verifies the root chain up to that point.
 ///
 /// `events_jsonl` is the raw contents of the `events.jsonl` file.
 /// `local_root_hex` is the current Merkle root from the audit log.
-pub fn verify_against_onchain(
+/// `rpc_url` and `contract_id` specify the Stellar network and contract.
+pub async fn verify_against_onchain(
     events_jsonl: &str,
     local_root_hex: &str,
+    rpc_url: &str,
+    contract_id: &str,
 ) -> AuditResult<VerificationReport> {
-    // Query the on-chain root.
-    let onchain_root = stellar::get_current_root()?;
+    let kp = stellar_native::generate_keypair();
+    let onchain_root = stellar_native::get_current_root_native(&kp, rpc_url, contract_id).await?;
 
     verify_with_onchain_root(onchain_root, events_jsonl, local_root_hex)
 }

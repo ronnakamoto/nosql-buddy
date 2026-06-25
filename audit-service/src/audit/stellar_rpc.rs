@@ -5,6 +5,13 @@
 //! JSON-RPC API. Write operations (committing roots) still use the CLI
 //! for now, as they require transaction building and signing.
 //!
+//! NOTE: `get_current_root` now delegates to `stellar_native::get_current_root_native`
+//! (contract simulation) instead of raw `getContractData` with hand-rolled XDR keys.
+//! The XDR encoding/decoding code below is retained for reference and tests but
+//! is no longer on the read path.
+
+#![allow(dead_code)]
+//!
 //! ## Architecture
 //!
 //! The client calls the Soroban RPC's `getContractData` method to read
@@ -44,9 +51,14 @@ const SCV_VEC: u32 = 16;
 const SCV_MAP: u32 = 17;
 
 /// A native Stellar RPC client that calls the Soroban JSON-RPC API.
+///
+/// `get_current_root` delegates to `stellar_native::get_current_root_native`,
+/// which uses a read-only contract simulation. The `http` field is retained
+/// for potential future direct RPC calls.
 pub struct StellarRpcClient {
     rpc_url: String,
     contract_id: String,
+    #[allow(dead_code)]
     http: reqwest::Client,
 }
 
@@ -57,48 +69,38 @@ impl StellarRpcClient {
     }
 
     /// Create a new RPC client with a custom RPC URL.
+    ///
+    /// Uses the hardcoded testnet contract ID; prefer `with_url_and_contract`
+    /// when a runtime-configured contract ID is available.
     pub fn with_url(rpc_url: &str) -> Self {
+        Self::with_url_and_contract(rpc_url, CONTRACT_ID)
+    }
+
+    /// Create a new RPC client with a custom RPC URL and contract ID.
+    pub fn with_url_and_contract(rpc_url: &str, contract_id: &str) -> Self {
         Self {
             rpc_url: rpc_url.to_string(),
-            contract_id: CONTRACT_ID.to_string(),
+            contract_id: contract_id.to_string(),
             http: reqwest::Client::new(),
         }
     }
 
     /// Get the latest committed root from the Soroban contract.
     ///
-    /// This reads the `CurrentRoot` instance storage key to get the
-    /// sequence number, then reads the `RootEntry(sequence)` persistent
-    /// storage key to get the full root entry.
+    /// Uses a read-only contract simulation to call `get_current_root()`,
+    /// which correctly handles the `#[contracttype]` storage key encoding
+    /// through the Soroban runtime. This replaces the previous raw
+    /// `getContractData` approach, which used hand-rolled XDR key encoding
+    /// that did not match the contract's actual storage layout.
     pub async fn get_current_root(&self) -> AuditResult<Option<OnChainRoot>> {
-        // Step 1: Read the CurrentRoot instance key to get the sequence.
-        let key_xdr = encode_instance_key_current_root();
-        let response = self
-            .get_contract_data(&key_xdr, "instance")
-            .await?;
+        use crate::audit::stellar_native::{generate_keypair, get_current_root_native};
 
-        let sequence = match response {
-            Some(data) => decode_scval_u64(&data)?,
-            None => return Ok(None),
-        };
-
-        if sequence == 0 {
-            return Ok(None);
-        }
-
-        // Step 2: Read the RootEntry(sequence) persistent key.
-        let key_xdr = encode_persistent_key_root_entry(sequence);
-        let response = self
-            .get_contract_data(&key_xdr, "persistent")
-            .await?;
-
-        match response {
-            Some(data) => decode_root_entry(&data, sequence),
-            None => Ok(None),
-        }
+        let kp = generate_keypair();
+        get_current_root_native(&kp, &self.rpc_url, &self.contract_id).await
     }
 
     /// Call the Soroban RPC's `getContractData` method.
+    #[allow(dead_code)]
     async fn get_contract_data(
         &self,
         key_xdr: &str,

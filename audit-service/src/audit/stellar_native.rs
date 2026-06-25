@@ -33,7 +33,7 @@ use stellar_xdr::curr::{
     TransactionV1Envelope, Uint256, VecM, WriteXdr,
 };
 
-use crate::audit::stellar::{CommitResult, OnChainOplogCommitment};
+use crate::audit::stellar::{CommitResult, OnChainOplogCommitment, OnChainRoot};
 use crate::error::{AuditError, AuditResult};
 
 /// The Stellar testnet network passphrase.
@@ -352,7 +352,6 @@ struct SimulationResult {
     #[serde(skip)]
     transaction_data_owned: Option<String>,
     #[serde(rename = "minResourceFee", default, deserialize_with = "deserialize_optional_sequence_string")]
-    #[allow(dead_code)]
     min_resource_fee: Option<i64>,
     #[serde(default)]
     results: Vec<SimulationResultEntry>,
@@ -371,6 +370,18 @@ impl SimulationResult {
             .as_deref()
             .or(self.transaction_data.as_deref())
             .expect("transaction_data validated by simulate_transaction")
+    }
+
+    /// Compute the max fee (stroops) the source account must authorize.
+    /// This is the simulation's `minResourceFee` plus the network base fee.
+    fn max_fee_stroops(&self) -> u32 {
+        const BASE_FEE: i64 = 100;
+        let required = self.min_resource_fee.unwrap_or(0) + BASE_FEE;
+        // Cap at u32::MAX and leave a small buffer to avoid spurious failures.
+        required
+            .saturating_mul(110)
+            .saturating_div(100)
+            .clamp(BASE_FEE, u32::MAX as i64) as u32
     }
 }
 
@@ -590,6 +601,8 @@ pub async fn commit_root_native(
 
     let mut signed_tx = tx.clone();
     signed_tx.ext = TransactionExt::V1(soroban_data);
+    signed_tx.fee = sim_result.max_fee_stroops();
+    signed_tx.fee = sim_result.max_fee_stroops();
 
     // 6. Attach auth entries if the simulation returned any.
     if !sim_result.results.is_empty() && !sim_result.results[0].auth.is_empty() {
@@ -750,6 +763,7 @@ pub async fn commit_root_with_oplog_native(
 
     let mut signed_tx = tx.clone();
     signed_tx.ext = TransactionExt::V1(soroban_data);
+    signed_tx.fee = sim_result.max_fee_stroops();
 
     if !sim_result.results.is_empty() && !sim_result.results[0].auth.is_empty() {
         let auth_entries: Result<Vec<SorobanAuthorizationEntry>, AuditError> = sim_result.results[0]
@@ -881,6 +895,7 @@ pub async fn attest_oplog_native(
 
     let mut signed_tx = tx.clone();
     signed_tx.ext = TransactionExt::V1(soroban_data);
+    signed_tx.fee = sim_result.max_fee_stroops();
 
     if !sim_result.results.is_empty() && !sim_result.results[0].auth.is_empty() {
         let auth_entries: Result<Vec<SorobanAuthorizationEntry>, AuditError> = sim_result.results[0]
@@ -973,9 +988,22 @@ pub async fn get_oplog_commitment_native(
     let return_val = ScVal::from_xdr(&return_val_xdr, Limits::none())
         .map_err(|e| AuditError::Validation(format!("decode return value: {e}")))?;
 
-    // The contract returns Option<OplogCommitment>. When None, the ScVal is Void.
-    match return_val {
-        ScVal::Void => Ok(None),
+    // The contract returns Option<OplogCommitment>.
+    //
+    // Soroban encodes Option<T> as:
+    //   None        → ScVal::Void
+    //   Some(T)     → ScVal::Vec(Some(VecM([T])))
+    //
+    // So Some(OplogCommitment{...}) arrives as Vec([Map(...)]).
+    let inner_val = match &return_val {
+        ScVal::Void => return Ok(None),
+        ScVal::Vec(None) => return Ok(None),
+        ScVal::Vec(Some(vec)) if !vec.0.is_empty() => &vec.0[0],
+        ScVal::Map(_) => &return_val, // fallback: already a bare Map
+        _ => return Ok(None),
+    };
+
+    match inner_val {
         ScVal::Map(None) => Ok(None),
         ScVal::Map(Some(map)) => {
             let mut oplog_root_hex = String::new();
@@ -1033,6 +1061,257 @@ pub async fn get_oplog_commitment_native(
     }
 }
 
+/// Read the current root from the contract via a read-only simulation.
+///
+/// Calls the contract's `get_current_root` function, which returns
+/// `Option<RootEntry>`. This replaces the fragile `getContractData` raw
+/// storage read in `StellarRpcClient` — simulation goes through the Soroban
+/// runtime, which correctly handles `#[contracttype]` enum key encoding.
+///
+/// The `source_keypair` only needs a valid ed25519 public key; the account
+/// does not need to exist or be funded for a read-only simulation.
+pub async fn get_current_root_native(
+    source_keypair: &StellarKeypair,
+    rpc_url: &str,
+    contract_id: &str,
+) -> AuditResult<Option<OnChainRoot>> {
+    let tx = build_invoke_transaction(
+        &source_keypair.public_bytes(),
+        0,
+        contract_id,
+        "get_current_root",
+        vec![],
+        100,
+    )?;
+
+    let sim_result = simulate_transaction(rpc_url, &tx).await?;
+
+    log::debug!(
+        "get_current_root_native: sim results count={}, rpc_url={}, contract={}",
+        sim_result.results.len(),
+        rpc_url,
+        contract_id
+    );
+
+    if sim_result.results.is_empty() {
+        return Ok(None);
+    }
+
+    let return_val_xdr = base64::engine::general_purpose::STANDARD
+        .decode(&sim_result.results[0].xdr)
+        .map_err(|e| AuditError::Validation(format!("base64 decode return value: {e}")))?;
+    let return_val = ScVal::from_xdr(&return_val_xdr, Limits::none())
+        .map_err(|e| AuditError::Validation(format!("decode return value: {e}")))?;
+
+    // The contract returns Option<RootEntry>.
+    //
+    // Soroban encodes Option<T> as:
+    //   None        → ScVal::Void
+    //   Some(T)     → ScVal::Vec(Some(VecM([T])))
+    //
+    // So Some(RootEntry{...}) arrives as Vec([Map(...)]).
+    // We unwrap the Vec, then parse the inner Map.
+    let inner_val = match &return_val {
+        ScVal::Void => return Ok(None),
+        ScVal::Vec(None) => return Ok(None),
+        ScVal::Vec(Some(vec)) if !vec.0.is_empty() => &vec.0[0],
+        ScVal::Map(_) => &return_val, // fallback: already a bare Map
+        _ => return Ok(None),
+    };
+
+    // RootEntry is a #[contracttype] struct → ScVal::Map.
+    match inner_val {
+        ScVal::Map(None) => Ok(None),
+        ScVal::Map(Some(map)) => {
+            let mut sequence: u64 = 0;
+            let mut root_hex = String::new();
+            let mut timestamp: u64 = 0;
+            let mut metadata = String::new();
+
+            for entry in map.0.iter() {
+                if let ScVal::Symbol(s) = &entry.key {
+                    let name = String::from_utf8_lossy(s.0.as_slice());
+                    match name.as_ref() {
+                        "sequence" => {
+                            if let ScVal::U64(v) = &entry.val {
+                                sequence = *v;
+                            }
+                        }
+                        "root" => {
+                            if let ScVal::Bytes(b) = &entry.val {
+                                root_hex = hex::encode(b.0.as_slice());
+                            }
+                        }
+                        "timestamp" => {
+                            if let ScVal::U64(v) = &entry.val {
+                                timestamp = *v;
+                            }
+                        }
+                        "metadata" => {
+                            if let ScVal::String(s) = &entry.val {
+                                metadata = String::from_utf8_lossy(s.0.as_slice()).to_string();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            if root_hex.is_empty() {
+                return Ok(None);
+            }
+
+            Ok(Some(OnChainRoot {
+                sequence,
+                root_hex,
+                timestamp,
+                metadata,
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Query the on-chain root history (most-recent-first) and return up to `limit`
+/// entries. Returns an empty Vec if no roots are committed yet.
+///
+/// Calls `get_root_history(limit)` on the contract via simulation.
+pub async fn get_root_history_native(
+    source_keypair: &StellarKeypair,
+    rpc_url: &str,
+    contract_id: &str,
+    limit: u32,
+) -> AuditResult<Vec<OnChainRoot>> {
+    let limit_val = ScVal::U32(limit);
+    let tx = build_invoke_transaction(
+        &source_keypair.public_bytes(),
+        0,
+        contract_id,
+        "get_root_history",
+        vec![limit_val],
+        100,
+    )?;
+
+    let sim_result = simulate_transaction(rpc_url, &tx).await?;
+
+    if sim_result.results.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let return_val_xdr = base64::engine::general_purpose::STANDARD
+        .decode(&sim_result.results[0].xdr)
+        .map_err(|e| AuditError::Validation(format!("base64 decode root_history return: {e}")))?;
+    let return_val = ScVal::from_xdr(&return_val_xdr, Limits::none())
+        .map_err(|e| AuditError::Validation(format!("decode root_history ScVal: {e}")))?;
+
+    // The simulation unwraps the Ok() and returns the inner Vec directly.
+    // Top-level ScVal is Vec([Map, Map, ...]), where each Map is a RootEntry.
+    // An error result (e.g. InvalidPageSize) arrives as ScVal::Error → empty list.
+    let entries = match &return_val {
+        ScVal::Vec(Some(vec)) => &vec.0,
+        _ => return Ok(vec![]),
+    };
+
+    let mut result = Vec::with_capacity(entries.len());
+    for entry in entries.iter() {
+        let map = match entry {
+            ScVal::Map(Some(m)) => m,
+            _ => continue,
+        };
+        let mut sequence: u64 = 0;
+        let mut root_hex = String::new();
+        let mut timestamp: u64 = 0;
+        let mut metadata = String::new();
+        for kv in map.0.iter() {
+            if let ScVal::Symbol(s) = &kv.key {
+                match String::from_utf8_lossy(s.0.as_slice()).as_ref() {
+                    "sequence" => {
+                        if let ScVal::U64(v) = &kv.val { sequence = *v; }
+                    }
+                    "root" => {
+                        if let ScVal::Bytes(b) = &kv.val {
+                            root_hex = hex::encode(b.0.as_slice());
+                        }
+                    }
+                    "timestamp" => {
+                        if let ScVal::U64(v) = &kv.val { timestamp = *v; }
+                    }
+                    "metadata" => {
+                        if let ScVal::String(s) = &kv.val {
+                            metadata = String::from_utf8_lossy(s.0.as_slice()).to_string();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !root_hex.is_empty() {
+            result.push(OnChainRoot { sequence, root_hex, timestamp, metadata });
+        }
+    }
+    Ok(result)
+}
+
+/// Query `get_oplog_attestations(sequence)` and return the Stellar addresses
+/// of all attesters that have submitted a valid on-chain attestation.
+pub async fn get_oplog_attestations_native(
+    source_keypair: &StellarKeypair,
+    rpc_url: &str,
+    contract_id: &str,
+    sequence: u64,
+) -> AuditResult<Vec<String>> {
+    let tx = build_invoke_transaction(
+        &source_keypair.public_bytes(),
+        0,
+        contract_id,
+        "get_oplog_attestations",
+        vec![ScVal::U64(sequence)],
+        100,
+    )?;
+
+    let sim_result = simulate_transaction(rpc_url, &tx).await?;
+    if sim_result.results.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let return_val_xdr = base64::engine::general_purpose::STANDARD
+        .decode(&sim_result.results[0].xdr)
+        .map_err(|e| AuditError::Validation(format!("base64 decode attestations: {e}")))?;
+    let return_val = ScVal::from_xdr(&return_val_xdr, Limits::none())
+        .map_err(|e| AuditError::Validation(format!("decode attestations ScVal: {e}")))?;
+
+    // get_oplog_attestations returns Vec<OplogAttestation> directly (not wrapped in Result).
+    // Each OplogAttestation is a Map with keys: attester (Address), signature (Bytes), timestamp (U64).
+    let entries = match &return_val {
+        ScVal::Vec(Some(v)) => &v.0,
+        _ => return Ok(vec![]),
+    };
+
+    let mut attesters = Vec::with_capacity(entries.len());
+    for entry in entries.iter() {
+        let map = match entry {
+            ScVal::Map(Some(m)) => m,
+            _ => continue,
+        };
+        for kv in map.0.iter() {
+            if let ScVal::Symbol(s) = &kv.key {
+                if String::from_utf8_lossy(s.0.as_slice()) == "attester" {
+                    // Address is encoded as ScVal::Address containing an AccountId.
+                    // The easiest way is to re-encode it as Strkey.
+                    if let ScVal::Address(ScAddress::Account(account_id)) = &kv.val {
+                        // AccountId wraps PublicKey::PublicKeyTypeEd25519(Uint256).
+                        if let stellar_xdr::curr::PublicKey::PublicKeyTypeEd25519(key) = &account_id.0 {
+                            // Stellar G-address strkey version byte is 0x30 (48).
+                            attesters.push(encode_strkey(0x30, &key.0));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(attesters)
+}
+
 // ─── High-level: initialize + authorize_attester (setup wizard) ───────
 
 /// Attach Soroban data and auth entries from a simulation result to a transaction.
@@ -1053,6 +1332,7 @@ fn attach_soroban_data_and_auth(
 
     let mut signed_tx = tx.clone();
     signed_tx.ext = TransactionExt::V1(soroban_data);
+    signed_tx.fee = sim_result.max_fee_stroops();
 
     // Update the fee to include the simulation's minResourceFee.
     // Soroban transactions require: fee >= base_fee + min_resource_fee.
@@ -1545,4 +1825,117 @@ mod tests {
         let pub_bytes = kp.public_bytes();
         assert_eq!(sig.hint.0, pub_bytes[28..32]);
     }
+
+    #[test]
+    fn test_soroban_option_root_entry_decoding() {
+        use stellar_xdr::curr::{ScMap, ScMapEntry, ScVec};
+
+        // Soroban encodes Option<RootEntry> as:
+        //   Some(RootEntry{...}) → ScVal::Vec(Some(ScVec([ScVal::Map(ScMap(...))])))
+        //
+        // Build the inner RootEntry map.
+        let root_bytes = vec![0xABu8; 32];
+
+        let map_entries = vec![
+            ScMapEntry {
+                key: ScVal::Symbol(ScSymbol("sequence".as_bytes().to_vec().try_into().unwrap())),
+                val: ScVal::U64(1),
+            },
+            ScMapEntry {
+                key: ScVal::Symbol(ScSymbol("root".as_bytes().to_vec().try_into().unwrap())),
+                val: ScVal::Bytes(ScBytes(root_bytes.try_into().unwrap())),
+            },
+            ScMapEntry {
+                key: ScVal::Symbol(ScSymbol("timestamp".as_bytes().to_vec().try_into().unwrap())),
+                val: ScVal::U64(1700000000),
+            },
+            ScMapEntry {
+                key: ScVal::Symbol(ScSymbol("metadata".as_bytes().to_vec().try_into().unwrap())),
+                val: ScVal::String(ScString("test".as_bytes().to_vec().try_into().unwrap())),
+            },
+        ];
+
+        let root_map_scval = ScVal::Map(Some(ScMap(map_entries.try_into().unwrap())));
+
+        // Wrap in Vec([map]) — this is how Soroban encodes Some(T).
+        let option_some = ScVal::Vec(Some(ScVec(
+            vec![root_map_scval].try_into().unwrap(),
+        )));
+
+        // Verify our decoding logic handles the Vec wrapper.
+        let inner_val = match &option_some {
+            ScVal::Vec(Some(vec)) if !vec.0.is_empty() => &vec.0[0],
+            _ => panic!("expected Vec wrapper"),
+        };
+
+        match inner_val {
+            ScVal::Map(Some(map)) => {
+                let mut found_root = false;
+                for entry in map.0.iter() {
+                    if let ScVal::Symbol(s) = &entry.key {
+                        if String::from_utf8_lossy(s.0.as_slice()) == "root" {
+                            if let ScVal::Bytes(b) = &entry.val {
+                                assert_eq!(
+                                    hex::encode(b.0.as_slice()),
+                                    "abababababababababababababababababababababababababababababababab"
+                                );
+                                found_root = true;
+                            }
+                        }
+                    }
+                }
+                assert!(found_root, "root field not found in decoded map");
+            }
+            _ => panic!("expected Map inside Vec"),
+        }
+    }
+
+    /// Live integration test: calls the real Stellar testnet to verify
+    /// get_current_root_native returns a committed root.
+    /// Run with: cargo test test_get_current_root_native_live -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn test_get_current_root_native_live() {
+        let kp = generate_keypair();
+        let result = get_current_root_native(
+            &kp,
+            "https://soroban-testnet.stellar.org:443",
+            "CB6M5T7XYUKCM6YNSSMOGAFIKO53CQSOTDCTJCHOLV6DTQLSYXVQVTXB",
+        )
+        .await;
+        println!("Result: {:?}", result);
+        match result {
+            Ok(Some(root)) => {
+                println!("root_hex={} seq={}", root.root_hex, root.sequence);
+                assert!(!root.root_hex.is_empty());
+            }
+            Ok(None) => panic!("got Ok(None) — simulation returned no root"),
+            Err(e) => panic!("got Err: {e}"),
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_get_root_history_native_live() {
+        let kp = generate_keypair();
+        let result = get_root_history_native(
+            &kp,
+            "https://soroban-testnet.stellar.org:443",
+            "CB6M5T7XYUKCM6YNSSMOGAFIKO53CQSOTDCTJCHOLV6DTQLSYXVQVTXB",
+            5,
+        )
+        .await;
+        println!("Result: {:?}", result);
+        match result {
+            Ok(entries) => {
+                println!("Got {} entries", entries.len());
+                assert!(!entries.is_empty(), "expected entries but got empty vec");
+                for e in &entries {
+                    println!("  seq={} root={}...", e.sequence, &e.root_hex[..16]);
+                }
+            }
+            Err(e) => panic!("got Err: {e}"),
+        }
+    }
+
 }

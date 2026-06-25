@@ -690,6 +690,7 @@ const commands = {
     invoke<DevStackStatus>("audit_dev_stack_status"),
   auditDevStackUp: () => invoke<string>("audit_dev_stack_up"),
   auditDevStackDown: () => invoke<string>("audit_dev_stack_down"),
+  auditDevStackResetData: () => invoke<string>("audit_dev_stack_reset_data"),
   auditDevStackLogs: (tail?: number) =>
     invoke<string>("audit_dev_stack_logs", { tail }),
 

@@ -36,7 +36,7 @@ export function TopValuesChart({ values }: { values: SchemaValueCount[] }) {
             <span className="schema-top-values__track">
               <span
                 className="schema-top-values__bar"
-                style={{ width: `${pct}%` }}
+                style={{ transform: `scaleX(${Math.max(pct, 0.001) / 100})` }}
               />
             </span>
             <span className="schema-top-values__count">{v.count}</span>

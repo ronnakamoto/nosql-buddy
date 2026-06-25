@@ -250,6 +250,7 @@ pub fn run() {
             audit::dev_stack::audit_dev_stack_status,
             audit::dev_stack::audit_dev_stack_up,
             audit::dev_stack::audit_dev_stack_down,
+            audit::dev_stack::audit_dev_stack_reset_data,
             audit::dev_stack::audit_dev_stack_logs,
             // ─── Dev mode daemon HTTP proxy ────────────────────────────
             audit::audit_dev_proxy_get,

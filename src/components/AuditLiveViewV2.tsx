@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, type ReactNode } from "react";
+import { useMemo, useState, useEffect, useCallback, type ReactNode } from "react";
 import commands, {
   type AuditStatus,
   type AuditEvent,
@@ -7,6 +7,7 @@ import commands, {
   type IpfsPublishResult,
   type VerificationReport,
   type Epoch,
+  type OplogIntegrityReport,
   formatError,
 } from "../ipc/commands";
 import {
@@ -20,7 +21,10 @@ import {
   Alert,
   Spinner,
   EmptyState,
+  TxHashLink,
+  StatusCard,
 } from "./AuditUi";
+import { IconCircleDash } from "./Icons";
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -38,23 +42,29 @@ const POLL_INTERVAL_MS = 2000;
 export function AuditLiveViewV2({
   commitFn,
   badge,
+  network = "testnet",
   extraPanels,
-  onShowSettings,
+  connectionId,
 }: {
   commitFn: (metadata?: string) => Promise<CommitResult>;
   badge: ReactNode;
+  network?: "testnet" | "mainnet";
   extraPanels?: ReactNode;
+  connectionId?: string | null;
   onShowSettings: () => void;
 }) {
   const [status, setStatus] = useState<AuditStatus | null>(null);
   const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [epochs, setEpochs] = useState<Epoch[]>([]);
   const [currentEpoch, setCurrentEpoch] = useState<Epoch | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const [closeEpochLoading, setCloseEpochLoading] = useState(false);
   const [commitLoading, setCommitLoading] = useState(false);
   const [commitResult, setCommitResult] = useState<CommitResult | null>(null);
   const [pinataResult, setPinataResult] = useState<IpfsPublishResult | null>(null);
   const [commitStep, setCommitStep] = useState("");
+  const [pollingOnchain, setPollingOnchain] = useState(false);
 
   const [onchainRoot, setOnchainRoot] = useState<OnChainRoot | null>(null);
   const [verifyLoading, setVerifyLoading] = useState(false);
@@ -65,15 +75,20 @@ export function AuditLiveViewV2({
 
   const [showAdvanced, setShowAdvanced] = useState(false);
 
+  const [oplogReport, setOplogReport] = useState<OplogIntegrityReport | null>(null);
+  const [oplogLoading, setOplogLoading] = useState(false);
+
   const refresh = useCallback(async () => {
     try {
-      const [s, e, ep] = await Promise.all([
+      const [s, e, eps, ep] = await Promise.all([
         commands.auditGetStatus(),
         commands.auditListEvents(),
+        commands.auditListEpochs(),
         commands.auditCurrentEpoch(),
       ]);
       setStatus(s);
       setEvents(e);
+      setEpochs(eps);
       setCurrentEpoch(ep);
     } catch {
       // Silent poll failure.
@@ -90,8 +105,9 @@ export function AuditLiveViewV2({
     try {
       const root = await commands.auditGetOnchainRootRpc();
       setOnchainRoot(root);
+      return root;
     } catch {
-      // best-effort
+      return null;
     }
   }, []);
 
@@ -99,33 +115,56 @@ export function AuditLiveViewV2({
     refreshOnchainRoot();
   }, [refreshOnchainRoot]);
 
+  // Poll on-chain root after commit until it appears (Stellar ledger ~5-10s).
+  useEffect(() => {
+    if (!pollingOnchain) return;
+    let active = true;
+    const id = setInterval(async () => {
+      const root = await refreshOnchainRoot();
+      if (root && active) {
+        setPollingOnchain(false);
+      }
+    }, POLL_INTERVAL_MS);
+    return () => {
+      active = false;
+      clearInterval(id);
+    };
+  }, [pollingOnchain, refreshOnchainRoot]);
+
+  const handleCloseEpoch = async () => {
+    if (!currentEpoch || currentEpoch.eventCount === 0) return;
+    if (currentEpoch.endIndex !== null && currentEpoch.endIndex !== undefined) return;
+    setCloseEpochLoading(true);
+    setError(null);
+    try {
+      await commands.auditCloseEpoch();
+      await refresh();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setCloseEpochLoading(false);
+    }
+  };
+
   const handleCommit = async () => {
+    if (!lastClosedEpoch) return;
     setCommitLoading(true);
     setError(null);
     setCommitResult(null);
     setPinataResult(null);
-    setCommitStep("Freezing root...");
+    setCommitStep("Pinning batch to IPFS via Pinata...");
 
     try {
-      setCommitStep("Closing epoch...");
-      await commands.auditCloseEpoch();
-      const epochs = await commands.auditListEpochs();
-      const lastEpoch = epochs
-        .filter((e) => e.endIndex !== null)
-        .sort((a, b) => b.epochNumber - a.epochNumber)[0];
-
-      if (!lastEpoch) throw new Error("No closed epoch to commit");
-
-      setCommitStep("Pinning batch to IPFS via Pinata...");
-      const pinata = await commands.auditPublishEpochToPinata(lastEpoch.epochNumber);
+      const pinata = await commands.auditPublishEpochToPinata(lastClosedEpoch.epochNumber);
       setPinataResult(pinata);
 
       setCommitStep("Submitting transaction to Stellar...");
-      const result = await commitFn(`epoch=${lastEpoch.epochNumber} cid=${pinata.cid}`);
+      const result = await commitFn(`epoch=${lastClosedEpoch.epochNumber} cid=${pinata.cid}`);
       setCommitResult(result);
       setCommitStep("Confirmed!");
 
-      await commands.auditMarkEpochCommitted(lastEpoch.epochNumber, result.txHash);
+      await commands.auditMarkEpochCommitted(lastClosedEpoch.epochNumber, result.txHash);
+      setPollingOnchain(true);
       refreshOnchainRoot();
       refresh();
     } catch (err) {
@@ -146,6 +185,20 @@ export function AuditLiveViewV2({
       setError(formatError(err));
     } finally {
       setVerifyLoading(false);
+    }
+  };
+
+  const handleOplogVerify = async () => {
+    if (!connectionId) return;
+    setOplogLoading(true);
+    setError(null);
+    try {
+      const report = await commands.auditVerifyOplogIntegrity(connectionId);
+      setOplogReport(report);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setOplogLoading(false);
     }
   };
 
@@ -176,19 +229,59 @@ export function AuditLiveViewV2({
   const epochEventCount = currentEpoch?.eventCount ?? 0;
   const epochThreshold = 100;
   const epochPct = epochThreshold > 0 ? Math.min(100, (epochEventCount / epochThreshold) * 100) : 0;
+  const epochClosed = currentEpoch?.endIndex !== null && currentEpoch?.endIndex !== undefined;
+  const lastClosedEpoch = useMemo(() => {
+    return (epochs ?? [])
+      .filter((e) => e.endIndex !== null && e.endIndex !== undefined && !e.committed)
+      .sort((a, b) => b.epochNumber - a.epochNumber)[0] ?? null;
+  }, [epochs]);
+
+  const canCloseEpoch = currentEpoch && !epochClosed && epochEventCount > 0 && !closeEpochLoading;
+  const closeEpochDisabledReason = !currentEpoch
+    ? "No epoch data"
+    : epochClosed
+      ? "Epoch already closed"
+      : epochEventCount === 0
+        ? "Write to MongoDB to capture events"
+        : null;
+  const canCommit = lastClosedEpoch !== null && !commitLoading;
+  const commitDisabledReason = !lastClosedEpoch ? "Seal a batch first" : null;
+
+  const oplogStatus: "good" | "warning" | "neutral" = oplogReport
+    ? oplogReport.allMatch
+      ? "good"
+      : oplogReport.verdict === "incomplete" || oplogReport.verdict === "no_commitment" || oplogReport.verdict === "no_oplog_commitment"
+        ? "neutral"
+        : "warning"
+    : "neutral";
 
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: "var(--space-3)",
-        padding: "var(--space-4)",
-        maxWidth: "880px",
-        margin: "0 auto",
-        animation: "audit-fade-in 0.2s ease",
-      }}
-    >
+    <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "auto" }}>
+      {/* ─── Workflow step guide ──────────────────────────────────── */}
+      <div className="audit-step-guide">
+        <div className={`audit-step ${epochEventCount > 0 ? "audit-step--done" : "audit-step--active"}`}>
+          <span className="audit-step__num">{epochEventCount > 0 ? "✓" : "1"}</span>
+          <span className="audit-step__label">Write Data</span>
+        </div>
+        <div className={`audit-step ${epochEventCount > 0 && !epochClosed ? "audit-step--active" : epochClosed ? "audit-step--done" : ""}`}>
+          <span className="audit-step__num">{epochClosed ? "✓" : epochEventCount > 0 ? "2" : ""}</span>
+          <span className="audit-step__label">Seal Batch</span>
+        </div>
+        <div className={`audit-step ${epochClosed || commitResult ? "audit-step--active" : ""} ${commitResult ? "audit-step--done" : ""}`}>
+          <span className="audit-step__num">{commitResult ? "✓" : epochClosed || lastClosedEpoch ? "3" : ""}</span>
+          <span className="audit-step__label">Commit</span>
+        </div>
+      </div>
+
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: "var(--space-3)",
+          padding: "var(--space-3)",
+          flex: 1,
+        }}
+      >
       {/* ─── Status bar ─────────────────────────────────────────────── */}
       <Card padded={false}>
         <div
@@ -209,9 +302,6 @@ export function AuditLiveViewV2({
           <Button variant="ghost" onClick={() => setShowAdvanced((v) => !v)}>
             {showAdvanced ? "Hide details" : "Advanced"}
           </Button>
-          <Button variant="ghost" onClick={onShowSettings}>
-            Settings
-          </Button>
         </div>
       </Card>
 
@@ -221,38 +311,84 @@ export function AuditLiveViewV2({
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-3)" }}>
         <Card>
           <CardHeader
-            title={`Epoch ${currentEpoch?.epochNumber ?? 0}`}
-            subtitle={`${epochEventCount} / ${epochThreshold} events until auto-close`}
+            title={`Batch ${currentEpoch?.epochNumber ?? 0}`}
+            subtitle={epochClosed ? "Sealed and ready to commit" : `${epochEventCount} / ${epochThreshold} changes captured`}
           />
-          <ProgressBar current={epochEventCount} max={epochThreshold} tone={epochPct >= 100 ? "success" : "accent"} />
+          <ProgressBar current={epochEventCount} max={epochThreshold} tone={epochClosed ? "success" : "accent"} />
           <div style={{ display: "flex", justifyContent: "space-between", marginTop: "var(--space-2)" }}>
             <span style={{ fontSize: "var(--font-size-xs)", color: "var(--ink-faint)" }}>
-              {currentEpoch?.endIndex !== null && currentEpoch?.endIndex !== undefined
-                ? "Closed — ready to commit"
-                : "Open — capturing events"}
+              {epochClosed ? "Sealed" : "Recording changes"}
             </span>
             <span style={{ fontSize: "var(--font-size-xs)", color: "var(--ink-faint)" }}>
               {Math.round(epochPct)}%
             </span>
           </div>
+          {!epochClosed && (
+            <div style={{ marginTop: "var(--space-3)" }}>
+              <Button
+                variant="secondary"
+                loading={closeEpochLoading}
+                disabled={!canCloseEpoch}
+                onClick={handleCloseEpoch}
+                style={{ width: "100%" }}
+                title={closeEpochDisabledReason ?? "Seal the current batch so it can be committed"}
+              >
+                Seal Batch
+              </Button>
+              {closeEpochDisabledReason && (
+                <div
+                  style={{
+                    marginTop: "var(--space-2)",
+                    fontSize: "var(--font-size-xs)",
+                    color: "var(--ink-faint)",
+                    lineHeight: "var(--line-height-tight)",
+                  }}
+                >
+                  {closeEpochDisabledReason}
+                </div>
+              )}
+            </div>
+          )}
         </Card>
 
         <Card>
-          <CardHeader title="On-Chain Commitment" subtitle="Merkle root → Stellar + IPFS" />
+          <CardHeader
+            title="Commit to Stellar"
+            subtitle={lastClosedEpoch ? `Batch #${lastClosedEpoch.epochNumber} ready` : "Anchor the sealed batch on-chain"}
+          />
           {commitLoading && (
             <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", marginBottom: "var(--space-2)" }}>
               <Spinner size={13} />
               <span style={{ fontSize: "var(--font-size-xs)", color: "var(--ink-muted)" }}>{commitStep}</span>
             </div>
           )}
-          <Button variant="primary" loading={commitLoading} onClick={handleCommit} style={{ width: "100%" }}>
+          <Button
+            variant="primary"
+            loading={commitLoading}
+            disabled={!canCommit}
+            onClick={handleCommit}
+            style={{ width: "100%" }}
+            title={commitDisabledReason ?? "Commit the sealed batch to Stellar"}
+          >
             Commit Now
           </Button>
+          {commitDisabledReason && (
+            <div
+              style={{
+                marginTop: "var(--space-2)",
+                fontSize: "var(--font-size-xs)",
+                color: "var(--ink-faint)",
+                lineHeight: "var(--line-height-tight)",
+              }}
+            >
+              {commitDisabledReason}
+            </div>
+          )}
           {commitResult && (
             <div style={{ marginTop: "var(--space-3)", animation: "audit-fade-in 0.2s ease" }}>
               <Badge tone="success" dot>Committed</Badge>
               <div style={{ marginTop: "var(--space-2)" }}>
-                <KeyValue label="Tx hash" value={shortHash(commitResult.txHash)} />
+                <KeyValue label="Tx hash" value={<TxHashLink txHash={commitResult.txHash} network={network} />} />
                 {pinataResult && <KeyValue label="IPFS CID" value={pinataResult.cid} />}
               </div>
             </div>
@@ -263,11 +399,11 @@ export function AuditLiveViewV2({
       {/* ─── On-chain root + verify ─────────────────────────────────── */}
       <Card>
         <CardHeader
-          title="On-Chain Root"
-          subtitle="Latest committed root from the Soroban contract"
+          title="On-Chain Record"
+          subtitle="Latest batch fingerprint anchored on Stellar"
           actions={
             <div style={{ display: "flex", gap: "var(--space-2)" }}>
-              <Button variant="ghost" onClick={refreshOnchainRoot}>Refresh</Button>
+              <Button variant="ghost" onClick={refreshOnchainRoot} loading={pollingOnchain}>Refresh</Button>
               <Button variant="secondary" loading={verifyLoading} onClick={handleVerify}>
                 Verify Integrity
               </Button>
@@ -280,8 +416,15 @@ export function AuditLiveViewV2({
             <Stat label="Root" value={shortHash(onchainRoot.rootHex)} mono />
             <Stat label="Committed" value={formatTs(onchainRoot.timestamp)} />
           </div>
+        ) : pollingOnchain ? (
+          <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", padding: "var(--space-3) 0" }}>
+            <Spinner size={14} />
+            <span style={{ fontSize: "var(--font-size-sm)", color: "var(--ink-muted)" }}>
+              Waiting for Stellar confirmation…
+            </span>
+          </div>
         ) : (
-          <EmptyState title="No on-chain commitment yet" body="Commit a root to anchor your audit log on Stellar." />
+          <EmptyState title="Nothing committed yet" body="Commit a sealed batch to anchor your audit log on Stellar." />
         )}
         {verifyReport && (
           <div style={{ marginTop: "var(--space-3)" }}>
@@ -294,15 +437,50 @@ export function AuditLiveViewV2({
         )}
       </Card>
 
+      {/* ─── Oplog verification (when a MongoDB connection is active) ── */}
+      {connectionId && (
+        <StatusCard
+          title="Oplog verification"
+          status={oplogStatus}
+          value={
+            oplogReport
+              ? oplogReport.allMatch
+                ? "Match"
+                : oplogReport.verdict === "no_commitment"
+                  ? "No commitment"
+                  : oplogReport.verdict === "no_oplog_commitment"
+                    ? "No oplog hash"
+                    : oplogReport.verdict === "stale"
+                      ? "Stale"
+                      : oplogReport.verdict === "complete"
+                        ? "Verified"
+                        : "Mismatch"
+              : "—"
+          }
+          detail={
+            oplogReport
+              ? oplogReport.verdict === "complete"
+                ? `${oplogReport.oplogEntryCount ?? 0} oplog entries verified`
+                : oplogReport.explanation
+              : "Not verified yet — click Verify to check oplog completeness"
+          }
+          action={
+            <Button variant="ghost" loading={oplogLoading} onClick={handleOplogVerify}>
+              Verify
+            </Button>
+          }
+        />
+      )}
+
       {/* ─── Event feed ─────────────────────────────────────────────── */}
       <Card>
         <CardHeader
-          title="Event Feed"
+          title="Change Feed"
           subtitle={`${events.length} event${events.length === 1 ? "" : "s"} captured`}
         />
         {events.length === 0 ? (
           <EmptyState
-            icon="○"
+            icon={<IconCircleDash size={28} />}
             title="No events yet"
             body="Write data to MongoDB (insert, update, delete) to populate the audit log. Events appear here in real time."
           />
@@ -360,10 +538,11 @@ export function AuditLiveViewV2({
           <KeyValue label="Merkle root (full)" value={rootHex || "—"} />
           <KeyValue label="Tree height" value={status?.treeHeight ?? "—"} />
           {onchainRoot && <KeyValue label="On-chain root (full)" value={onchainRoot.rootHex} />}
-          {commitResult && <KeyValue label="Tx hash (full)" value={commitResult.txHash} />}
+          {commitResult && <KeyValue label="Tx hash (full)" value={<TxHashLink txHash={commitResult.txHash} network={network} showExternalIcon={true} />} />}
           {pinataResult && <KeyValue label="IPFS CID (full)" value={pinataResult.cid} />}
         </Card>
       )}
+      </div>
     </div>
   );
 }

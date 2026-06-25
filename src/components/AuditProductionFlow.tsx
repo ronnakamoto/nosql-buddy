@@ -11,7 +11,6 @@ import {
   Button,
   Alert,
   Spinner,
-  EmptyState,
 } from "./AuditUi";
 import { AuditLiveViewV2 } from "./AuditLiveViewV2";
 
@@ -24,7 +23,7 @@ import { AuditLiveViewV2 } from "./AuditLiveViewV2";
  *  4. Once configured → the live view commits via `auditCommitRootProduction`,
  *     which signs with the imported keypair on the chosen network.
  */
-export function AuditProductionFlow({ onShowSettings }: { onShowSettings: () => void }) {
+export function AuditProductionFlow({ onShowSettings, connectionId }: { onShowSettings: () => void; onSwitchMode: () => void; connectionId?: string | null }) {
   const [config, setConfig] = useState<AuditModeConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -111,40 +110,39 @@ export function AuditProductionFlow({ onShowSettings }: { onShowSettings: () => 
   // ─── Setup screen ──────────────────────────────────────────────────
   if (needsSetup) {
     return (
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: "var(--space-3)",
-          padding: "var(--space-4)",
-          maxWidth: "640px",
-          margin: "0 auto",
-          animation: "audit-fade-in 0.2s ease",
-        }}
-      >
-        <Card padded={false}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "var(--space-3)",
-              padding: "var(--space-3) var(--space-4)",
-              flexWrap: "wrap",
-            }}
-          >
-            <Badge tone="success" dot>Production Mode</Badge>
-            <div style={{ flex: 1 }} />
-            <Button variant="ghost" onClick={onShowSettings}>Settings</Button>
+      <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "auto" }}>
+        {/* ─── Step guide ─────────────────────────────────────────────── */}
+        <div className="audit-step-guide">
+          <div className="audit-step audit-step--active">
+            <span className="audit-step__num">1</span>
+            <span className="audit-step__label">Import Key</span>
           </div>
-        </Card>
+          <div className="audit-step">
+            <span className="audit-step__num"></span>
+            <span className="audit-step__label">Pick Network</span>
+          </div>
+          <div className="audit-step">
+            <span className="audit-step__num"></span>
+            <span className="audit-step__label">Start Auditing</span>
+          </div>
+        </div>
 
-        {error && <Alert tone="danger">{error}</Alert>}
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: "var(--space-3)",
+            padding: "var(--space-3)",
+            flex: 1,
+          }}
+        >
+          {error && <Alert tone="danger">{error}</Alert>}
 
-        <Card>
-          <CardHeader
-            title="Configure Production"
-            subtitle="Import your Stellar keypair and pick a network"
-          />
+          <Card>
+            <CardHeader
+              title="Set up Production Mode"
+              subtitle="Import your Stellar keypair and pick a network. This takes about a minute."
+            />
 
           {/* Network choice */}
           <FieldLabel>Network</FieldLabel>
@@ -195,7 +193,7 @@ export function AuditProductionFlow({ onShowSettings }: { onShowSettings: () => 
           />
           {hasKeypair ? (
             <Alert tone="success">
-              ✓ Keypair saved {accountId ? `(${shortAddr(accountId)})` : ""}. To replace it, clear it in Settings first.
+              Keypair saved {accountId ? `(${shortAddr(accountId)})` : ""}. To replace it, clear it in Settings first.
             </Alert>
           ) : (
             <div style={{ fontSize: "var(--font-size-xs)", color: "var(--ink-faint)", marginTop: "var(--space-1)" }}>
@@ -214,15 +212,8 @@ export function AuditProductionFlow({ onShowSettings }: { onShowSettings: () => 
             </Button>
           </div>
         </Card>
-
-        <Card>
-          <EmptyState
-            icon="🛰️"
-            title="Almost there"
-            body="Import your keypair and save your network choice to start the production audit pipeline. You'll be able to commit roots to your chosen Stellar network and verify integrity."
-          />
-        </Card>
       </div>
+    </div>
     );
   }
 
@@ -238,6 +229,8 @@ export function AuditProductionFlow({ onShowSettings }: { onShowSettings: () => 
     <AuditLiveViewV2
       commitFn={commitFn}
       badge={badge}
+      network={network}
+      connectionId={connectionId}
       onShowSettings={onShowSettings}
     />
   );

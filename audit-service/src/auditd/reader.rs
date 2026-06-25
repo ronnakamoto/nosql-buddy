@@ -11,7 +11,7 @@ use axum::Json;
 
 use crate::audit::reader::VerificationReport;
 use crate::audit::stellar::OnChainRoot;
-use crate::audit::stellar_rpc::StellarRpcClient;
+use crate::audit::stellar_native;
 use crate::error::AuditError;
 
 use super::{ApiError, ApiResult, DaemonState};
@@ -32,9 +32,15 @@ pub async fn verify(
         String::new()
     };
 
-    // Query on-chain root via native RPC.
-    let rpc_client = StellarRpcClient::with_url(&state.rpc_url);
-    let onchain_root = rpc_client.get_current_root().await.map_err(ApiError::from)?;
+    // Query on-chain root via contract simulation.
+    let kp = stellar_native::generate_keypair();
+    let onchain_root = stellar_native::get_current_root_native(
+        &kp,
+        &state.rpc_url,
+        &state.chain.contract_id,
+    )
+    .await
+    .map_err(ApiError::from)?;
 
     // Run the verification (sync, CPU-bound).
     let events_jsonl_clone = events_jsonl.clone();
@@ -52,12 +58,18 @@ pub async fn verify(
     Ok(Json(report))
 }
 
-/// Get the latest on-chain root via native RPC.
+/// Get the latest on-chain root via contract simulation.
 pub async fn onchain_root(
     state: State<Arc<DaemonState>>,
 ) -> ApiResult<Option<OnChainRoot>> {
-    let client = StellarRpcClient::with_url(&state.rpc_url);
-    let root = client.get_current_root().await.map_err(ApiError::from)?;
+    let kp = stellar_native::generate_keypair();
+    let root = stellar_native::get_current_root_native(
+        &kp,
+        &state.rpc_url,
+        &state.chain.contract_id,
+    )
+    .await
+    .map_err(ApiError::from)?;
     Ok(Json(root))
 }
 
@@ -137,8 +149,14 @@ pub async fn verify_oplog(
     state: State<Arc<DaemonState>>,
 ) -> ApiResult<OplogIntegrityReport> {
     // 1. Get the on-chain root to find the latest sequence.
-    let rpc_client = StellarRpcClient::with_url(&state.rpc_url);
-    let onchain_root = rpc_client.get_current_root().await.map_err(ApiError::from)?;
+    let kp = stellar_native::generate_keypair();
+    let onchain_root = stellar_native::get_current_root_native(
+        &kp,
+        &state.rpc_url,
+        &state.chain.contract_id,
+    )
+    .await
+    .map_err(ApiError::from)?;
 
     let sequence = match onchain_root {
         Some(ref root) => root.sequence,
@@ -160,14 +178,12 @@ pub async fn verify_oplog(
     };
 
     // 2. Get the on-chain oplog commitment via native simulation.
-    //    The reader has no signing keypair, so we generate a temporary one
-    //    for the read-only simulation (no funding needed).
-    let temp_kp = crate::audit::stellar_native::generate_keypair();
+    //    Reuse the same ephemeral keypair (read-only simulation needs no funding).
     let on_chain_oplog = crate::audit::stellar_native::get_oplog_commitment_native(
         sequence,
-        &temp_kp,
+        &kp,
         &state.rpc_url,
-        crate::audit::stellar::CONTRACT_ID,
+        &state.chain.contract_id,
     )
     .await
     .map_err(ApiError::from)?;

@@ -13,9 +13,8 @@ use serde::Deserialize;
 use crate::audit::attestation::{Attestation, AttestationStatus, Publisher};
 use crate::audit::epoch::Epoch;
 use crate::audit::ipfs::IpfsPublishResult;
-use crate::audit::stellar::{self, CommitResult, OnChainRoot};
+use crate::audit::stellar::{CommitResult, OnChainRoot};
 use crate::audit::stellar_native;
-use crate::audit::stellar_rpc::StellarRpcClient;
 use crate::error::AuditError;
 
 use super::{ApiError, ApiResult, DaemonState};
@@ -123,91 +122,84 @@ pub async fn commit_epoch(
         (None, None) => format!("epoch={epoch_number}"),
     };
 
-    // Commit on-chain. Use native signing when a keypair is available
-    // (no stellar CLI dependency). Fall back to the CLI only if no keypair
-    // is configured (backward compat for old deployments).
-    let result = if let Some(kp) = &state.signing_keypair {
-        // ─── Native signing (no stellar CLI) ───────────────────────
-        let chain = &state.chain;
-        if let Some(oplog_root_hex) = &epoch.oplog_merkle_root_hex {
-            let oplog_start = epoch
-                .oplog_start_ts
-                .map(|t| ((t.time as u64) << 32) | (t.increment as u64))
-                .unwrap_or(0);
-            let oplog_end = epoch
-                .oplog_end_ts
-                .map(|t| ((t.time as u64) << 32) | (t.increment as u64))
-                .unwrap_or(0);
-            let oplog_count = epoch.oplog_entry_count.unwrap_or(0);
+    // Commit on-chain using native signing (ed25519 + Soroban RPC).
+    // A signing keypair is required — pass --secret-key or STELLAR_SECRET_KEY.
+    let kp = state.signing_keypair.as_ref().ok_or_else(|| {
+        ApiError(AuditError::Validation(
+            "no signing keypair configured — use --secret-key or STELLAR_SECRET_KEY env var".to_string(),
+        ))
+    })?;
+    let chain = &state.chain;
+    let commit_result = if let Some(oplog_root_hex) = &epoch.oplog_merkle_root_hex {
+        let oplog_start = epoch.oplog_start_ts.map(|t| t.pack_u64()).unwrap_or(0);
+        let oplog_end = epoch.oplog_end_ts.map(|t| t.pack_u64()).unwrap_or(0);
+        let oplog_count = epoch.oplog_entry_count.unwrap_or(0);
 
-            stellar_native::commit_root_with_oplog_native(
-                &root_hex,
-                oplog_root_hex,
-                oplog_start,
-                oplog_end,
-                oplog_count,
-                &metadata,
-                kp,
-                &chain.rpc_url,
-                &chain.horizon_url,
-                &chain.contract_id,
-                &chain.passphrase,
-            )
-            .await
-            .map_err(ApiError::from)?
-        } else {
-            stellar_native::commit_root_native(
-                &root_hex,
-                &metadata,
-                kp,
-                &chain.rpc_url,
-                &chain.horizon_url,
-                &chain.contract_id,
-                &chain.passphrase,
-            )
-            .await
-            .map_err(ApiError::from)?
-        }
+        stellar_native::commit_root_with_oplog_native(
+            &root_hex,
+            oplog_root_hex,
+            oplog_start,
+            oplog_end,
+            oplog_count,
+            &metadata,
+            kp,
+            &chain.rpc_url,
+            &chain.horizon_url,
+            &chain.contract_id,
+            &chain.passphrase,
+        )
+        .await
     } else {
-        // ─── Legacy CLI fallback (deprecated) ──────────────────────
-        log::warn!("commit_epoch: no signing keypair — falling back to stellar CLI (deprecated; use --secret-key)");
-        if let Some(oplog_root_hex) = &epoch.oplog_merkle_root_hex {
-            let oplog_start = epoch
-                .oplog_start_ts
-                .map(|t| ((t.time as u64) << 32) | (t.increment as u64))
-                .unwrap_or(0);
-            let oplog_end = epoch
-                .oplog_end_ts
-                .map(|t| ((t.time as u64) << 32) | (t.increment as u64))
-                .unwrap_or(0);
-            let oplog_count = epoch.oplog_entry_count.unwrap_or(0);
+        stellar_native::commit_root_native(
+            &root_hex,
+            &metadata,
+            kp,
+            &chain.rpc_url,
+            &chain.horizon_url,
+            &chain.contract_id,
+            &chain.passphrase,
+        )
+        .await
+    };
 
-            let root_clone = root_hex.clone();
-            let oplog_root_clone = oplog_root_hex.clone();
-            let metadata_clone = metadata.clone();
-            tokio::task::spawn_blocking(move || {
-                stellar::commit_root_with_oplog(
-                    &root_clone,
-                    &oplog_root_clone,
-                    oplog_start,
-                    oplog_end,
-                    oplog_count,
-                    &metadata_clone,
-                )
-            })
+    // If the contract rejected with RootAlreadyCommitted (error #2), this root
+    // was committed by a previous publisher instance.  Query the live contract
+    // history to find the real on-chain sequence for this root and recover.
+    let result = match commit_result {
+        Ok(r) => r,
+        Err(ref e) if e.to_string().contains("#2") => {
+            // Root is already on-chain — look it up from the contract directly.
+            let probe_kp = stellar_native::generate_keypair();
+            let history = stellar_native::get_root_history_native(
+                &probe_kp,
+                &state.rpc_url,
+                &state.chain.contract_id,
+                20,
+            )
             .await
-            .map_err(|e| AuditError::Validation(format!("commit_root_with_oplog task join: {e}")))
-            .map_err(ApiError::from)??
-        } else {
-            let root_hex_clone = root_hex.clone();
-            let metadata_clone = metadata.clone();
-            tokio::task::spawn_blocking(move || {
-                stellar::commit_root(&root_hex_clone, &metadata_clone)
-            })
-            .await
-            .map_err(|e| AuditError::Validation(format!("commit_root task join: {e}")))
-            .map_err(ApiError::from)??
+            .map_err(ApiError::from)?;
+
+            let existing = history
+                .into_iter()
+                .find(|e| e.root_hex == root_hex)
+                .ok_or_else(|| ApiError(AuditError::Validation(format!(
+                    "root {root_hex} is already committed but could not be found in the on-chain history"
+                ))))?;
+
+            log::info!(
+                "commit_epoch {epoch_number}: root already on-chain at sequence {} — marking committed",
+                existing.sequence
+            );
+
+            // tx_hash is not stored in the contract; use empty string to
+            // signal "recovered from duplicate" — it's still a real on-chain fact.
+            CommitResult {
+                sequence: existing.sequence,
+                tx_hash: String::new(),
+                root_hex: existing.root_hex,
+            }
         }
+        Err(e) => return Err(ApiError::from(e)),
     };
 
     // Mark the epoch as committed.
@@ -222,8 +214,15 @@ pub async fn commit_epoch(
 pub async fn get_onchain_root(
     state: State<Arc<DaemonState>>,
 ) -> ApiResult<Option<OnChainRoot>> {
-    let client = StellarRpcClient::with_url(&state.rpc_url);
-    let root = client.get_current_root().await.map_err(ApiError::from)?;
+    // Use contract simulation via the chain's contract ID for correct reads.
+    let kp = stellar_native::generate_keypair();
+    let root = stellar_native::get_current_root_native(
+        &kp,
+        &state.rpc_url,
+        &state.chain.contract_id,
+    )
+    .await
+    .map_err(ApiError::from)?;
     Ok(Json(root))
 }
 
@@ -266,11 +265,9 @@ pub async fn publish_ipfs(
         ))));
     }
 
-    let config = state.ipfs_config.clone();
-    let result =
-        crate::audit::ipfs::publish_epoch_batch(&config, epoch_number, &batch_content)
-            .await
-            .map_err(ApiError::from)?;
+    let result = super::publish_epoch_batch_to_ipfs(&state, epoch_number, &batch_content)
+        .await
+        .map_err(ApiError::from)?;
 
     // Save the CID to sled.
     state
@@ -295,8 +292,7 @@ pub async fn get_ipfs_cid(
 pub async fn check_ipfs(
     state: State<Arc<DaemonState>>,
 ) -> ApiResult<bool> {
-    let config = &state.ipfs_config;
-    let result = crate::audit::ipfs::check_daemon(config)
+    let result = super::check_ipfs_backend(&state)
         .await
         .map_err(ApiError::from)?;
     Ok(Json(result))

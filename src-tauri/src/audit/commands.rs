@@ -12,7 +12,8 @@
 use serde::Serialize;
 use tauri::State;
 
-use crate::audit::stellar::{self, CommitResult, OnChainRoot};
+use crate::audit::stellar::{CommitResult, OnChainRoot};
+use crate::audit::stellar_native;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
@@ -205,9 +206,14 @@ pub async fn audit_commit_root(
     // Check if this root is already committed on-chain to avoid
     // RootAlreadyCommitted errors.
     let root_hex_check = root_hex.clone();
-    let onchain = tokio::task::spawn_blocking(move || stellar::get_current_root())
-        .await
-        .map_err(|e| AppError::Validation(format!("get_current_root task join: {e}")))??;
+    let chain = crate::audit::dev_setup::ChainConfig::testnet();
+    let probe_kp = stellar_native::generate_keypair();
+    let onchain = stellar_native::get_current_root_native(
+        &probe_kp,
+        &chain.rpc_url,
+        &chain.contract_id,
+    )
+    .await?;
     if let Some(ref entry) = onchain {
         if entry.root_hex == root_hex_check {
             return Err(AppError::Validation(format!(
@@ -226,13 +232,25 @@ pub async fn audit_commit_root(
         )
     });
 
-    // Run the stellar CLI in a spawn_blocking to avoid blocking the
-    // async runtime. The CLI call involves a network round-trip.
-    let result = tokio::task::spawn_blocking(move || {
-        stellar::commit_root(&root_hex, &meta)
-    })
-    .await
-    .map_err(|e| AppError::Validation(format!("commit_root task join: {e}")))??;
+    // Load keypair from keychain.
+    let kp = crate::audit::dev_setup::load_keypair_from_keychain()?
+        .ok_or_else(|| {
+            AppError::Validation(
+                "no Stellar keypair found — run onboarding first".to_string(),
+            )
+        })?;
+
+    // Commit via native signing.
+    let result = stellar_native::commit_root_native(
+        &root_hex,
+        &meta,
+        &kp,
+        &chain.rpc_url,
+        &chain.horizon_url,
+        &chain.contract_id,
+        &chain.passphrase,
+    )
+    .await?;
 
     Ok(result)
 }
@@ -240,10 +258,9 @@ pub async fn audit_commit_root(
 /// Get the latest committed root from the Soroban contract on Stellar testnet.
 #[tauri::command]
 pub async fn audit_get_onchain_root() -> AppResult<Option<OnChainRoot>> {
-    let result = tokio::task::spawn_blocking(stellar::get_current_root)
-        .await
-        .map_err(|e| AppError::Validation(format!("get_current_root task join: {e}")))??;
-    Ok(result)
+    let chain = crate::audit::dev_setup::ChainConfig::testnet();
+    let kp = stellar_native::generate_keypair();
+    Ok(stellar_native::get_current_root_native(&kp, &chain.rpc_url, &chain.contract_id).await?)
 }
 
 // ─── Epoch management commands ────────────────────────────────────────
@@ -306,13 +323,25 @@ pub async fn audit_verify_reader_mode(
         String::new()
     };
 
-    // Run the verification in a spawn_blocking because it calls the
-    // stellar CLI (network I/O) and parses the JSONL log.
-    let result = tokio::task::spawn_blocking(move || {
-        crate::audit::reader::verify_against_onchain(&events_jsonl, &local_root_hex)
-    })
-    .await
-    .map_err(|e| AppError::Validation(format!("verify_reader_mode task join: {e}")))??;
+    // Resolve chain config for the on-chain root query.
+    use crate::audit::audit_mode::load_mode_config;
+    use crate::audit::dev_setup::ChainConfig;
+
+    let config = load_mode_config(&app)?;
+    let chain = match config.network {
+        crate::audit::audit_mode::AuditNetwork::Testnet => ChainConfig::testnet(),
+        crate::audit::audit_mode::AuditNetwork::Mainnet => {
+            ChainConfig::mainnet(config.mainnet_rpc_url.clone(), config.mainnet_contract_id.clone())
+        }
+    };
+
+    let result = crate::audit::reader::verify_against_onchain(
+        &events_jsonl,
+        &local_root_hex,
+        &chain.rpc_url,
+        &chain.contract_id,
+    )
+    .await?;
 
     Ok(result)
 }
@@ -409,22 +438,31 @@ pub async fn audit_check_ipfs_daemon(
 
 // ─── Stellar RPC client commands ──────────────────────────────────────
 
-/// Get the latest committed root from Stellar using the native Rust
-/// RPC client (no `stellar` CLI subprocess required).
+/// Get the latest committed root from Stellar using contract simulation
+/// (read-only, no `stellar` CLI subprocess required).
 ///
-/// This is the Phase 3 replacement for `audit_get_onchain_root` which
-/// uses the CLI. The RPC client calls the Soroban JSON-RPC API directly
-/// via HTTP, making it more reliable and eliminating the CLI dependency
-/// for read operations.
+/// Resolves the contract ID and RPC URL from the audit mode configuration
+/// so the correct contract is queried for both testnet and mainnet.
 #[tauri::command]
 pub async fn audit_get_onchain_root_rpc(
+    app: tauri::AppHandle,
     rpc_url: Option<String>,
 ) -> AppResult<Option<OnChainRoot>> {
-    let client = match rpc_url {
-        Some(url) => crate::audit::stellar_rpc::StellarRpcClient::with_url(&url),
-        None => crate::audit::stellar_rpc::StellarRpcClient::new(),
+    use crate::audit::audit_mode::load_mode_config;
+    use crate::audit::dev_setup::ChainConfig;
+    use crate::audit::stellar_native;
+
+    let config = load_mode_config(&app)?;
+    let chain = match config.network {
+        crate::audit::audit_mode::AuditNetwork::Testnet => ChainConfig::testnet(),
+        crate::audit::audit_mode::AuditNetwork::Mainnet => {
+            ChainConfig::mainnet(config.mainnet_rpc_url.clone(), config.mainnet_contract_id.clone())
+        }
     };
-    Ok(client.get_current_root().await?)
+
+    let url = rpc_url.unwrap_or_else(|| chain.rpc_url.clone());
+    let kp = stellar_native::generate_keypair();
+    Ok(stellar_native::get_current_root_native(&kp, &url, &chain.contract_id).await?)
 }
 
 // ─── Dev mode onboarding commands ─────────────────────────────────────
@@ -851,7 +889,6 @@ pub async fn audit_verify_oplog_integrity(
     rpc_url: Option<String>,
 ) -> AppResult<OplogIntegrityReport> {
     use crate::audit::oplog::{compute_oplog_range_hash, OplogTimestamp};
-    use crate::audit::stellar;
 
     // 1. Get the MongoDB client from the connection registry.
     let entry = state.clients.get(&connection_id).await?;
@@ -881,8 +918,15 @@ pub async fn audit_verify_oplog_integrity(
         }
     };
 
-    // 3. Get the on-chain oplog commitment.
-    let on_chain_oplog = stellar::get_oplog_commitment(sequence)?;
+    // 3. Get the on-chain oplog commitment via native contract simulation.
+    let probe_kp = stellar_native::generate_keypair();
+    let on_chain_oplog = stellar_native::get_oplog_commitment_native(
+        sequence,
+        &probe_kp,
+        &rpc_url,
+        &crate::audit::dev_setup::ChainConfig::testnet().contract_id,
+    )
+    .await?;
 
     let on_chain_oplog_root = match on_chain_oplog {
         Some(ref oc) => oc.oplog_root_hex.clone(),
@@ -1016,12 +1060,9 @@ pub async fn audit_verify_oplog_integrity(
 pub async fn audit_get_oplog_commitment(
     sequence: u64,
 ) -> AppResult<Option<crate::audit::stellar::OnChainOplogCommitment>> {
-    let result = tokio::task::spawn_blocking(move || {
-        crate::audit::stellar::get_oplog_commitment(sequence)
-    })
-    .await
-    .map_err(|e| AppError::Validation(format!("get_oplog_commitment task join: {e}")))??;
-    Ok(result)
+    let chain = crate::audit::dev_setup::ChainConfig::testnet();
+    let kp = stellar_native::generate_keypair();
+    Ok(stellar_native::get_oplog_commitment_native(sequence, &kp, &chain.rpc_url, &chain.contract_id).await?)
 }
 
 /// Extract the JSONL lines for events in the given index range

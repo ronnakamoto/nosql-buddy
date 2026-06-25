@@ -75,7 +75,11 @@ fn docker_compose(app: &AppHandle, args: &[&str]) -> AppResult<String> {
 
     let mut cmd = Command::new("docker");
     cmd.current_dir(&dir);
-    cmd.args(["compose", "-f", AUDIT_COMPOSE_FILE]);
+    // Use an explicit project name so the audit stack is isolated from the
+    // main mongo-buddy compose project that lives in the same directory.
+    // Without this, `docker compose ps` returns mongo1/mongo2/mongo3 as
+    // orphan containers and falsely reports the audit stack as "running".
+    cmd.args(["compose", "-p", "nosqlbuddy-audit", "-f", AUDIT_COMPOSE_FILE]);
     if has_env {
         cmd.args(["--env-file", ".env.audit"]);
     }
@@ -285,6 +289,18 @@ pub fn stack_down(app: &AppHandle) -> AppResult<String> {
     docker_compose(app, &["down"])
 }
 
+/// Tear down the audit stack and wipe all Docker volumes (`docker compose down --volumes`).
+///
+/// This removes the three named volumes:
+///   `audit-publisher-data`, `audit-attester-data`, `audit-reader-data`
+///
+/// Effect: all daemon state (events.jsonl, sled Merkle tree, sled attestation
+/// store, attester key) is erased. On-chain Stellar history is NOT affected.
+/// Keypairs in `.env.audit` and the OS keychain are preserved.
+pub fn stack_reset_data(app: &AppHandle) -> AppResult<String> {
+    docker_compose(app, &["down", "--volumes"])
+}
+
 /// Fetch the last N lines of logs from the audit stack (all services).
 pub fn stack_logs(app: &AppHandle, tail: u32) -> AppResult<String> {
     docker_compose(app, &["logs", "--tail", &tail.to_string()])
@@ -323,6 +339,17 @@ pub async fn audit_dev_stack_down(app: AppHandle) -> AppResult<String> {
     tokio::task::spawn_blocking(move || stack_down(&app))
         .await
         .map_err(|e| AppError::Internal(format!("stack down task join: {e}")))?
+}
+
+/// Stop the audit stack and wipe all Docker volumes.
+///
+/// Clears all local daemon state (events, Merkle tree, attestation store).
+/// On-chain Stellar history and `.env.audit` credentials are preserved.
+#[tauri::command]
+pub async fn audit_dev_stack_reset_data(app: AppHandle) -> AppResult<String> {
+    tokio::task::spawn_blocking(move || stack_reset_data(&app))
+        .await
+        .map_err(|e| AppError::Internal(format!("stack reset data task join: {e}")))?
 }
 
 /// Fetch recent audit stack logs.

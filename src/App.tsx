@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import commands, {
   type AppInfo,
   type AppSettings,
+  type AuditMode,
   type CollectionSummary,
   type ConnectionHandle,
   type DatabaseSummary,
@@ -18,13 +19,25 @@ import { ShellTab } from "./features/ShellTab";
 import { ToastStack, useToasts } from "./components/Toast";
 import AuditPanel from "./components/AuditPanel";
 import ErrorBoundary from "./components/ErrorBoundary";
+import {
+  IconSearch,
+  IconTerminal,
+  IconShieldCheck,
+  IconDatabase,
+  IconLayers,
+  IconGrid,
+  IconServer,
+  IconPlus,
+} from "./components/Icons";
+
+type AuditView = "chooser" | "dev" | "production" | "settings";
 
 type Tab =
   | { id: string; kind: "query"; connectionId: string; database: string; collection: string }
   | { id: string; kind: "indexes"; connectionId: string; database: string; collection: string }
   | { id: string; kind: "schema"; connectionId: string; database: string; collection: string }
   | { id: string; kind: "shell"; connectionId: string; database: string; collection: string }
-  | { id: string; kind: "audit" };
+  | { id: string; kind: "audit"; auditMode: AuditMode; auditView: AuditView };
 
 interface ActiveConnection {
   handle: ConnectionHandle;
@@ -99,7 +112,7 @@ function NewTabMenu({
         aria-expanded={open}
         title="New tab"
       >
-        +
+        <IconPlus size={16} />
       </button>
       {open && (
         <div
@@ -117,7 +130,7 @@ function NewTabMenu({
             role="menuitem"
             onClick={() => { setOpen(false); onNewQuery(); }}
           >
-            <span className="new-tab-menu__icon" aria-hidden="true">⌕</span>
+            <span className="new-tab-menu__icon" aria-hidden="true"><IconSearch size={14} /></span>
             <span className="new-tab-menu__label">Query</span>
             <span className="new-tab-menu__hint">Find documents</span>
           </button>
@@ -126,7 +139,7 @@ function NewTabMenu({
             role="menuitem"
             onClick={() => { setOpen(false); onNewShell(); }}
           >
-            <span className="new-tab-menu__icon" aria-hidden="true">›</span>
+            <span className="new-tab-menu__icon" aria-hidden="true"><IconTerminal size={14} /></span>
             <span className="new-tab-menu__label">Shell</span>
             <span className="new-tab-menu__hint">Run mongosh</span>
           </button>
@@ -135,7 +148,7 @@ function NewTabMenu({
             role="menuitem"
             onClick={() => { setOpen(false); onOpenAudit(); }}
           >
-            <span className="new-tab-menu__icon" aria-hidden="true">⊕</span>
+            <span className="new-tab-menu__icon" aria-hidden="true"><IconShieldCheck size={14} /></span>
             <span className="new-tab-menu__label">Audit Log</span>
             <span className="new-tab-menu__hint">ZK tamper-evident log</span>
           </button>
@@ -327,6 +340,12 @@ export default function App() {
     });
   }
 
+  const updateTab = useCallback((id: string, patch: Partial<Tab>) => {
+    setTabs((current) =>
+      current.map((t) => (t.id === id ? ({ ...t, ...patch } as Tab) : t))
+    );
+  }, []);
+
   const paletteItems = useMemo<CommandPaletteItem[]>(() => {
     const items: CommandPaletteItem[] = [
       {
@@ -379,7 +398,7 @@ export default function App() {
           return (
             <div key={db.name} className="tree-group">
               <div className="tree-group__header">
-                <span className="tree-group__icon" aria-hidden="true">▤</span>
+                <span className="tree-group__icon" aria-hidden="true"><IconDatabase size={13} /></span>
                 <span className="tree-group__label">{db.name}</span>
                 <span className="tree-group__count">{collections.length} collections</span>
               </div>
@@ -399,7 +418,7 @@ export default function App() {
                       if (e.key === "Enter") openQueryTab(active.handle.connectionId, db.name, c.name);
                     }}
                   >
-                    <span className="tree-item__icon" aria-hidden="true">◫</span>
+                    <span className="tree-item__icon" aria-hidden="true"><IconLayers size={13} /></span>
                     <span className="tree-item__name">{c.name}</span>
                     <span className="tree-item__meta">
                       {c.documentCount != null ? formatNumber(c.documentCount) : ""}
@@ -414,7 +433,7 @@ export default function App() {
                         title="Find documents"
                         aria-label="Find documents"
                       >
-                        ⌕
+                        <IconSearch size={13} />
                       </button>
                       <button
                         className="tree-item__action"
@@ -425,7 +444,7 @@ export default function App() {
                         title="Indexes"
                         aria-label="Indexes"
                       >
-                        ▤
+                        <IconDatabase size={13} />
                       </button>
                       <button
                         className="tree-item__action"
@@ -436,7 +455,7 @@ export default function App() {
                         title="Schema"
                         aria-label="Schema"
                       >
-                        ⊟
+                        <IconGrid size={13} />
                       </button>
                     </span>
                   </div>
@@ -521,7 +540,7 @@ export default function App() {
                   className={`tree-item ${active?.handle.profileId === p.id ? "is-active" : ""}`}
                 >
                   <span className="tree-item__icon" aria-hidden="true">
-                    ◆
+                    <IconServer size={13} />
                   </span>
                   <span className="tree-item__name" title={p.maskedUri}>
                     {p.name}
@@ -549,7 +568,7 @@ export default function App() {
           </div>
         )}
         <div className="app__sidebar-search">
-          <span className="app__sidebar-search-icon" aria-hidden="true">⌕</span>
+          <span className="app__sidebar-search-icon" aria-hidden="true"><IconSearch size={13} /></span>
           <input
             type="text"
             placeholder={active ? "Filter collections…" : "Filter connections…"}
@@ -589,14 +608,14 @@ export default function App() {
             >
               <span className="tab__icon" aria-hidden="true">
                 {t.kind === "query"
-                  ? "⌕"
+                  ? <IconSearch size={14} />
                   : t.kind === "indexes"
-                    ? "▤"
+                    ? <IconDatabase size={14} />
                     : t.kind === "schema"
-                      ? "⊟"
+                      ? <IconGrid size={14} />
                       : t.kind === "shell"
-                        ? "›"
-                        : "⊕"}
+                        ? <IconTerminal size={14} />
+                        : <IconShieldCheck size={14} />}
               </span>
               <span className="tab__label">
                 {t.kind === "query"
@@ -643,7 +662,7 @@ export default function App() {
               onNewShell={() => openShellTab(active.handle.connectionId, active.databases[0]?.name ?? "admin")}
               onOpenAudit={() => {
                 const id = `audit-${Date.now()}`;
-                setTabs((prev) => [...prev, { id, kind: "audit" }]);
+                setTabs((prev) => [...prev, { id, kind: "audit", auditMode: "dev", auditView: "chooser" }]);
                 setActiveTabId(id);
               }}
             />
@@ -655,8 +674,10 @@ export default function App() {
               key={activeTab.id}
               tab={activeTab}
               profile={active?.profile ?? null}
+              connectionId={active?.handle.connectionId ?? null}
               onQueryTime={setQueryTime}
               onDocCount={setDocCount}
+              updateTab={updateTab}
             />
           </ErrorBoundary>
         ) : (
@@ -729,13 +750,17 @@ export default function App() {
 function TabPane({
   tab,
   profile,
+  connectionId,
   onQueryTime,
   onDocCount,
+  updateTab,
 }: {
   tab: Tab;
   profile: ProfileSummary | null;
+  connectionId: string | null;
   onQueryTime: (ms: number) => void;
   onDocCount: (count: number) => void;
+  updateTab: (id: string, patch: Partial<Tab>) => void;
 }) {
   const handleResult = useCallback(
     (page: DocumentPage | null) => {
@@ -783,7 +808,15 @@ function TabPane({
     );
   }
   if (tab.kind === "audit") {
-    return <AuditPanel />;
+    return (
+      <AuditPanel
+        mode={tab.auditMode}
+        view={tab.auditView}
+        connectionId={connectionId}
+        onModeChange={(auditMode) => updateTab(tab.id, { auditMode })}
+        onViewChange={(auditView) => updateTab(tab.id, { auditView })}
+      />
+    );
   }
   return (
     <SchemaTab

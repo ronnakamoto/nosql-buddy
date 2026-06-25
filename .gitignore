@@ -55,6 +55,8 @@ Thumbs.db
 
 # Audit stack local env (credentials — never commit)
 .env.audit
+# Generated attester Ed25519 signing key (created by nosqlbuddy-audit setup)
+attester.key
 
 
 # Editor
@@ -81,3 +83,5 @@ screenshots/
 # Misc
 *.tmp
 *.temp
+
+target/

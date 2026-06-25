@@ -5,14 +5,13 @@ import commands, {
   formatError,
 } from "../ipc/commands";
 import { Card, Badge, Button, Spinner, Alert, injectAuditKeyframes } from "./AuditUi";
+import { IconBeaker, IconCheckCircle, IconChevronRight, IconShieldCheck } from "./Icons";
 
 /**
- * The mode chooser — always shown when the user opens the Audit tab.
+ * The mode chooser — the landing page for the Audit tab.
  *
- * Two big cards: Dev Mode (full stack locally via Docker) and Production
- * Mode (in-app pipeline with the user's own keys on testnet or mainnet).
- * The user picks each time they enter the tab. The last choice is
- * remembered and pre-highlighted, but the chooser is never skipped.
+ * Explains what the audit log is, shows two clear paths, and gives
+ * the user enough context to choose confidently.
  */
 export function AuditModeChooser({
   onChoose,
@@ -61,44 +60,54 @@ export function AuditModeChooser({
         display: "flex",
         flexDirection: "column",
         gap: "var(--space-4)",
-        padding: "var(--space-5)",
-        maxWidth: "760px",
-        margin: "0 auto",
-        animation: "audit-fade-in 0.25s ease",
+        padding: "var(--space-4)",
+        flex: 1,
+        overflow: "auto",
       }}
     >
-      <div style={{ textAlign: "center", marginBottom: "var(--space-2)" }}>
-        <h1
-          style={{
-            fontSize: "var(--font-size-2xl)",
-            fontWeight: 700,
-            margin: 0,
-            color: "var(--ink)",
-            letterSpacing: "-0.01em",
-          }}
-        >
-          ZK Audit Log
-        </h1>
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", marginBottom: "var(--space-2)" }}>
+          <span style={{ color: "var(--accent-600)", display: "flex" }}>
+            <IconShieldCheck size={20} />
+          </span>
+          <h1
+            style={{
+              fontSize: "var(--font-size-2xl)",
+              fontWeight: 700,
+              margin: 0,
+              color: "var(--ink)",
+              letterSpacing: "-0.02em",
+            }}
+          >
+            Audit Log
+          </h1>
+        </div>
         <p
           style={{
             fontSize: "var(--font-size-sm)",
             color: "var(--ink-muted)",
-            margin: "var(--space-2) 0 0",
+            margin: 0,
             lineHeight: "var(--line-height-normal)",
+            maxWidth: "60ch",
           }}
         >
-          Tamper-evident Merkle audit log anchored to Stellar, with IPFS publishing
-          and zero-knowledge inclusion proofs.
+          Every MongoDB insert, update, and delete is recorded in a tamper-evident log that you can cryptographically prove. Seal batches of changes and anchor their fingerprints on the Stellar blockchain so no one can alter history undetected.
         </p>
-        <p
-          style={{
-            fontSize: "var(--font-size-xs)",
-            color: "var(--ink-faint)",
-            margin: "var(--space-2) 0 0",
-          }}
-        >
-          Choose how you want to run the audit system.
-        </p>
+      </div>
+
+      {/* How it works */}
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(3, 1fr)",
+        gap: "var(--space-2)",
+        padding: "var(--space-3)",
+        background: "var(--surface)",
+        borderRadius: "var(--radius-lg)",
+        border: "1px solid var(--border)",
+      }}>
+        <HowItWorks step="1" label="Capture" detail="MongoDB changes are recorded automatically into cryptographic batches." />
+        <HowItWorks step="2" label="Seal" detail="Seal a batch to create a tamper-evident fingerprint (Merkle root)." />
+        <HowItWorks step="3" label="Anchor" detail="Anchor the fingerprint on Stellar so it can be independently verified." />
       </div>
 
       {error && <Alert tone="danger">{error}</Alert>}
@@ -110,40 +119,36 @@ export function AuditModeChooser({
           gap: "var(--space-4)",
         }}
       >
-        {/* ─── Dev Mode card ─────────────────────────────────────────── */}
         <ModeCard
           selected={lastMode === "dev"}
           loading={selecting === "dev"}
           onClick={() => choose("dev")}
           tone="accent"
-          icon="🐳"
+          symbol={<IconBeaker size={22} />}
           title="Dev Mode"
-          tagline="Full stack, locally"
-          description="Run the complete audit system on your machine — publisher, independent attester, and reader daemons — via Docker Compose. K-of-N attestation, oplog completeness verification, and on-chain commitments to Stellar testnet."
+          description="Run the entire audit system locally with Docker. Best for trying it out or developing against the audit pipeline."
           bullets={[
-            "Full production-grade stack in containers",
-            "K-of-N attestation + oplog verification",
-            "Stellar testnet (auto-configured)",
-            "Requires Docker + the replica set running",
+            "Full local stack via Docker",
+            "Automatic change capture",
+            "Multi-party sign-off (K-of-N)",
+            "Stellar testnet (no real funds)",
           ]}
-          footerBadge={<Badge tone="accent" dot>Testnet</Badge>}
+          footerBadge={<Badge tone="accent" dot>Recommended for trying</Badge>}
         />
 
-        {/* ─── Production Mode card ──────────────────────────────────── */}
         <ModeCard
           selected={lastMode === "production"}
           loading={selecting === "production"}
           onClick={() => choose("production")}
           tone="success"
-          icon="🛰️"
+          symbol={<IconCheckCircle size={22} />}
           title="Production Mode"
-          tagline="Your keys, your network"
-          description="Run the in-app audit pipeline with your own Stellar keypair and contract. Choose testnet or mainnet — a double-check that an audit system you deployed elsewhere works end to end."
+          description="Use the built-in pipeline with your own Stellar keys. Commit to testnet or mainnet with real transactions."
           bullets={[
-            "In-app pipeline, no daemon",
-            "Import your own Stellar secret key",
-            "Testnet or Mainnet (your choice)",
-            "Verify a remote deployment matches",
+            "Built-in audit pipeline",
+            "Your Stellar keypair (OS keychain)",
+            "Testnet or mainnet",
+            "No Docker required",
           ]}
           footerBadge={
             config?.hasProductionKeypair ? (
@@ -173,9 +178,8 @@ function ModeCard({
   loading,
   onClick,
   tone,
-  icon,
+  symbol,
   title,
-  tagline,
   description,
   bullets,
   footerBadge,
@@ -184,9 +188,8 @@ function ModeCard({
   loading: boolean;
   onClick: () => void;
   tone: "accent" | "success";
-  icon: string;
+  symbol: React.ReactNode;
   title: string;
-  tagline: string;
   description: string;
   bullets: string[];
   footerBadge: React.ReactNode;
@@ -196,7 +199,6 @@ function ModeCard({
     <Card
       padded={false}
       style={{
-        cursor: loading ? "wait" : "pointer",
         borderColor: selected ? accent : "var(--border)",
         boxShadow: selected ? `0 0 0 1px ${accent}` : "none",
         transition: "border-color 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease",
@@ -221,7 +223,6 @@ function ModeCard({
         <div style={{ display: "flex", alignItems: "flex-start", gap: "var(--space-3)" }}>
           <div
             style={{
-              fontSize: "1.6rem",
               lineHeight: 1,
               width: "44px",
               height: "44px",
@@ -229,11 +230,13 @@ function ModeCard({
               alignItems: "center",
               justifyContent: "center",
               borderRadius: "var(--radius-md)",
-              background: "var(--surface-2)",
+              background: selected ? accent : "var(--surface-2)",
+              color: selected ? "white" : accent,
               flexShrink: 0,
+              transition: "background 0.15s ease, color 0.15s ease",
             }}
           >
-            {icon}
+            {symbol}
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div
@@ -247,9 +250,6 @@ function ModeCard({
                 {title}
               </span>
               {selected && <Badge tone={tone}>Last used</Badge>}
-            </div>
-            <div style={{ fontSize: "var(--font-size-xs)", color: accent, fontWeight: 600, marginTop: "2px" }}>
-              {tagline}
             </div>
           </div>
         </div>
@@ -286,7 +286,7 @@ function ModeCard({
                 color: "var(--ink-muted)",
               }}
             >
-              <span style={{ color: accent, fontWeight: 700, lineHeight: "var(--line-height-tight)" }}>›</span>
+              <span style={{ color: accent, lineHeight: "var(--line-height-tight)", display: "flex", alignItems: "center" }}><IconChevronRight size={11} /></span>
               <span>{b}</span>
             </li>
           ))}
@@ -298,5 +298,35 @@ function ModeCard({
         </div>
       </button>
     </Card>
+  );
+}
+
+function HowItWorks({ step, label, detail }: { step: string; label: string; detail: string }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-1)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
+        <span
+          style={{
+            width: "18px",
+            height: "18px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            borderRadius: "50%",
+            fontSize: "10px",
+            fontWeight: 700,
+            background: "var(--accent-100)",
+            color: "var(--accent-700)",
+            flexShrink: 0,
+          }}
+        >
+          {step}
+        </span>
+        <span style={{ fontSize: "var(--font-size-sm)", fontWeight: 600, color: "var(--ink)" }}>{label}</span>
+      </div>
+      <span style={{ fontSize: "var(--font-size-xs)", color: "var(--ink-muted)", lineHeight: "var(--line-height-tight)" }}>
+        {detail}
+      </span>
+    </div>
   );
 }

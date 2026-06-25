@@ -1,4 +1,6 @@
-import type { CSSProperties, ReactNode } from "react";
+import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { IconClose } from "./Icons";
+import "./audit.css";
 
 /**
  * Shared UI primitives for the redesigned audit system.
@@ -8,27 +10,85 @@ import type { CSSProperties, ReactNode } from "react";
  * and settings so every audit surface looks and behaves the same.
  */
 
+const STELLAR_EXPLORER_BASE = "https://stellar.expert/explorer";
+
+function getExplorerUrl(network: "testnet" | "mainnet", txHash: string): string {
+  return `${STELLAR_EXPLORER_BASE}/${network}/tx/${txHash}`;
+}
+
+/**
+ * Renders a transaction hash as a clickable link to the Stellar explorer.
+ * Shows a truncated hash with hover underline; opens in the system browser.
+ */
+export function TxHashLink({
+  txHash,
+  network = "testnet",
+  showExternalIcon = true,
+}: {
+  txHash: string;
+  network?: "testnet" | "mainnet";
+  showExternalIcon?: boolean;
+}) {
+  if (!txHash) return <span style={{ color: "var(--ink-faint)" }}>—</span>;
+  const href = getExplorerUrl(network, txHash);
+  const display = txHash.length > 20 ? `${txHash.slice(0, 10)}…${txHash.slice(-8)}` : txHash;
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      title={`View on Stellar Explorer: ${txHash}`}
+      style={{
+        color: "var(--link)",
+        textDecoration: "none",
+        fontFamily: "var(--font-mono)",
+        letterSpacing: "var(--letter-mono)",
+        fontSize: "var(--font-size-sm)",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: "4px",
+        cursor: "pointer",
+        transition: "color 0.12s ease",
+      }}
+    >
+      {display}
+      {showExternalIcon && (
+        <svg
+          width="11"
+          height="11"
+          viewBox="0 0 16 16"
+          fill="none"
+          style={{ opacity: 0.6, flexShrink: 0 }}
+        >
+          <path
+            d="M6 3h7v7M13 3L6 10M11 9v4a1 1 0 01-1 1H4a1 1 0 01-1-1V7a1 1 0 011-1h4"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      )}
+    </a>
+  );
+}
+
 // ─── Card ───────────────────────────────────────────────────────────────
 
 export function Card({
   children,
   style,
   padded = true,
+  compact = false,
 }: {
   children: ReactNode;
   style?: CSSProperties;
   padded?: boolean;
+  compact?: boolean;
 }) {
+  const className = compact ? "audit-card audit-card--padded-sm" : padded ? "audit-card" : "audit-card audit-card--flush";
   return (
-    <div
-      style={{
-        background: "var(--surface)",
-        border: "1px solid var(--border)",
-        borderRadius: "var(--radius-lg)",
-        padding: padded ? "var(--space-4)" : undefined,
-        ...style,
-      }}
-    >
+    <div className={className} style={style}>
       {children}
     </div>
   );
@@ -39,45 +99,28 @@ export function CardHeader({
   subtitle,
   icon,
   actions,
+  compact = false,
 }: {
   title: string;
   subtitle?: string;
   icon?: ReactNode;
   actions?: ReactNode;
+  compact?: boolean;
 }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: "var(--space-2)",
-        marginBottom: "var(--space-3)",
-      }}
-    >
-      {icon && <span style={{ fontSize: "var(--font-size-lg)" }}>{icon}</span>}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div
-          style={{
-            fontSize: "var(--font-size-sm)",
-            fontWeight: 600,
-            color: "var(--ink)",
-          }}
-        >
+    <div className={compact ? "audit-card-header audit-card-header--compact" : "audit-card-header"}>
+      {icon && <span style={{ fontSize: compact ? "var(--font-size-md)" : "var(--font-size-lg)", lineHeight: 1, marginTop: "1px" }}>{icon}</span>}
+      <div className="audit-card-header__text">
+        <div className={compact ? "audit-card-header__title audit-card-header__title--compact" : "audit-card-header__title"}>
           {title}
         </div>
         {subtitle && (
-          <div
-            style={{
-              fontSize: "var(--font-size-xs)",
-              color: "var(--ink-faint)",
-              marginTop: "2px",
-            }}
-          >
+          <div className={compact ? "audit-card-header__subtitle audit-card-header__subtitle--compact" : "audit-card-header__subtitle"}>
             {subtitle}
           </div>
         )}
       </div>
-      {actions}
+      {actions && <div className="audit-card-header__actions">{actions}</div>}
     </div>
   );
 }
@@ -85,15 +128,6 @@ export function CardHeader({
 // ─── Badge ──────────────────────────────────────────────────────────────
 
 type BadgeTone = "neutral" | "accent" | "success" | "warning" | "danger" | "info";
-
-const badgeTone: Record<BadgeTone, CSSProperties> = {
-  neutral: { background: "var(--surface-3)", color: "var(--ink-muted)" },
-  accent: { background: "var(--accent-100)", color: "var(--accent-700)" },
-  success: { background: "color-mix(in oklch, var(--success-500) 18%, transparent)", color: "var(--success-500)" },
-  warning: { background: "color-mix(in oklch, var(--warning-500) 20%, transparent)", color: "var(--warning-500)" },
-  danger: { background: "color-mix(in oklch, var(--danger-500) 18%, transparent)", color: "var(--danger-500)" },
-  info: { background: "color-mix(in oklch, var(--info-500) 18%, transparent)", color: "var(--info-500)" },
-};
 
 export function Badge({
   children,
@@ -105,30 +139,8 @@ export function Badge({
   dot?: boolean;
 }) {
   return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: "6px",
-        padding: "3px 10px",
-        borderRadius: "999px",
-        fontSize: "var(--font-size-xs)",
-        fontWeight: 600,
-        letterSpacing: "0.01em",
-        whiteSpace: "nowrap",
-        ...badgeTone[tone],
-      }}
-    >
-      {dot && (
-        <span
-          style={{
-            width: "6px",
-            height: "6px",
-            borderRadius: "50%",
-            background: "currentColor",
-          }}
-        />
-      )}
+    <span className={`audit-badge audit-badge--${tone}`}>
+      {dot && <span className="audit-badge__dot" />}
       {children}
     </span>
   );
@@ -137,29 +149,6 @@ export function Badge({
 // ─── Button ─────────────────────────────────────────────────────────────
 
 type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
-
-const buttonVariant: Record<ButtonVariant, CSSProperties> = {
-  primary: {
-    background: "var(--accent-600)",
-    color: "white",
-    border: "1px solid var(--accent-700)",
-  },
-  secondary: {
-    background: "var(--surface-2)",
-    color: "var(--ink)",
-    border: "1px solid var(--border)",
-  },
-  ghost: {
-    background: "transparent",
-    color: "var(--ink-muted)",
-    border: "1px solid transparent",
-  },
-  danger: {
-    background: "color-mix(in oklch, var(--danger-500) 12%, transparent)",
-    color: "var(--danger-500)",
-    border: "1px solid color-mix(in oklch, var(--danger-500) 30%, transparent)",
-  },
-};
 
 export function Button({
   children,
@@ -178,26 +167,14 @@ export function Button({
   style?: CSSProperties;
   title?: string;
 }) {
+  const isInactive = disabled || loading;
   return (
     <button
       title={title}
       onClick={onClick}
-      disabled={disabled || loading}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: "var(--space-2)",
-        padding: "7px 14px",
-        borderRadius: "var(--radius-md)",
-        fontSize: "var(--font-size-sm)",
-        fontWeight: 500,
-        cursor: disabled || loading ? "not-allowed" : "pointer",
-        opacity: disabled || loading ? 0.6 : 1,
-        transition: "background 0.12s ease, border-color 0.12s ease, transform 0.05s ease",
-        ...buttonVariant[variant],
-        ...style,
-      }}
+      disabled={isInactive}
+      className={`audit-btn audit-btn--${variant}`}
+      style={style}
     >
       {loading && <Spinner size={13} />}
       {children}
@@ -210,15 +187,8 @@ export function Button({
 export function Spinner({ size = 16 }: { size?: number }) {
   return (
     <span
-      style={{
-        display: "inline-block",
-        width: size,
-        height: size,
-        borderRadius: "50%",
-        border: "2px solid var(--border-strong)",
-        borderTopColor: "var(--accent-500)",
-        animation: "audit-spin 0.7s linear infinite",
-      }}
+      className="audit-spinner"
+      style={{ width: size, height: size }}
     />
   );
 }
@@ -229,36 +199,60 @@ export function Stat({
   label,
   value,
   mono = false,
+  compact = false,
 }: {
   label: string;
   value: ReactNode;
   mono?: boolean;
+  compact?: boolean;
 }) {
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "2px", minWidth: 0 }}>
+    <div className="audit-stat" style={{ gap: compact ? "1px" : "2px" }}>
+      <span className="audit-stat__label">{label}</span>
       <span
-        style={{
-          fontSize: "var(--font-size-xs)",
-          color: "var(--ink-faint)",
-          textTransform: "uppercase",
-          letterSpacing: "0.04em",
-        }}
-      >
-        {label}
-      </span>
-      <span
-        style={{
-          fontSize: "var(--font-size-md)",
-          fontWeight: 600,
-          color: "var(--ink)",
-          fontFamily: mono ? "var(--font-mono)" : "var(--font-sans)",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
+        className={mono ? "audit-stat__value audit-stat__value--mono" : "audit-stat__value"}
+        style={compact ? { fontSize: "var(--font-size-sm)" } : undefined}
       >
         {value}
       </span>
+    </div>
+  );
+}
+
+// ─── StatusCard ─────────────────────────────────────────────────────────
+
+export function StatusCard({
+  title,
+  status,
+  value,
+  detail,
+  action,
+}: {
+  title: string;
+  status: "good" | "warning" | "danger" | "neutral";
+  value: ReactNode;
+  detail?: ReactNode;
+  action?: ReactNode;
+}) {
+  const tone: BadgeTone = status === "good" ? "success" : status === "warning" ? "warning" : status === "danger" ? "danger" : "neutral";
+  const dotColor = `var(--${tone === "neutral" ? "ink-faint" : tone + "-500"})`;
+  return (
+    <div className="audit-status-card">
+      <div className="audit-status-card__head">
+        <div className="audit-status-card__label">
+          <span
+            className="audit-status-card__dot"
+            style={{
+              background: dotColor,
+              boxShadow: `0 0 0 2px color-mix(in oklch, ${dotColor} 25%, transparent)`,
+            }}
+          />
+          {title}
+        </div>
+        {action}
+      </div>
+      <div className="audit-status-card__value">{value}</div>
+      {detail && <div className="audit-status-card__detail">{detail}</div>}
     </div>
   );
 }
@@ -275,23 +269,14 @@ export function ProgressBar({
   tone?: "accent" | "success";
 }) {
   const pct = max > 0 ? Math.min(100, (current / max) * 100) : 0;
-  const color = tone === "success" ? "var(--success-500)" : "var(--accent-500)";
+  const active = pct > 0 && pct < 100;
   return (
-    <div
-      style={{
-        height: "6px",
-        background: "var(--surface-3)",
-        borderRadius: "999px",
-        overflow: "hidden",
-      }}
-    >
+    <div className="audit-progress">
       <div
+        className={`audit-progress__fill audit-progress__fill--${tone}`}
         style={{
-          height: "100%",
-          width: `${pct}%`,
-          background: color,
-          borderRadius: "999px",
-          transition: "width 0.3s ease",
+          transform: `scaleX(${Math.max(pct, 0.001) / 100})`,
+          animation: active ? "audit-progress-pulse 2s ease-in-out infinite" : undefined,
         }}
       />
     </div>
@@ -312,36 +297,31 @@ export function EmptyState({
   action?: ReactNode;
 }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        textAlign: "center",
-        gap: "var(--space-3)",
-        padding: "var(--space-8) var(--space-4)",
-      }}
-    >
-      {icon && (
-        <div style={{ fontSize: "2rem", opacity: 0.5, lineHeight: 1 }}>{icon}</div>
-      )}
-      <div style={{ fontSize: "var(--font-size-md)", fontWeight: 600, color: "var(--ink)" }}>
-        {title}
-      </div>
-      {body && (
-        <div
-          style={{
-            fontSize: "var(--font-size-sm)",
-            color: "var(--ink-muted)",
-            maxWidth: "420px",
-            lineHeight: "var(--line-height-normal)",
-          }}
-        >
-          {body}
-        </div>
-      )}
+    <div className="audit-empty">
+      {icon && <div style={{ fontSize: "2rem", opacity: 0.5, lineHeight: 1 }}>{icon}</div>}
+      <div className="audit-empty__title">{title}</div>
+      {body && <div className="audit-empty__body">{body}</div>}
       {action}
+    </div>
+  );
+}
+
+// ─── InlineEmpty ────────────────────────────────────────────────────────
+
+export function InlineEmpty({
+  icon,
+  title,
+  body,
+}: {
+  icon?: ReactNode;
+  title: string;
+  body?: ReactNode;
+}) {
+  return (
+    <div className="audit-inline-empty">
+      {icon && <div style={{ fontSize: "1.5rem", opacity: 0.5, lineHeight: 1, marginBottom: "var(--space-1)" }}>{icon}</div>}
+      <div className="audit-inline-empty__title">{title}</div>
+      {body && <div className="audit-inline-empty__body">{body}</div>}
     </div>
   );
 }
@@ -358,33 +338,9 @@ export function KeyValue({
   mono?: boolean;
 }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: "2px",
-        padding: "var(--space-2) 0",
-        borderBottom: "1px solid var(--border)",
-      }}
-    >
-      <span
-        style={{
-          fontSize: "var(--font-size-xs)",
-          color: "var(--ink-faint)",
-          textTransform: "uppercase",
-          letterSpacing: "0.04em",
-        }}
-      >
-        {label}
-      </span>
-      <span
-        style={{
-          fontSize: "var(--font-size-sm)",
-          fontFamily: mono ? "var(--font-mono)" : "var(--font-sans)",
-          color: "var(--ink)",
-          wordBreak: "break-all",
-        }}
-      >
+    <div className="audit-kv">
+      <span className="audit-kv__label">{label}</span>
+      <span className={mono ? "audit-kv__value audit-kv__value--mono" : "audit-kv__value"}>
         {value}
       </span>
     </div>
@@ -400,40 +356,193 @@ export function Alert({
   tone?: "info" | "success" | "warning" | "danger";
   children: ReactNode;
 }) {
-  const toneStyle: Record<string, CSSProperties> = {
-    info: { background: "color-mix(in oklch, var(--info-500) 10%, transparent)", color: "var(--info-500)" },
-    success: { background: "color-mix(in oklch, var(--success-500) 10%, transparent)", color: "var(--success-500)" },
-    warning: { background: "color-mix(in oklch, var(--warning-500) 12%, transparent)", color: "var(--warning-500)" },
-    danger: { background: "color-mix(in oklch, var(--danger-500) 10%, transparent)", color: "var(--danger-500)" },
-  };
+  const icon = tone === "success" ? "✓" : tone === "warning" ? "▲" : tone === "danger" ? "!" : "i";
   return (
-    <div
-      style={{
-        display: "flex",
-        gap: "var(--space-2)",
-        padding: "var(--space-2) var(--space-3)",
-        borderRadius: "var(--radius-md)",
-        fontSize: "var(--font-size-sm)",
-        lineHeight: "var(--line-height-normal)",
-        ...toneStyle[tone],
-      }}
-    >
-      {children}
+    <div className={`audit-alert audit-alert--${tone}`}>
+      <span className="audit-alert__icon">{icon}</span>
+      <div className="audit-alert__body">{children}</div>
     </div>
   );
 }
 
-// ─── Spinner keyframes (injected once) ──────────────────────────────────
+// ─── Modal ───────────────────────────────────────────────────────────────
+//
+// Reuses the app-wide .modal / .modal-backdrop classes from styles.css,
+// so audit modals share the same backdrop blur, scale-in animation, and
+// z-index scale as the rest of the app.
 
-let spinInjected = false;
+export function Modal({
+  open,
+  onClose,
+  title,
+  subtitle,
+  children,
+  footer,
+  maxWidth = 640,
+}: {
+  open: boolean;
+  onClose: () => void;
+  title: string;
+  subtitle?: string;
+  children: ReactNode;
+  footer?: ReactNode;
+  maxWidth?: number;
+}) {
+  if (!open) return null;
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        className="modal"
+        style={{ width: `min(${maxWidth}px, 92vw)` }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="modal__header">
+          <div className="modal__heading">
+            <h2 className="modal__title">{title}</h2>
+            {subtitle && <div className="modal__subtitle">{subtitle}</div>}
+          </div>
+          <button className="modal__close" onClick={onClose} aria-label="Close">
+            <IconClose />
+          </button>
+        </div>
+        <div className="modal__body">{children}</div>
+        {footer && <div className="modal__footer">{footer}</div>}
+      </div>
+    </div>
+  );
+}
+
+// ─── LogsModal ───────────────────────────────────────────────────────────
+//
+// A purpose-built modal for viewing Docker / service logs.
+// Parses each line for common log-level keywords and color-codes them,
+// provides a search filter, and shows a live count of matching lines.
+
+export function LogsModal({
+  open,
+  onClose,
+  logs,
+  loading = false,
+  title = "Stack Logs",
+}: {
+  open: boolean;
+  onClose: () => void;
+  logs: string;
+  loading?: boolean;
+  title?: string;
+}) {
+  const [query, setQuery] = useState("");
+
+  const lines = useMemo(() => (logs ? logs.split("\n") : []), [logs]);
+
+  const filtered = useMemo(() => {
+    if (!query.trim()) return lines.map((line, i) => ({ line, index: i }));
+    const q = query.toLowerCase();
+    return lines
+      .map((line, i) => ({ line, index: i }))
+      .filter((entry) => entry.line.toLowerCase().includes(q));
+  }, [lines, query]);
+
+  const errorCount = useMemo(
+    () => lines.filter((l) => logLevel(l) === "error").length,
+    [lines],
+  );
+  const warnCount = useMemo(
+    () => lines.filter((l) => logLevel(l) === "warn").length,
+    [lines],
+  );
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={title}
+      subtitle={loading ? "Loading…" : `${lines.length} lines${errorCount > 0 ? ` · ${errorCount} errors` : ""}${warnCount > 0 ? ` · ${warnCount} warnings` : ""}`}
+      maxWidth={780}
+      footer={
+        <>
+          <div className="modal__footer-hint">
+            {filtered.length !== lines.length
+              ? `${filtered.length} of ${lines.length} lines match`
+              : "Most recent 120 lines"}
+          </div>
+          <Button variant="secondary" onClick={onClose}>Close</Button>
+        </>
+      }
+    >
+      {/* Search filter */}
+      <div className="audit-logs-search">
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 16 16"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={1.5}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{ color: "var(--ink-faint)", flexShrink: 0 }}
+        >
+          <circle cx="7" cy="7" r="4.5" />
+          <path d="M10.5 10.5L14 14" />
+        </svg>
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Filter logs…"
+          className="audit-logs-search__input"
+        />
+        {query && (
+          <button
+            className="audit-logs-search__clear"
+            onClick={() => setQuery("")}
+            aria-label="Clear filter"
+          >
+            <IconClose size={12} />
+          </button>
+        )}
+      </div>
+
+      {/* Log viewport */}
+      <div className="audit-logs-viewport">
+        {loading ? (
+          <div className="audit-logs-loading">
+            <Spinner size={18} />
+            <span>Fetching logs…</span>
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="audit-logs-empty">
+            {query ? "No lines match your filter." : "No logs available."}
+          </div>
+        ) : (
+          filtered.map(({ line, index }) => {
+            const level = logLevel(line);
+            return (
+              <div key={index} className={`audit-log-line audit-log-line--${level}`}>
+                <span className="audit-log-line__num">{index + 1}</span>
+                <span className="audit-log-line__text">{line || " "}</span>
+              </div>
+            );
+          })
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+function logLevel(line: string): "error" | "warn" | "info" | "default" {
+  const l = line.toLowerCase();
+  if (/\b(error|err|fatal|panic|traceback|exception)\b/.test(l)) return "error";
+  if (/\b(warn|warning|deprecat)\b/.test(l)) return "warn";
+  if (/\b(info|listen|ready|started|connected)\b/.test(l)) return "info";
+  return "default";
+}
+
+/**
+ * Keyframes are now defined in audit.css. This function is kept as a no-op
+ * for backward compatibility with components that call it during init.
+ */
 export function injectAuditKeyframes() {
-  if (spinInjected) return;
-  spinInjected = true;
-  const style = document.createElement("style");
-  style.textContent = `
-    @keyframes audit-spin { to { transform: rotate(360deg); } }
-    @keyframes audit-fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
-    @keyframes audit-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
-  `;
-  document.head.appendChild(style);
+  // no-op: keyframes are in audit.css
 }

@@ -6,6 +6,10 @@ publish = false
 rust-version = "1.89.0"
 description = "Soroban commitment contract for ZK-AuditDB: Merkle root log + Groth16 verification"
 
+# Keep this crate out of the top-level workspace so the Soroban SDK and the
+# workspace dependencies (src-tauri/audit-service/zk-audit) don't conflict.
+[workspace]
+
 [lib]
 crate-type = ["cdylib", "lib"]
 doctest = false

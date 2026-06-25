@@ -2,7 +2,6 @@ services:
   # ─── Primary (operator) ───────────────────────────────────────────────
   mongo1:
     image: mongo:7
-    container_name: mongo-rs-1
     ports:
       - "27017:27017"
     command: ["--replSet", "rs0", "--bind_ip_all"]
@@ -12,7 +11,6 @@ services:
   # ─── Secondary 1 (operator) ──────────────────────────────────────────
   mongo2:
     image: mongo:7
-    container_name: mongo-rs-2
     ports:
       - "27018:27017"
     command: ["--replSet", "rs0", "--bind_ip_all"]
@@ -25,7 +23,6 @@ services:
   # oplog hash from its own replicated copy.
   mongo3:
     image: mongo:7
-    container_name: mongo-rs-3
     ports:
       - "27019:27017"
     command: ["--replSet", "rs0", "--bind_ip_all"]
@@ -36,7 +33,6 @@ services:
   # Runs after all 3 members are up, initiates the replica set.
   rs-init:
     image: mongo:7
-    container_name: mongo-rs-init
     depends_on:
       - mongo1
       - mongo2
@@ -50,7 +46,6 @@ services:
   # Runs after the replica set is initiated and a primary is elected.
   seeder:
     image: mongo:7
-    container_name: mongo-seeder
     depends_on:
       rs-init:
         condition: service_completed_successfully
