@@ -17,6 +17,7 @@ import {
   InlineEmpty,
   EmptyState,
   TxHashLink,
+  ContractLink,
   LogsModal,
 } from "./AuditUi";
 import type { ProofResult } from "../ipc/commands";
@@ -398,6 +399,11 @@ function DevLiveView() {
   const [proofResult, setProofResult] = useState<ProofResult | null>(null);
   const [proofError, setProofError] = useState<string | null>(null);
   const [provenIndex, setProvenIndex] = useState<number | null>(null);
+  const [showProofDetails, setShowProofDetails] = useState(false);
+  const [copyProofHint, setCopyProofHint] = useState(false);
+  const [verifyTxHash, setVerifyTxHash] = useState<string | null>(null);
+  const [verifyBusy, setVerifyBusy] = useState(false);
+  const [verifyError, setVerifyError] = useState<string | null>(null);
   const [closeBusy, setCloseBusy] = useState(false);
   const [commitBusy, setCommitBusy] = useState(false);
   const [commitStep, setCommitStep] = useState("");
@@ -573,6 +579,10 @@ function DevLiveView() {
     setProofResult(null);
     setProofError(null);
     setProvenIndex(null);
+    setShowProofDetails(false);
+    setCopyProofHint(false);
+    setVerifyTxHash(null);
+    setVerifyError(null);
     try {
       const res = await commands.auditDevProxyPost(
         PUBLISHER_PORT,
@@ -585,6 +595,32 @@ function DevLiveView() {
       setProofError(formatError(e));
     } finally {
       setProofBusy(null);
+    }
+  };
+
+  const handleVerifyOnchain = async () => {
+    if (!proofResult) return;
+    setVerifyBusy(true);
+    setVerifyError(null);
+    setVerifyTxHash(null);
+    try {
+      const res = await commands.auditDevProxyPost(PUBLISHER_PORT, "verify-onchain", {
+        rootHex: proofResult.rootHex,
+        proofA: proofResult.proof.a,
+        proofB: proofResult.proof.b,
+        proofC: proofResult.proof.c,
+        vkAlpha: proofResult.vk.alpha,
+        vkBeta: proofResult.vk.beta,
+        vkGamma: proofResult.vk.gamma,
+        vkDelta: proofResult.vk.delta,
+        vkIc: proofResult.vk.ic,
+      });
+      const result = res as { txHash: string; verified: boolean };
+      setVerifyTxHash(result.txHash);
+    } catch (e) {
+      setVerifyError(formatError(e));
+    } finally {
+      setVerifyBusy(false);
     }
   };
 
@@ -808,14 +844,14 @@ function DevLiveView() {
       {proofResult && (
         <Card>
           <CardHeader
-            title="ZK Inclusion Proof"
-            subtitle={`Leaf #${proofResult.leafIndex} · root ${shortHash(proofResult.rootHex)}`}
+            title="Inclusion Proof"
+            subtitle={`Leaf #${proofResult.leafIndex} · batch root ${shortHash(proofResult.rootHex)}`}
             actions={
               <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
                 <Badge tone="success" dot>Verified</Badge>
                 <button
                   className="audit-proof-dismiss"
-                  onClick={() => { setProofResult(null); setProvenIndex(null); }}
+                  onClick={() => { setProofResult(null); setProvenIndex(null); setShowProofDetails(false); }}
                   aria-label="Close proof"
                 >
                   <IconClose size={14} />
@@ -823,37 +859,166 @@ function DevLiveView() {
               </div>
             }
           />
-          <div className="audit-proof-fields">
-            <div className="audit-proof-field">
-              <span className="audit-proof-field__label">Root</span>
-              <span className="audit-proof-field__value" title={proofResult.rootHex}>
-                {proofResult.rootHex}
-              </span>
+          <div className="audit-proof-card">
+            <div className="audit-proof-card__summary">
+              <div className="audit-proof-card__check">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" />
+                  <path d="M8 12l3 3 5-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </div>
+              <div className="audit-proof-card__summary-text">
+                <div className="audit-proof-card__summary-title">
+                  This change is provably included in the audit batch.
+                </div>
+                <p className="audit-proof-card__summary-body">
+                  A zero-knowledge proof confirms event #{proofResult.leafIndex} is part of the
+                  batch rooted at {shortHash(proofResult.rootHex)}. The same root is anchored on the
+                  Stellar blockchain, so anyone can verify it independently.
+                </p>
+              </div>
             </div>
-            <div className="audit-proof-field">
-              <span className="audit-proof-field__label">Proof A</span>
-              <span className="audit-proof-field__value" title={proofResult.proof.a}>
-                {proofResult.proof.a}
-              </span>
+
+            <div className="audit-proof-card__actions">
+              {verifyTxHash ? (
+                <a
+                  className="audit-proof-card__primary-link"
+                  href={`https://stellar.expert/explorer/${proofResult.network === "mainnet" ? "public" : proofResult.network}/tx/${verifyTxHash}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="View the on-chain verification transaction in Stellar Expert"
+                >
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                    <path d="M8 2h6v6M13 2L8 7M10 6v7a1 1 0 01-1 1H3a1 1 0 01-1-1V5a1 1 0 011-1h6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                  View verification tx
+                </a>
+              ) : (
+                <button
+                  className="audit-proof-card__primary-link"
+                  onClick={handleVerifyOnchain}
+                  disabled={verifyBusy || !proofResult.txHash}
+                  title={
+                    proofResult.txHash
+                      ? "Submit the proof to the Soroban contract for on-chain verification"
+                      : "Batch root must be committed on-chain first"
+                  }
+                >
+                  {verifyBusy ? (
+                    <>
+                      <Spinner size={14} />
+                      Verifying on-chain…
+                    </>
+                  ) : (
+                    <>
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                        <path d="M8 2h6v6M13 2L8 7M10 6v7a1 1 0 01-1 1H3a1 1 0 01-1-1V5a1 1 0 011-1h6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                      Verify on-chain
+                    </>
+                  )}
+                </button>
+              )}
+              {verifyError && (
+                <span className="audit-proof-card__error">{verifyError}</span>
+              )}
+              <button
+                className="audit-proof-card__secondary-btn"
+                onClick={() => {
+                  const payload = {
+                    rootHex: proofResult.rootHex,
+                    leafIndex: proofResult.leafIndex,
+                    proof: proofResult.proof,
+                    pubSignals: proofResult.pubSignals,
+                    network: proofResult.network,
+                    contractId: proofResult.contractId,
+                    txHash: proofResult.txHash,
+                  };
+                  navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+                  setCopyProofHint(true);
+                  setTimeout(() => setCopyProofHint(false), 1500);
+                }}
+                aria-label="Copy proof data to clipboard"
+              >
+                {copyProofHint ? "Copied" : "Copy proof"}
+              </button>
+              <button
+                className="audit-proof-card__secondary-btn"
+                onClick={() => setShowProofDetails((s) => !s)}
+                aria-expanded={showProofDetails}
+                aria-controls="audit-proof-advanced"
+              >
+                {showProofDetails ? "Hide details" : "Show cryptographic details"}
+              </button>
             </div>
-            <div className="audit-proof-field">
-              <span className="audit-proof-field__label">Proof B</span>
-              <span className="audit-proof-field__value" title={proofResult.proof.b}>
-                {proofResult.proof.b}
-              </span>
-            </div>
-            <div className="audit-proof-field">
-              <span className="audit-proof-field__label">Proof C</span>
-              <span className="audit-proof-field__value" title={proofResult.proof.c}>
-                {proofResult.proof.c}
-              </span>
-            </div>
-            <div className="audit-proof-field">
-              <span className="audit-proof-field__label">Public signals</span>
-              <span className="audit-proof-field__value" title={proofResult.pubSignals.join(", ")}>
-                {proofResult.pubSignals.join(", ")}
-              </span>
-            </div>
+
+            {showProofDetails && (
+              <div id="audit-proof-advanced" className="audit-proof-card__advanced">
+                <div className="audit-proof-card__advanced-header">
+                  <span>Cryptographic proof</span>
+                  <span className="audit-proof-card__advanced-hint">Anyone with this data can verify the inclusion.</span>
+                </div>
+                <div className="audit-proof-fields">
+                  <div className="audit-proof-field">
+                    <span className="audit-proof-field__label">Batch root</span>
+                    <span className="audit-proof-field__value" title={proofResult.rootHex}>
+                      {proofResult.rootHex}
+                    </span>
+                  </div>
+                  <div className="audit-proof-field">
+                    <span className="audit-proof-field__label">Proof A</span>
+                    <span className="audit-proof-field__value" title={proofResult.proof.a}>
+                      {proofResult.proof.a}
+                    </span>
+                  </div>
+                  <div className="audit-proof-field">
+                    <span className="audit-proof-field__label">Proof B</span>
+                    <span className="audit-proof-field__value" title={proofResult.proof.b}>
+                      {proofResult.proof.b}
+                    </span>
+                  </div>
+                  <div className="audit-proof-field">
+                    <span className="audit-proof-field__label">Proof C</span>
+                    <span className="audit-proof-field__value" title={proofResult.proof.c}>
+                      {proofResult.proof.c}
+                    </span>
+                  </div>
+                  <div className="audit-proof-field">
+                    <span className="audit-proof-field__label">Public signal</span>
+                    <span className="audit-proof-field__value" title={proofResult.pubSignals.join(", ")}>
+                      {proofResult.pubSignals.join(", ")}
+                    </span>
+                  </div>
+                  <div className="audit-proof-field">
+                    <span className="audit-proof-field__label">Root commitment tx</span>
+                    <span className="audit-proof-field__value">
+                      {proofResult.txHash ? (
+                        <TxHashLink txHash={proofResult.txHash} network={proofResult.network} />
+                      ) : (
+                        <span style={{ color: "var(--ink-faint)" }}>Not yet committed</span>
+                      )}
+                    </span>
+                  </div>
+                  {verifyTxHash && (
+                    <div className="audit-proof-field">
+                      <span className="audit-proof-field__label">Verification tx</span>
+                      <span className="audit-proof-field__value">
+                        <TxHashLink txHash={verifyTxHash} network={proofResult.network} />
+                      </span>
+                    </div>
+                  )}
+                  <div className="audit-proof-field">
+                    <span className="audit-proof-field__label">Contract</span>
+                    <span className="audit-proof-field__value">
+                      <ContractLink
+                        contractId={proofResult.contractId}
+                        network={proofResult.network}
+                      />
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </Card>
       )}

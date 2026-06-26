@@ -12,7 +12,9 @@
 use serde::Serialize;
 use tauri::State;
 
-use crate::audit::stellar::{CommitResult, OnChainRoot};
+use crate::audit::audit_mode::{load_mode_config, AuditNetwork};
+use crate::audit::dev_setup::ChainConfig;
+use crate::audit::stellar::{CommitResult, OnChainRoot, VerifyInclusionResult};
 use crate::audit::stellar_native;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -99,13 +101,92 @@ pub async fn audit_generate_proof(
     let root_bytes = root_bigint.to_bytes_be();
     let root_hex = hex::encode(&root_bytes);
 
+    let mode_config = load_mode_config(&app)?;
+    let (network, contract_id) = match mode_config.network {
+        AuditNetwork::Testnet => ("testnet".to_string(), ChainConfig::testnet().contract_id),
+        AuditNetwork::Mainnet => ("mainnet".to_string(), mode_config.mainnet_contract_id),
+    };
+
+    // Find the epoch that contains this leaf and get its on-chain tx hash.
+    let tx_hash = state
+        .epoch_manager
+        .list_epochs()
+        .into_iter()
+        .find(|e| {
+            e.start_index <= index
+                && e.end_index.map_or(false, |end| end >= index)
+        })
+        .and_then(|e| e.tx_hash)
+        .unwrap_or_default();
+
     Ok(ProofResult {
         root_hex,
         leaf_index: index,
         proof: soroban_args.proof,
         vk: soroban_args.vk,
         pub_signals: soroban_args.pub_signals,
+        network,
+        contract_id,
+        tx_hash,
     })
+}
+
+/// Submit a Groth16 inclusion proof to the Soroban contract for on-chain
+/// verification. Returns the transaction hash and the boolean result.
+#[tauri::command]
+pub async fn audit_verify_proof_onchain(
+    app: tauri::AppHandle,
+    root_hex: String,
+    proof_a: String,
+    proof_b: String,
+    proof_c: String,
+    vk_alpha: String,
+    vk_beta: String,
+    vk_gamma: String,
+    vk_delta: String,
+    vk_ic: Vec<String>,
+) -> AppResult<VerifyInclusionResult> {
+    use crate::audit::audit_mode::load_production_keypair;
+
+    let mode_config = load_mode_config(&app)?;
+    let (network, contract_id) = match mode_config.network {
+        AuditNetwork::Testnet => ("testnet".to_string(), ChainConfig::testnet().contract_id),
+        AuditNetwork::Mainnet => ("mainnet".to_string(), mode_config.mainnet_contract_id),
+    };
+
+    let chain = match mode_config.network {
+        AuditNetwork::Testnet => ChainConfig::testnet(),
+        AuditNetwork::Mainnet => ChainConfig {
+            contract_id,
+            rpc_url: mode_config.mainnet_rpc_url,
+            horizon_url: "https://horizon.stellar.org".to_string(),
+            passphrase: stellar_native::MAINNET_PASSPHRASE.to_string(),
+            network,
+        },
+    };
+
+    let kp = load_production_keypair()?.ok_or_else(|| {
+        AppError::Validation("no production keypair found — save it in Audit Settings".to_string())
+    })?;
+
+    stellar_native::verify_inclusion_native(
+        &root_hex,
+        &proof_a,
+        &proof_b,
+        &proof_c,
+        &vk_alpha,
+        &vk_beta,
+        &vk_gamma,
+        &vk_delta,
+        &vk_ic,
+        &kp,
+        &chain.rpc_url,
+        &chain.horizon_url,
+        &chain.contract_id,
+        &chain.passphrase,
+    )
+    .await
+    .map_err(AppError::from)
 }
 
 /// Resolve circuit artifact paths, falling back to bundled resources.
@@ -174,6 +255,9 @@ pub struct ProofResult {
     pub proof: zk_audit::serialize::SorobanProof,
     pub vk: zk_audit::serialize::SorobanVerifyingKey,
     pub pub_signals: Vec<String>,
+    pub network: String,
+    pub contract_id: String,
+    pub tx_hash: String,
 }
 
 /// Manually record an audit event (for testing or manual logging).
@@ -1134,11 +1218,17 @@ mod tests {
                 ic: vec!["ic".to_string()],
             },
             pub_signals: vec!["sig".to_string()],
+            network: "testnet".to_string(),
+            contract_id: "C123".to_string(),
+            tx_hash: "txabc".to_string(),
         };
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("\"rootHex\":\"root\""), "rootHex must be camelCase: {json}");
         assert!(json.contains("\"leafIndex\":42"), "leafIndex must be camelCase: {json}");
         assert!(json.contains("\"pubSignals\":[\"sig\"]"), "pubSignals must be camelCase: {json}");
+        assert!(json.contains("\"network\":\"testnet\""), "network must be camelCase: {json}");
+        assert!(json.contains("\"contractId\":\"C123\""), "contractId must be camelCase: {json}");
+        assert!(json.contains("\"txHash\":\"txabc\""), "txHash must be camelCase: {json}");
     }
 
     #[test]

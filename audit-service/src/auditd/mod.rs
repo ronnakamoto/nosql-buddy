@@ -283,7 +283,8 @@ pub fn build_router(state: Arc<DaemonState>) -> axum::Router {
         .route("/status", get(get_status))
         .route("/events", get(list_events))
         .route("/root", get(get_root))
-        .route("/proof/:index", post(generate_proof));
+        .route("/proof/:index", post(generate_proof))
+        .route("/verify-onchain", post(verify_onchain));
 
     match state.mode {
         DaemonMode::Publish => common
@@ -845,12 +846,88 @@ async fn generate_proof(
     let root_bigint = root_for_hex.into_bigint();
     let root_hex = hex::encode(&root_bigint.to_bytes_be());
 
+    // Find the epoch that contains this leaf and get its on-chain tx hash.
+    let tx_hash = state
+        .epoch_manager
+        .list_epochs()
+        .into_iter()
+        .find(|e| {
+            e.start_index <= index
+                && e.end_index.map_or(false, |end| end >= index)
+        })
+        .and_then(|e| e.tx_hash)
+        .unwrap_or_default();
+
     Ok(Json(ProofResponse {
         root_hex,
         leaf_index: index,
         proof: soroban_args.proof,
         vk: soroban_args.vk,
         pub_signals: soroban_args.pub_signals,
+        network: state.chain.network.clone(),
+        contract_id: state.chain.contract_id.clone(),
+        tx_hash,
+    }))
+}
+
+// ─── On-chain verification ────────────────────────────────────────────
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyOnchainRequest {
+    pub root_hex: String,
+    pub proof_a: String,
+    pub proof_b: String,
+    pub proof_c: String,
+    pub vk_alpha: String,
+    pub vk_beta: String,
+    pub vk_gamma: String,
+    pub vk_delta: String,
+    pub vk_ic: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyOnchainResponse {
+    pub tx_hash: String,
+    pub verified: bool,
+}
+
+/// Submit a Groth16 inclusion proof to the Soroban contract for on-chain
+/// verification. Returns the transaction hash and the boolean result.
+async fn verify_onchain(
+    state: axum::extract::State<Arc<DaemonState>>,
+    axum::Json(req): axum::Json<VerifyOnchainRequest>,
+) -> ApiResult<VerifyOnchainResponse> {
+    let kp = state.signing_keypair.as_ref().ok_or_else(|| {
+        ApiError(AuditError::Validation(
+            "no signing keypair configured — use --secret-key or STELLAR_SECRET_KEY env var".to_string(),
+        ))
+    })?;
+    let chain = &state.chain;
+
+    let result = stellar_native::verify_inclusion_native(
+        &req.root_hex,
+        &req.proof_a,
+        &req.proof_b,
+        &req.proof_c,
+        &req.vk_alpha,
+        &req.vk_beta,
+        &req.vk_gamma,
+        &req.vk_delta,
+        &req.vk_ic,
+        kp,
+        &chain.rpc_url,
+        &chain.horizon_url,
+        &chain.contract_id,
+        &chain.passphrase,
+    )
+    .await
+    .map_err(ApiError::from)?;
+
+    Ok(Json(VerifyOnchainResponse {
+        tx_hash: result.tx_hash,
+        verified: result.verified,
     }))
 }
 
@@ -862,6 +939,9 @@ pub struct ProofResponse {
     pub proof: zk_audit::serialize::SorobanProof,
     pub vk: zk_audit::serialize::SorobanVerifyingKey,
     pub pub_signals: Vec<String>,
+    pub network: String,
+    pub contract_id: String,
+    pub tx_hash: String,
 }
 
 #[cfg(test)]

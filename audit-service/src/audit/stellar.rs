@@ -40,6 +40,16 @@ pub struct CommitResult {
     pub root_hex: String,
 }
 
+/// The result of on-chain proof verification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyInclusionResult {
+    /// The transaction hash on Stellar.
+    pub tx_hash: String,
+    /// Whether the on-chain pairing check returned true.
+    pub verified: bool,
+}
+
 /// The result of querying the current on-chain root.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

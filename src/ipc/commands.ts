@@ -388,6 +388,12 @@ export interface ProofResult {
     ic: string[];
   };
   pubSignals: string[];
+  /** Stellar network the proof is anchored to (testnet or mainnet). */
+  network: "testnet" | "mainnet";
+  /** Soroban contract ID where the batch root is committed. */
+  contractId: string;
+  /** On-chain transaction hash that committed this batch's root. */
+  txHash: string;
 }
 
 /** Result of committing a root to Stellar. */
@@ -564,6 +570,21 @@ const commands = {
       wasmPath,
       provingKeyPath,
     }),
+  auditVerifyProofOnchain: (proof: {
+    rootHex: string;
+    proofA: string;
+    proofB: string;
+    proofC: string;
+    vkAlpha: string;
+    vkBeta: string;
+    vkGamma: string;
+    vkDelta: string;
+    vkIc: string[];
+  }) =>
+    invoke<{ txHash: string; verified: boolean }>(
+      "audit_verify_proof_onchain",
+      proof,
+    ),
   auditRecordEvent: (
     operation: string,
     database: string,

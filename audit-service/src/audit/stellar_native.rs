@@ -26,14 +26,14 @@ use sha2::{Digest, Sha256};
 use stellar_xdr::curr::{
     AccountId, ContractId, DecoratedSignature, Hash, HostFunction, InvokeContractArgs,
     InvokeHostFunctionOp, Limits, Memo, MuxedAccount, Operation, OperationBody,
-    Preconditions, PublicKey, ReadXdr, ScAddress, ScBytes, ScString, ScSymbol, ScVal,
-    SequenceNumber, Signature, SignatureHint, SorobanAuthorizationEntry,
-    SorobanTransactionData, Transaction, TransactionEnvelope, TransactionExt,
-    TransactionSignaturePayload, TransactionSignaturePayloadTaggedTransaction,
+    Preconditions, PublicKey, ReadXdr, ScAddress, ScBytes, ScMap, ScMapEntry, ScString,
+    ScSymbol, ScVal, ScVec, SequenceNumber, Signature, SignatureHint,
+    SorobanAuthorizationEntry, SorobanTransactionData, Transaction, TransactionEnvelope,
+    TransactionExt, TransactionSignaturePayload, TransactionSignaturePayloadTaggedTransaction,
     TransactionV1Envelope, Uint256, VecM, WriteXdr,
 };
 
-use crate::audit::stellar::{CommitResult, OnChainOplogCommitment, OnChainRoot};
+use crate::audit::stellar::{CommitResult, OnChainOplogCommitment, OnChainRoot, VerifyInclusionResult};
 use crate::error::{AuditError, AuditResult};
 
 /// The Stellar testnet network passphrase.
@@ -944,6 +944,240 @@ pub async fn attest_oplog_native(
 
     send_transaction(rpc_url, &signed_envelope).await?;
     Ok(())
+}
+
+// ─── High-level: verify_inclusion ─────────────────────────────────────
+
+/// Verify a Groth16 inclusion proof on-chain using the Soroban contract.
+///
+/// Calls `verify_inclusion(root, proof, vk)` on the contract and returns the
+/// transaction hash plus the boolean verification result.
+pub async fn verify_inclusion_native(
+    root_hex: &str,
+    proof_a_hex: &str,
+    proof_b_hex: &str,
+    proof_c_hex: &str,
+    vk_alpha_hex: &str,
+    vk_beta_hex: &str,
+    vk_gamma_hex: &str,
+    vk_delta_hex: &str,
+    vk_ic_hex: &[String],
+    keypair: &StellarKeypair,
+    rpc_url: &str,
+    horizon_url: &str,
+    contract_id: &str,
+    network_passphrase: &str,
+) -> AuditResult<VerifyInclusionResult> {
+    // 1. Get account sequence number from Horizon.
+    let account_id = keypair.account_id();
+    let sequence = get_account_sequence(horizon_url, &account_id).await?;
+
+    // 2. Build ScVal args: root (Bytes), proof (Map), vk (Map).
+    let root_bytes = hex::decode(root_hex)
+        .map_err(|e| AuditError::Validation(format!("invalid root hex: {e}")))?;
+    let root_scval = ScVal::Bytes(ScBytes(
+        root_bytes
+            .clone()
+            .try_into()
+            .map_err(|e: stellar_xdr::curr::Error| {
+                AuditError::Validation(format!("invalid root bytes: {e}"))
+            })?,
+    ));
+
+    let proof_scval = build_proof_scval(proof_a_hex, proof_b_hex, proof_c_hex)?;
+    let vk_scval = build_verifying_key_scval(
+        vk_alpha_hex,
+        vk_beta_hex,
+        vk_gamma_hex,
+        vk_delta_hex,
+        vk_ic_hex,
+    )?;
+
+    let args = vec![root_scval, proof_scval, vk_scval];
+
+    // 3. Build the transaction.
+    let tx = build_invoke_transaction(
+        &keypair.public_bytes(),
+        sequence,
+        contract_id,
+        "verify_inclusion",
+        args,
+        100,
+    )?;
+
+    // 4. Simulate the transaction.
+    let sim_result = simulate_transaction(rpc_url, &tx).await?;
+
+    // 5. Attach the simulation's SorobanTransactionData.
+    let soroban_data_xdr = base64::engine::general_purpose::STANDARD
+        .decode(&sim_result.transaction_data())
+        .map_err(|e| AuditError::Validation(format!("base64 decode transactionData: {e}")))?;
+    let soroban_data = SorobanTransactionData::from_xdr(&soroban_data_xdr, Limits::none())
+        .map_err(|e| AuditError::Validation(format!("decode SorobanTransactionData: {e}")))?;
+
+    let mut signed_tx = tx.clone();
+    signed_tx.ext = TransactionExt::V1(soroban_data);
+    signed_tx.fee = sim_result.max_fee_stroops();
+
+    // 6. Attach auth entries if the simulation returned any.
+    if !sim_result.results.is_empty() && !sim_result.results[0].auth.is_empty() {
+        let auth_entries: Result<Vec<SorobanAuthorizationEntry>, AuditError> = sim_result.results[0]
+            .auth
+            .iter()
+            .map(|auth_b64| {
+                let auth_xdr = base64::engine::general_purpose::STANDARD
+                    .decode(auth_b64)
+                    .map_err(|e| AuditError::Validation(format!("base64 decode auth: {e}")))?;
+                SorobanAuthorizationEntry::from_xdr(&auth_xdr, Limits::none())
+                    .map_err(|e| AuditError::Validation(format!("decode auth: {e}")))
+            })
+            .collect();
+
+        let auth_entries = auth_entries?;
+        let auth_vecm: VecM<SorobanAuthorizationEntry> =
+            auth_entries.try_into().map_err(|e: stellar_xdr::curr::Error| {
+                AuditError::Validation(format!("too many auth entries: {e}"))
+            })?;
+
+        let mut ops = signed_tx.operations.to_vec();
+        if let OperationBody::InvokeHostFunction(ref mut invoke_op) = ops[0].body {
+            invoke_op.auth = auth_vecm;
+        }
+        signed_tx.operations = ops
+            .try_into()
+            .map_err(|e: stellar_xdr::curr::Error| {
+                AuditError::Validation(format!("too many operations: {e}"))
+            })?;
+    }
+
+    // 7. Sign the transaction.
+    let decorated_sig =
+        sign_transaction(&signed_tx, &keypair.signing_key, network_passphrase)?;
+
+    let signatures: VecM<DecoratedSignature, 20> =
+        vec![decorated_sig]
+            .try_into()
+            .map_err(|e: stellar_xdr::curr::Error| {
+                AuditError::Validation(format!("too many signatures: {e}"))
+            })?;
+
+    let signed_envelope = TransactionEnvelope::Tx(TransactionV1Envelope {
+        tx: signed_tx,
+        signatures,
+    });
+
+    // 8. Submit the transaction.
+    let tx_hash = send_transaction(rpc_url, &signed_envelope).await?;
+
+    // 9. Parse the return value to get the verification result.
+    //    Soroban encodes Result<bool, CommitmentError> as:
+    //      Ok(v)  -> ScVal::Vec(Some(ScVec([ScVal::Bool(v)])))
+    //      Err(e) -> ScVal::Vec(Some(ScVec([ScVal::Error(...)])))
+    let mut verified = false;
+    if !sim_result.results.is_empty() {
+        let return_val_xdr = base64::engine::general_purpose::STANDARD
+            .decode(&sim_result.results[0].xdr)
+            .map_err(|e| AuditError::Validation(format!("base64 decode return value: {e}")))?;
+        let return_val = ScVal::from_xdr(&return_val_xdr, Limits::none())
+            .map_err(|e| AuditError::Validation(format!("decode return value: {e}")))?;
+        if let ScVal::Vec(Some(vec)) = return_val {
+            if let Some(ScVal::Bool(b)) = vec.first() {
+                verified = *b;
+            }
+        }
+    }
+
+    Ok(VerifyInclusionResult { tx_hash, verified })
+}
+
+/// Build a Soroban symbol ScVal from a string.
+fn sc_symbol(s: &str) -> AuditResult<ScVal> {
+    Ok(ScVal::Symbol(ScSymbol(
+        s.as_bytes().to_vec().try_into().map_err(|e: stellar_xdr::curr::Error| {
+            AuditError::Validation(format!("invalid symbol '{s}': {e}"))
+        })?,
+    )))
+}
+
+/// Build a sorted `ScMap` from key-value pairs. Soroban requires map entries
+/// to be sorted lexicographically by key.
+fn build_sorted_scmap(pairs: Vec<(ScVal, ScVal)>) -> AuditResult<ScVal> {
+    let mut entries: Vec<ScMapEntry> = pairs
+        .into_iter()
+        .map(|(key, val)| ScMapEntry { key, val })
+        .collect();
+
+    // Sort by key. ScVal::Symbol comparison is lexicographic on the inner bytes.
+    entries.sort_by(|a, b| {
+        let a_key = symbol_bytes(&a.key);
+        let b_key = symbol_bytes(&b.key);
+        a_key.cmp(b_key)
+    });
+
+    let map = ScMap(entries.try_into().map_err(|e: stellar_xdr::curr::Error| {
+        AuditError::Validation(format!("too many map entries: {e}"))
+    })?);
+
+    Ok(ScVal::Map(Some(map)))
+}
+
+/// Extract the byte slice from an ScVal::Symbol for sorting.
+fn symbol_bytes(val: &ScVal) -> &[u8] {
+    match val {
+        ScVal::Symbol(s) => s.as_ref(),
+        _ => &[],
+    }
+}
+
+/// Decode hex to ScBytes.
+fn hex_to_scbytes(label: &str, hex_str: &str) -> AuditResult<ScBytes> {
+    let bytes = hex::decode(hex_str)
+        .map_err(|e| AuditError::Validation(format!("invalid {label} hex: {e}")))?;
+    bytes
+        .try_into()
+        .map_err(|e: stellar_xdr::curr::Error| {
+            AuditError::Validation(format!("invalid {label} bytes: {e}"))
+        })
+        .map(ScBytes)
+}
+
+/// Build a Soroban `Proof` struct as `ScVal::Map` from hex-encoded point bytes.
+fn build_proof_scval(a_hex: &str, b_hex: &str, c_hex: &str) -> AuditResult<ScVal> {
+    build_sorted_scmap(vec![
+        (sc_symbol("a")?, ScVal::Bytes(hex_to_scbytes("proof.a", a_hex)?)),
+        (sc_symbol("b")?, ScVal::Bytes(hex_to_scbytes("proof.b", b_hex)?)),
+        (sc_symbol("c")?, ScVal::Bytes(hex_to_scbytes("proof.c", c_hex)?)),
+    ])
+}
+
+/// Build a Soroban `VerifyingKey` struct as `ScVal::Map` from hex-encoded point bytes.
+fn build_verifying_key_scval(
+    alpha_hex: &str,
+    beta_hex: &str,
+    gamma_hex: &str,
+    delta_hex: &str,
+    ic_hex: &[String],
+) -> AuditResult<ScVal> {
+    let ic_vals: Vec<ScVal> = ic_hex
+        .iter()
+        .map(|h| Ok(ScVal::Bytes(hex_to_scbytes("vk.ic", h)?)))
+        .collect::<AuditResult<Vec<ScVal>>>()?;
+
+    let ic_vec = ScVec(
+        ic_vals
+            .try_into()
+            .map_err(|e: stellar_xdr::curr::Error| {
+                AuditError::Validation(format!("too many ic entries: {e}"))
+            })?,
+    );
+
+    build_sorted_scmap(vec![
+        (sc_symbol("alpha")?, ScVal::Bytes(hex_to_scbytes("vk.alpha", alpha_hex)?)),
+        (sc_symbol("beta")?, ScVal::Bytes(hex_to_scbytes("vk.beta", beta_hex)?)),
+        (sc_symbol("gamma")?, ScVal::Bytes(hex_to_scbytes("vk.gamma", gamma_hex)?)),
+        (sc_symbol("delta")?, ScVal::Bytes(hex_to_scbytes("vk.delta", delta_hex)?)),
+        (sc_symbol("ic")?, ScVal::Vec(Some(ic_vec))),
+    ])
 }
 
 // ─── High-level: get_oplog_commitment (read-only simulation) ──────────

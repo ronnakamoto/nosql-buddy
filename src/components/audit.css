@@ -327,6 +327,151 @@
   color: var(--ink);
 }
 
+.audit-proof-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.audit-proof-card__summary {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: color-mix(in oklch, var(--success-500) 8%, var(--surface));
+  border: 1px solid color-mix(in oklch, var(--success-500) 20%, var(--border));
+  border-radius: var(--radius-md);
+}
+
+.audit-proof-card__check {
+  flex-shrink: 0;
+  color: var(--success-500);
+  margin-top: 1px;
+}
+
+.audit-proof-card__summary-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.audit-proof-card__summary-title {
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--ink);
+  line-height: var(--line-height-tight);
+}
+
+.audit-proof-card__summary-body {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--ink-muted);
+  line-height: var(--line-height-normal);
+  max-width: 70ch;
+}
+
+.audit-proof-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.audit-proof-card__primary-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 7px 14px;
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  text-decoration: none;
+  background: var(--accent-600);
+  color: white;
+  border: 1px solid var(--accent-700);
+  box-shadow: var(--shadow-xs);
+  transition: background 0.12s ease, box-shadow 0.12s ease;
+}
+
+.audit-proof-card__primary-link:hover {
+  background: var(--accent-500);
+  box-shadow: var(--shadow-sm);
+}
+
+.audit-proof-card__pending {
+  font-size: var(--font-size-sm);
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
+.audit-proof-card__error {
+  font-size: var(--font-size-xs);
+  color: var(--danger-500, #dc2626);
+}
+
+button.audit-proof-card__primary-link {
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+button.audit-proof-card__primary-link:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.audit-proof-card__secondary-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 7px 14px;
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  background: var(--surface-2);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.audit-proof-card__secondary-btn:hover {
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+}
+
+.audit-proof-card__advanced {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  animation: audit-fade-in 0.2s ease;
+}
+
+.audit-proof-card__advanced-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--ink);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.audit-proof-card__advanced-hint {
+  font-weight: 400;
+  color: var(--ink-faint);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
 .audit-proof-fields {
   display: flex;
   flex-direction: column;

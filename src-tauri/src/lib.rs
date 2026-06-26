@@ -208,6 +208,7 @@ pub fn run() {
             audit::commands::audit_list_events,
             audit::commands::audit_get_root,
             audit::commands::audit_generate_proof,
+            audit::commands::audit_verify_proof_onchain,
             audit::commands::audit_record_event,
             audit::commands::audit_commit_root,
             audit::commands::audit_get_onchain_root,
