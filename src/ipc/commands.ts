@@ -556,11 +556,13 @@ const commands = {
     index: number,
     r1csPath?: string,
     wasmPath?: string,
+    provingKeyPath?: string,
   ) =>
     invoke<ProofResult>("audit_generate_proof", {
       index,
       r1csPath,
       wasmPath,
+      provingKeyPath,
     }),
   auditRecordEvent: (
     operation: string,

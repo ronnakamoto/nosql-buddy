@@ -6,6 +6,7 @@
 use ark_bn254::Bn254;
 use ark_circom::circom::{CircomCircuit, R1CSFile};
 use ark_groth16::{Groth16, prepare_verifying_key};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 use crate::error::{ZkAuditError, ZkAuditResult};
 use crate::merkle::InclusionProof;
@@ -34,6 +35,9 @@ pub struct AuditProver {
     circuit_template: CircomCircuit<Fr>,
     /// Path to the Circom WASM for witness calculation.
     wasm_path: String,
+    /// Pre-generated proving key (from a Powers of Tau ceremony).
+    /// When present, skips per-proof parameter generation.
+    proving_key: Option<ark_groth16::ProvingKey<Bn254>>,
 }
 
 impl AuditProver {
@@ -48,14 +52,35 @@ impl AuditProver {
         Ok(Self {
             circuit_template,
             wasm_path: wasm_path.to_string(),
+            proving_key: None,
+        })
+    }
+
+    /// Create a new prover with pre-generated proving key (from a ceremony).
+    ///
+    /// The proving key file must be in arkworks `CanonicalSerialize` format,
+    /// as produced by the `zk-audit-ceremony` tool.
+    pub fn with_proving_key(
+        r1cs_path: &str,
+        wasm_path: &str,
+        proving_key_path: &str,
+    ) -> ZkAuditResult<Self> {
+        let circuit_template = load_r1cs(r1cs_path)?;
+        let proving_key = load_proving_key(proving_key_path)?;
+
+        Ok(Self {
+            circuit_template,
+            wasm_path: wasm_path.to_string(),
+            proving_key: Some(proving_key),
         })
     }
 
     /// Generate a Groth16 proof for the given inclusion proof.
     ///
-    /// This performs a mock trusted setup (random parameters) for each proof.
-    /// In production, this should use a real Powers of Tau ceremony via
-    /// `read_zkey`.
+    /// If a pre-generated proving key was loaded via [`with_proving_key`],
+    /// it is used instead of generating fresh parameters on every call.
+    /// This is the realistic Powers of Tau path: the ceremony is run once,
+    /// and the proving key is reused for every proof.
     pub fn prove(&self, proof: &InclusionProof) -> ZkAuditResult<Groth16Proof> {
         // Step 1: Compute the witness via ark-circom's WitnessCalculator (wasmer).
         let witness = self.compute_witness_wasmer(proof)?;
@@ -64,28 +89,47 @@ impl AuditProver {
         let mut circuit = self.circuit_template.clone();
         circuit.witness = Some(witness);
 
-        // Step 3: Generate parameters (mock trusted setup).
         let rng = &mut rand::thread_rng();
-        let params = Groth16::<Bn254>::generate_random_parameters_with_reduction(
-            circuit.clone(),
-            rng,
-        )
-        .map_err(|e| ZkAuditError::ProofGeneration(format!("parameter generation: {}", e)))?;
 
-        // Step 4: Generate the proof.
-        let groth16_proof = Groth16::<Bn254>::create_random_proof_with_reduction(
-            circuit.clone(),
-            &params,
-            rng,
-        )
-        .map_err(|e| ZkAuditError::ProofGeneration(format!("proof creation: {}", e)))?;
+        // Step 3: Obtain Groth16 parameters.
+        let (groth16_proof, vk, public_inputs) = if let Some(pk) = &self.proving_key {
+            // Pre-generated proving key from ceremony — fast path.
+            let proof = Groth16::<Bn254>::create_random_proof_with_reduction(
+                circuit.clone(),
+                pk,
+                rng,
+            )
+            .map_err(|e| ZkAuditError::ProofGeneration(format!("proof creation: {}", e)))?;
 
-        // Step 5: Verify locally.
-        let public_inputs = circuit
-            .get_public_inputs()
-            .ok_or_else(|| ZkAuditError::ProofGeneration("failed to get public inputs".into()))?;
+            let public_inputs = circuit
+                .get_public_inputs()
+                .ok_or_else(|| ZkAuditError::ProofGeneration("failed to get public inputs".into()))?;
 
-        let pvk = prepare_verifying_key(&params.vk);
+            (proof, pk.vk.clone(), public_inputs)
+        } else {
+            // Fallback: mock trusted setup (random parameters per proof).
+            let params = Groth16::<Bn254>::generate_random_parameters_with_reduction(
+                circuit.clone(),
+                rng,
+            )
+            .map_err(|e| ZkAuditError::ProofGeneration(format!("parameter generation: {}", e)))?;
+
+            let proof = Groth16::<Bn254>::create_random_proof_with_reduction(
+                circuit.clone(),
+                &params,
+                rng,
+            )
+            .map_err(|e| ZkAuditError::ProofGeneration(format!("proof creation: {}", e)))?;
+
+            let public_inputs = circuit
+                .get_public_inputs()
+                .ok_or_else(|| ZkAuditError::ProofGeneration("failed to get public inputs".into()))?;
+
+            (proof, params.vk, public_inputs)
+        };
+
+        // Step 4: Verify locally.
+        let pvk = prepare_verifying_key(&vk);
         let verified = Groth16::<Bn254>::verify_proof(&pvk, &groth16_proof, &public_inputs)
             .map_err(|e| ZkAuditError::ProofVerification(format!("verify: {}", e)))?;
 
@@ -97,7 +141,7 @@ impl AuditProver {
 
         Ok(Groth16Proof {
             proof: groth16_proof,
-            vk: params.vk,
+            vk,
             public_inputs,
         })
     }
@@ -110,59 +154,136 @@ impl AuditProver {
     /// Compute the witness using ark-circom's WitnessCalculator (wasmer-based).
     /// No external snarkjs binary required. Runs inside a Tokio runtime because
     /// wasmer-wasix requires an async reactor.
+    ///
+    /// When called from within an existing Tokio runtime (e.g. the daemon's
+    /// axum handlers), we must not create a nested runtime via `block_on`.
+    /// Instead, we spawn a dedicated thread with its own single-threaded
+    /// runtime and join it synchronously.
     fn compute_witness_wasmer(&self, proof: &InclusionProof) -> ZkAuditResult<Vec<Fr>> {
         use ark_circom::WitnessCalculator;
         use num_bigint::BigInt;
         use num_traits::Num;
         use wasmer::Store;
 
-        // wasmer-wasix requires a Tokio 1.x reactor. Create a runtime for the
-        // witness calculation. This is reentrant-safe because we block_on the
-        // entire computation.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| ZkAuditError::WitnessGeneration(format!("create tokio runtime: {}", e)))?;
+        let wasm_path = self.wasm_path.clone();
+        let leaf = proof.leaf;
+        let path_elements = proof.path_elements.clone();
+        let path_indices = proof.path_indices.clone();
 
-        rt.block_on(async {
-            let mut store = Store::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("zk-witness".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build();
+                let rt = match rt {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        let _ = tx.send(Err(ZkAuditError::WitnessGeneration(
+                            format!("create tokio runtime: {}", e),
+                        )));
+                        return;
+                    }
+                };
 
-            // Load the WASM module.
-            let mut calculator = WitnessCalculator::new(&mut store, &self.wasm_path)
-                .map_err(|e| ZkAuditError::WitnessGeneration(format!("load WASM: {}", e)))?;
+                let result = rt.block_on(async {
+                    let mut store = Store::default();
 
-            // Convert inclusion proof to Circom inputs.
-            let leaf_bigint = BigInt::from_str_radix(&proof.leaf.to_string(), 10)
-                .map_err(|e| ZkAuditError::WitnessGeneration(format!("parse leaf: {}", e)))?;
+                    let mut calculator = WitnessCalculator::new(&mut store, &wasm_path)
+                        .map_err(|e| ZkAuditError::WitnessGeneration(format!("load WASM: {}", e)))?;
 
-            let path_elements: Vec<BigInt> = proof
-                .path_elements
-                .iter()
-                .map(|f| {
-                    BigInt::from_str_radix(&f.to_string(), 10)
-                        .map_err(|e| ZkAuditError::WitnessGeneration(format!("parse path element: {}", e)))
-                })
-                .collect::<ZkAuditResult<Vec<_>>>()?;
+                    let leaf_bigint = BigInt::from_str_radix(&leaf.to_string(), 10)
+                        .map_err(|e| ZkAuditError::WitnessGeneration(format!("parse leaf: {}", e)))?;
 
-            let path_indices: Vec<BigInt> = proof
-                .path_indices
-                .iter()
-                .map(|i| BigInt::from(*i))
-                .collect();
+                    let path_elements_big: Vec<BigInt> = path_elements
+                        .iter()
+                        .map(|f| {
+                            BigInt::from_str_radix(&f.to_string(), 10)
+                                .map_err(|e| ZkAuditError::WitnessGeneration(format!("parse path element: {}", e)))
+                        })
+                        .collect::<ZkAuditResult<Vec<_>>>()?;
 
-            let inputs = vec![
-                ("leaf".to_string(), vec![leaf_bigint]),
-                ("pathElements".to_string(), path_elements),
-                ("pathIndices".to_string(), path_indices),
-            ];
+                    let path_indices_big: Vec<BigInt> = path_indices
+                        .iter()
+                        .map(|i| BigInt::from(*i))
+                        .collect();
 
-            let witness = calculator
-                .calculate_witness_element::<Fr, _>(&mut store, inputs, false)
-                .map_err(|e| ZkAuditError::WitnessGeneration(format!("calculate witness: {}", e)))?;
+                    let inputs = vec![
+                        ("leaf".to_string(), vec![leaf_bigint]),
+                        ("pathElements".to_string(), path_elements_big),
+                        ("pathIndices".to_string(), path_indices_big),
+                    ];
 
-            Ok(witness)
-        })
+                    let witness = calculator
+                        .calculate_witness_element::<Fr, _>(&mut store, inputs, false)
+                        .map_err(|e| ZkAuditError::WitnessGeneration(format!("calculate witness: {}", e)))?;
+
+                    Ok(witness)
+                });
+
+                let _ = tx.send(result);
+            })
+            .map_err(|e| ZkAuditError::WitnessGeneration(format!("spawn witness thread: {}", e)))?;
+
+        rx.recv().map_err(|e| {
+            ZkAuditError::WitnessGeneration(format!("witness thread disconnected: {}", e))
+        })?
     }
+}
+
+/// Load a serialized proving key from disk (arkworks CanonicalSerialize format).
+fn load_proving_key(path: &str) -> ZkAuditResult<ark_groth16::ProvingKey<Bn254>> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| ZkAuditError::CircuitLoad(format!("open proving key {}: {}", path, e)))?;
+    let mut reader = std::io::BufReader::new(file);
+    let pk = ark_groth16::ProvingKey::<Bn254>::deserialize_uncompressed_unchecked(&mut reader)
+        .map_err(|e| ZkAuditError::CircuitLoad(format!("deserialize proving key: {}", e)))?;
+    Ok(pk)
+}
+
+/// Generate Groth16 parameters (mock trusted setup) from an R1CS file and
+/// serialize the proving key + verifying key to disk.
+///
+/// This is the "ceremony" step. Run it once, then use `with_proving_key`
+/// for all subsequent proof generation.
+///
+/// In production, this should be replaced by a multi-party ceremony where
+/// each contributor adds randomness to the toxic waste. For dev/test, a
+/// single random setup is sufficient.
+pub fn generate_and_save_parameters(
+    r1cs_path: &str,
+    proving_key_path: &str,
+    verifying_key_path: &str,
+) -> ZkAuditResult<()> {
+    let circuit = load_r1cs(r1cs_path)?;
+
+    let rng = &mut rand::thread_rng();
+    let params = Groth16::<Bn254>::generate_random_parameters_with_reduction(circuit.clone(), rng)
+        .map_err(|e| ZkAuditError::ProofGeneration(format!("parameter generation: {}", e)))?;
+
+    // Serialize proving key.
+    {
+        let file = std::fs::File::create(proving_key_path)
+            .map_err(|e| ZkAuditError::Io(e))?;
+        let mut writer = std::io::BufWriter::new(file);
+        params
+            .serialize_uncompressed(&mut writer)
+            .map_err(|e| ZkAuditError::Serialization(format!("serialize proving key: {}", e)))?;
+    }
+
+    // Serialize verifying key.
+    {
+        let file = std::fs::File::create(verifying_key_path)
+            .map_err(|e| ZkAuditError::Io(e))?;
+        let mut writer = std::io::BufWriter::new(file);
+        params
+            .vk
+            .serialize_uncompressed(&mut writer)
+            .map_err(|e| ZkAuditError::Serialization(format!("serialize verifying key: {}", e)))?;
+    }
+
+    Ok(())
 }
 
 /// Load an R1CS file and return a CircomCircuit template (no witness).
@@ -254,5 +375,56 @@ mod tests {
         // Public signals must contain the root as a decimal string.
         assert_eq!(soroban_args.pub_signals.len(), 1);
         assert_eq!(soroban_args.pub_signals[0], root.to_string());
+    }
+
+    #[test]
+    fn test_ceremony_proving_key() {
+        if !circuit_exists() {
+            eprintln!("Skipping test_ceremony_proving_key: circuit not found");
+            return;
+        }
+
+        // Build a tree with 3 leaves.
+        let mut tree = AuditMerkleTree::with_height(20).unwrap();
+        tree.insert(Fr::from(10u64));
+        tree.insert(Fr::from(20u64));
+        tree.insert(Fr::from(30u64));
+
+        let inclusion = tree.prove_inclusion(1).unwrap();
+
+        // Generate ceremony parameters to a temp directory.
+        let tmp = tempfile::tempdir().unwrap();
+        let pkey = tmp.path().join("test.pkey");
+        let vkey = tmp.path().join("test.vkey");
+
+        generate_and_save_parameters(
+            R1CS_PATH,
+            pkey.to_str().unwrap(),
+            vkey.to_str().unwrap(),
+        )
+        .expect("ceremony generation failed");
+
+        assert!(pkey.exists());
+        assert!(vkey.exists());
+
+        // Create prover with the pre-generated key and generate a proof.
+        let prover = AuditProver::with_proving_key(
+            R1CS_PATH,
+            WASM_PATH,
+            pkey.to_str().unwrap(),
+        )
+        .expect("failed to create prover with proving key");
+
+        let groth16_proof = prover.prove(&inclusion).expect("proof generation failed");
+
+        // Verify the proof is valid.
+        assert_eq!(groth16_proof.public_inputs.len(), 1);
+        assert_eq!(groth16_proof.public_inputs[0], tree.root().unwrap());
+
+        // Serialize and check format.
+        let soroban_args = AuditProver::serialize_for_soroban(&groth16_proof).unwrap();
+        assert_eq!(soroban_args.proof.a.len(), 128);
+        assert_eq!(soroban_args.proof.b.len(), 256);
+        assert_eq!(soroban_args.proof.c.len(), 128);
     }
 }

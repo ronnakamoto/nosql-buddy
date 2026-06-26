@@ -39,6 +39,7 @@
 //! The current (open) epoch accumulates events. When it closes, its
 //! root is frozen and a new epoch opens.
 
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -93,7 +94,7 @@ pub struct Epoch {
 
 impl Epoch {
     /// Create a new open epoch starting at the given index.
-    fn new(epoch_number: u64, start_index: u64) -> Self {
+    pub fn new(epoch_number: u64, start_index: u64) -> Self {
         Self {
             epoch_number,
             start_index,
@@ -131,6 +132,9 @@ pub struct EpochManager {
     /// oplog completeness is not enabled and the next epoch should start
     /// from the beginning of the oplog (timestamp 0).
     next_oplog_start_ts: Mutex<Option<OplogTimestamp>>,
+    /// Path to the JSON file where epochs are persisted.
+    /// If None, epochs are held only in memory.
+    persistence_path: Mutex<Option<PathBuf>>,
 }
 
 impl EpochManager {
@@ -141,7 +145,67 @@ impl EpochManager {
             config: Mutex::new(config),
             epochs: Mutex::new(vec![initial]),
             next_oplog_start_ts: Mutex::new(None),
+            persistence_path: Mutex::new(None),
         }
+    }
+
+    /// Create a new epoch manager that persists its state to the given path.
+    /// If the file exists, the saved epoch list is loaded; otherwise a fresh
+    /// single-epoch manager is created.
+    pub fn new_with_persistence(config: EpochConfig, path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref().to_path_buf();
+        if path.exists() {
+            match Self::load_from_file(&path, config.clone()) {
+                Ok(mgr) => return mgr,
+                Err(e) => {
+                    log::warn!("failed to load epoch state from {}: {e}; starting fresh", path.display());
+                }
+            }
+        }
+        let mgr = Self::new(config);
+        *mgr.persistence_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
+        mgr
+    }
+
+    /// Load epoch manager state from a JSON file.
+    fn load_from_file(path: &Path, config: EpochConfig) -> AuditResult<Self> {
+        let data = std::fs::read_to_string(path)
+            .map_err(|e| AuditError::Internal(format!("read epoch state: {e}")))?;
+        let state: PersistedEpochState = serde_json::from_str(&data)
+            .map_err(|e| AuditError::Internal(format!("parse epoch state: {e}")))?;
+        Ok(Self {
+            config: Mutex::new(config),
+            epochs: Mutex::new(state.epochs),
+            next_oplog_start_ts: Mutex::new(state.next_oplog_start_ts),
+            persistence_path: Mutex::new(Some(path.to_path_buf())),
+        })
+    }
+
+    /// Persist the current epoch state to disk, if a path is configured.
+    fn save(&self) -> AuditResult<()> {
+        let path = self
+            .persistence_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(path) = path else {
+            return Ok(());
+        };
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| AuditError::Internal(format!("create epoch state dir: {e}")))?;
+        }
+
+        let state = PersistedEpochState {
+            epochs: self.epochs.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            next_oplog_start_ts: self.next_oplog_start_ts.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+        };
+        let json = serde_json::to_string_pretty(&state)
+            .map_err(|e| AuditError::Internal(format!("serialize epoch state: {e}")))?;
+        std::fs::write(&path, json)
+            .map_err(|e| AuditError::Internal(format!("write epoch state: {e}")))?;
+        Ok(())
     }
 
     /// Get the oplog start timestamp for the next epoch to close.
@@ -193,8 +257,12 @@ impl EpochManager {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
                 *next_ts = Some(oplog_end_ts);
+                let updated_epoch = epoch.clone();
+                drop(epochs);
+                drop(next_ts);
+                self.save()?;
 
-                return Ok(epoch.clone());
+                return Ok(updated_epoch);
             }
         }
 
@@ -234,7 +302,9 @@ impl EpochManager {
             let next_number = closed.epoch_number + 1;
             let next_start = index + 1;
             epochs.push(Epoch::new(next_number, next_start));
-
+            drop(epochs);
+            drop(config);
+            self.save()?;
             return Ok(Some(closed));
         }
 
@@ -268,6 +338,10 @@ impl EpochManager {
         let next_number = closed.epoch_number + 1;
         let next_start = end_index + 1;
         epochs.push(Epoch::new(next_number, next_start));
+        drop(epochs);
+
+        // Persist the new epoch boundaries.
+        self.save()?;
 
         Ok(closed)
     }
@@ -284,6 +358,8 @@ impl EpochManager {
                 epoch.committed = true;
                 epoch.committed_at = Some(chrono::Utc::now().to_rfc3339());
                 epoch.tx_hash = Some(tx_hash);
+                drop(epochs);
+                self.save()?;
                 return Ok(());
             }
         }
@@ -295,6 +371,56 @@ impl EpochManager {
     /// Get all epochs (open and closed).
     pub fn list_epochs(&self) -> Vec<Epoch> {
         self.epochs.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Restore the current open epoch's event count from the audit log.
+    ///
+    /// Called once at startup after loading persisted epochs. If the audit log
+    /// has grown while the daemon was down, the open epoch's count is brought
+    /// up to date. If the count reaches the auto-close threshold, the epoch is
+    /// closed immediately.
+    ///
+    /// Returns `Some(closed_epoch)` if the open epoch was auto-closed.
+    pub fn sync_open_epoch_with_audit_log(
+        &self,
+        audit_log: &AuditLog,
+    ) -> AuditResult<Option<Epoch>> {
+        let config = self.config.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let mut epochs = self.epochs.lock().unwrap_or_else(|e| e.into_inner());
+
+        let current = epochs.last_mut().expect("always at least one epoch");
+        if !current.is_open() {
+            return Ok(None);
+        }
+
+        let audit_count = audit_log.event_count() as u64;
+        let new_count = if audit_count > current.start_index {
+            (audit_count - current.start_index) as usize
+        } else {
+            0
+        };
+
+        current.event_count = new_count;
+
+        // If the threshold was already crossed (e.g. crash before auto-close),
+        // close the epoch now.
+        let should_close =
+            config.event_threshold > 0 && current.event_count >= config.event_threshold;
+        if should_close {
+            let end_index = current.start_index + current.event_count as u64 - 1;
+            current.end_index = Some(end_index);
+            current.root_hex = Some(audit_log.root_hex()?);
+            let closed = current.clone();
+
+            let next_number = closed.epoch_number + 1;
+            let next_start = end_index + 1;
+            epochs.push(Epoch::new(next_number, next_start));
+            drop(epochs);
+            self.save()?;
+            return Ok(Some(closed));
+        }
+
+        Ok(None)
     }
 
     /// Get the current (open) epoch.
@@ -328,6 +454,14 @@ impl EpochManager {
         let mut guard = self.config.lock().unwrap_or_else(|e| e.into_inner());
         *guard = config;
     }
+}
+
+/// On-disk representation of epoch manager state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedEpochState {
+    epochs: Vec<Epoch>,
+    next_oplog_start_ts: Option<OplogTimestamp>,
 }
 
 impl Default for EpochManager {
@@ -646,5 +780,112 @@ mod tests {
         // Next epoch's start should be epoch 1's end.
         let start2 = mgr.next_oplog_start_ts();
         assert_eq!(start2, end1);
+    }
+
+    #[test]
+    fn persistence_survives_restart() {
+        let tmp = std::env::temp_dir().join(format!(
+            "nosqlbuddy_audit_epochs_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let path = tmp.join("epochs.json");
+
+        let config = EpochConfig {
+            event_threshold: 100,
+            time_threshold_secs: 0,
+        };
+
+        // First session: create manager, record events, close epoch.
+        {
+            let mgr = EpochManager::new_with_persistence(config.clone(), &path);
+            let audit = make_audit_with_events(5);
+            for i in 0..5 {
+                mgr.record_event(i as u64, &audit).unwrap();
+            }
+            let closed = mgr.close_current_epoch(&audit).unwrap();
+            assert_eq!(closed.epoch_number, 0);
+            assert_eq!(closed.event_count, 5);
+
+            // Mark committed and attach oplog hash.
+            mgr.mark_committed(0, "tx123".to_string()).unwrap();
+            mgr.attach_oplog_hash(
+                0,
+                OplogTimestamp::zero(),
+                OplogTimestamp { time: 1000, increment: 0 },
+                5,
+                "root0".to_string(),
+                OplogTimestamp { time: 1000, increment: 0 },
+            )
+            .unwrap();
+        }
+
+        // Second session: reload from disk.
+        {
+            let mgr = EpochManager::new_with_persistence(config.clone(), &path);
+            let epochs = mgr.list_epochs();
+            assert_eq!(epochs.len(), 2);
+
+            let epoch0 = epochs.iter().find(|e| e.epoch_number == 0).unwrap();
+            assert!(!epoch0.is_open());
+            assert_eq!(epoch0.event_count, 5);
+            assert!(epoch0.committed);
+            assert_eq!(epoch0.tx_hash.as_deref(), Some("tx123"));
+            assert!(epoch0.oplog_merkle_root_hex.is_some());
+
+            let epoch1 = epochs.iter().find(|e| e.epoch_number == 1).unwrap();
+            assert!(epoch1.is_open());
+            assert_eq!(epoch1.start_index, 5);
+            assert_eq!(epoch1.event_count, 0);
+
+            // next_oplog_start_ts should also be restored.
+            assert_eq!(
+                mgr.next_oplog_start_ts(),
+                OplogTimestamp { time: 1000, increment: 0 }
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn sync_restores_open_epoch_count_after_restart() {
+        let tmp = std::env::temp_dir().join(format!(
+            "nosqlbuddy_audit_sync_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let path = tmp.join("epochs.json");
+
+        let config = EpochConfig {
+            event_threshold: 100,
+            time_threshold_secs: 0,
+        };
+
+        // First session: close epoch 0 with 2 events.
+        {
+            let mgr = EpochManager::new_with_persistence(config.clone(), &path);
+            let audit = make_audit_with_events(2);
+            mgr.record_event(0, &audit).unwrap();
+            mgr.record_event(1, &audit).unwrap();
+            mgr.close_current_epoch(&audit).unwrap();
+        }
+
+        // Simulate audit log growing while daemon is down (no manager save).
+        let audit = make_audit_with_events(7);
+
+        // Second session: reload and sync; the open epoch should catch up.
+        {
+            let mgr = EpochManager::new_with_persistence(config.clone(), &path);
+            let synced = mgr.sync_open_epoch_with_audit_log(&audit).unwrap();
+            assert!(synced.is_none(), "threshold not reached, no auto-close");
+
+            let current = mgr.current_epoch();
+            assert_eq!(current.epoch_number, 1);
+            assert_eq!(current.start_index, 2);
+            assert_eq!(current.event_count, 5);
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

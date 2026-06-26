@@ -19,7 +19,8 @@ import {
   TxHashLink,
   LogsModal,
 } from "./AuditUi";
-import { IconBeaker, IconCircleDash } from "./Icons";
+import type { ProofResult } from "../ipc/commands";
+import { IconBeaker, IconCircleDash, IconClose } from "./Icons";
 
 /**
  * Dev Mode — a guided, step-based audit control surface.
@@ -393,6 +394,10 @@ function DevLiveView() {
   const [onchain, setOnchain] = useState<DevOnChainRoot | null>(null);
   const [onChainAttesters, setOnChainAttesters] = useState<string[]>([]);
   const [oplog, setOplog] = useState<OplogReport | null>(null);
+  const [proofBusy, setProofBusy] = useState<number | null>(null);
+  const [proofResult, setProofResult] = useState<ProofResult | null>(null);
+  const [proofError, setProofError] = useState<string | null>(null);
+  const [provenIndex, setProvenIndex] = useState<number | null>(null);
   const [closeBusy, setCloseBusy] = useState(false);
   const [commitBusy, setCommitBusy] = useState(false);
   const [commitStep, setCommitStep] = useState("");
@@ -560,6 +565,26 @@ function DevLiveView() {
       setCommitStep("");
     } finally {
       setCommitBusy(false);
+    }
+  };
+
+  const handleGenerateProof = async (index: number) => {
+    setProofBusy(index);
+    setProofResult(null);
+    setProofError(null);
+    setProvenIndex(null);
+    try {
+      const res = await commands.auditDevProxyPost(
+        PUBLISHER_PORT,
+        `proof/${index}`,
+        {},
+      );
+      setProofResult(res as ProofResult);
+      setProvenIndex(index);
+    } catch (e) {
+      setProofError(formatError(e));
+    } finally {
+      setProofBusy(null);
     }
   };
 
@@ -765,6 +790,74 @@ function DevLiveView() {
         />
       </div>
 
+      {/* ─── Proof result ─────────────────────────────────────────────── */}
+      {proofError && (
+        <Alert tone="danger">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "var(--space-2)" }}>
+            <span>Proof generation failed: {proofError}</span>
+            <button
+              className="audit-proof-dismiss"
+              onClick={() => setProofError(null)}
+              aria-label="Dismiss"
+            >
+              <IconClose size={14} />
+            </button>
+          </div>
+        </Alert>
+      )}
+      {proofResult && (
+        <Card>
+          <CardHeader
+            title="ZK Inclusion Proof"
+            subtitle={`Leaf #${proofResult.leafIndex} · root ${shortHash(proofResult.rootHex)}`}
+            actions={
+              <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
+                <Badge tone="success" dot>Verified</Badge>
+                <button
+                  className="audit-proof-dismiss"
+                  onClick={() => { setProofResult(null); setProvenIndex(null); }}
+                  aria-label="Close proof"
+                >
+                  <IconClose size={14} />
+                </button>
+              </div>
+            }
+          />
+          <div className="audit-proof-fields">
+            <div className="audit-proof-field">
+              <span className="audit-proof-field__label">Root</span>
+              <span className="audit-proof-field__value" title={proofResult.rootHex}>
+                {proofResult.rootHex}
+              </span>
+            </div>
+            <div className="audit-proof-field">
+              <span className="audit-proof-field__label">Proof A</span>
+              <span className="audit-proof-field__value" title={proofResult.proof.a}>
+                {proofResult.proof.a}
+              </span>
+            </div>
+            <div className="audit-proof-field">
+              <span className="audit-proof-field__label">Proof B</span>
+              <span className="audit-proof-field__value" title={proofResult.proof.b}>
+                {proofResult.proof.b}
+              </span>
+            </div>
+            <div className="audit-proof-field">
+              <span className="audit-proof-field__label">Proof C</span>
+              <span className="audit-proof-field__value" title={proofResult.proof.c}>
+                {proofResult.proof.c}
+              </span>
+            </div>
+            <div className="audit-proof-field">
+              <span className="audit-proof-field__label">Public signals</span>
+              <span className="audit-proof-field__value" title={proofResult.pubSignals.join(", ")}>
+                {proofResult.pubSignals.join(", ")}
+              </span>
+            </div>
+          </div>
+        </Card>
+      )}
+
       {/* ─── Event feed + history ───────────────────────────────────── */}
       <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: "var(--space-4)" }}>
         <Card compact>
@@ -780,64 +873,29 @@ function DevLiveView() {
               body="Insert, update, or delete a document in MongoDB to populate the audit log."
             />
           ) : (
-            <div
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                maxHeight: "320px",
-                overflowY: "auto",
-                borderRadius: "var(--radius-md)",
-                border: "1px solid var(--border)",
-              }}
-            >
+            <div className="audit-event-list">
               {events.slice().reverse().map((ev, i, arr) => (
                 <div
                   key={ev.index}
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "auto 1fr 1fr auto",
-                    alignItems: "center",
-                    gap: "var(--space-3)",
-                    padding: "var(--space-2) var(--space-3)",
-                    borderBottom: i < arr.length - 1 ? "1px solid var(--border)" : undefined,
-                    fontSize: "var(--font-size-sm)",
-                    background: i % 2 === 0 ? "var(--surface)" : "var(--surface-2)",
-                  }}
+                  className={`audit-event-row-grid audit-event-row-grid--with-action${
+                    provenIndex === ev.index ? " audit-event-row--proven" : ""
+                  }`}
+                  style={i >= arr.length - 1 ? { borderBottom: "none" } : undefined}
                 >
                   <Badge tone={opTone(ev.operation)}>{ev.operation}</Badge>
-                  <span
-                    style={{
-                      fontFamily: "var(--font-mono)",
-                      fontSize: "var(--font-size-xs)",
-                      color: "var(--ink-muted)",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
+                  <span className="audit-event-db">{ev.database}.{ev.collection}</span>
+                  <span className="audit-event-leaf">leaf {ev.leafHex.slice(0, 10)}…</span>
+                  <span className="audit-event-time">{new Date(ev.timestamp).toLocaleTimeString()}</span>
+                  <Button
+                    variant="ghost"
+                    loading={proofBusy === ev.index}
+                    disabled={proofBusy !== null}
+                    onClick={() => handleGenerateProof(ev.index)}
+                    style={{ fontSize: "var(--font-size-xs)", padding: "3px 10px", minHeight: "auto" }}
+                    title={provenIndex === ev.index ? "Regenerate proof" : "Generate ZK inclusion proof"}
                   >
-                    {ev.database}.{ev.collection}
-                  </span>
-                  <span
-                    style={{
-                      fontFamily: "var(--font-mono)",
-                      fontSize: "var(--font-size-xs)",
-                      color: "var(--ink-faint)",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    leaf {ev.leafHex.slice(0, 10)}…
-                  </span>
-                  <span
-                    style={{
-                      fontSize: "var(--font-size-xs)",
-                      color: "var(--ink-faint)",
-                      fontVariantNumeric: "tabular-nums",
-                    }}
-                  >
-                    {new Date(ev.timestamp).toLocaleTimeString()}
-                  </span>
+                    {provenIndex === ev.index ? "Re-prove" : "Prove"}
+                  </Button>
                 </div>
               ))}
             </div>

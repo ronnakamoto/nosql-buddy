@@ -71,21 +71,31 @@ pub async fn audit_generate_proof(
     index: u64,
     r1cs_path: Option<String>,
     wasm_path: Option<String>,
+    proving_key_path: Option<String>,
 ) -> AppResult<ProofResult> {
     use ark_ff::{BigInteger, PrimeField};
 
     let inclusion = state.audit_log.prove_inclusion(index)?;
+    let root_for_hex = inclusion.root;
 
     // Resolve circuit artifact paths: use explicit paths if provided,
     // otherwise fall back to bundled Tauri resources.
     let (r1cs, wasm) = resolve_circuit_paths(&app, r1cs_path, wasm_path)?;
 
-    // Generate the Groth16 proof.
-    let prover = zk_audit::AuditProver::new(&r1cs, &wasm)?;
-    let groth16_proof = prover.prove(&inclusion)?;
+    // Generate the Groth16 proof on a blocking thread (CPU-heavy + wasmer
+    // needs its own Tokio runtime for the WASM witness calculation).
+    let prover = if let Some(pk) = proving_key_path.as_deref().filter(|s| !s.is_empty()) {
+        zk_audit::AuditProver::with_proving_key(&r1cs, &wasm, pk)?
+    } else {
+        zk_audit::AuditProver::new(&r1cs, &wasm)?
+    };
+    let groth16_proof = tokio::task::spawn_blocking(move || prover.prove(&inclusion))
+        .await
+        .map_err(|e| crate::error::AppError::Internal(format!("proof task: {}", e)))?
+        .map_err(crate::error::AppError::from)?;
     let soroban_args = zk_audit::AuditProver::serialize_for_soroban(&groth16_proof)?;
 
-    let root_bigint = inclusion.root.into_bigint();
+    let root_bigint = root_for_hex.into_bigint();
     let root_bytes = root_bigint.to_bytes_be();
     let root_hex = hex::encode(&root_bytes);
 

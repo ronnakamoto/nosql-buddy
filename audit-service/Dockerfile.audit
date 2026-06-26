@@ -57,6 +57,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy the built binary.
 COPY --from=builder /build/target/release/nosqlbuddy-audit /usr/local/bin/nosqlbuddy-audit
 
+# Copy circuit artifacts for ZK proof generation (R1CS, WASM, proving key).
+COPY src-tauri/resources/circuits/ /opt/circuits/
+
 # Default data directory inside the container.
 ENV AUDITD_DATA_DIR=/data
 RUN mkdir -p /data

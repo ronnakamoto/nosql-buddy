@@ -7,6 +7,9 @@ services:
     command: ["--replSet", "rs0", "--bind_ip_all"]
     volumes:
       - mongo-data-1:/data/db
+    networks:
+      - default
+      - mongo-net
 
   # ─── Secondary 1 (operator) ──────────────────────────────────────────
   mongo2:
@@ -16,6 +19,9 @@ services:
     command: ["--replSet", "rs0", "--bind_ip_all"]
     volumes:
       - mongo-data-2:/data/db
+    networks:
+      - default
+      - mongo-net
 
   # ─── Secondary 2 (independent — auditor/regulator) ───────────────────
   # This member is the trust anchor for oplog completeness verification.
@@ -28,6 +34,9 @@ services:
     command: ["--replSet", "rs0", "--bind_ip_all"]
     volumes:
       - mongo-data-3:/data/db
+    networks:
+      - default
+      - mongo-net
 
   # ─── Replica set initializer ─────────────────────────────────────────
   # Runs after all 3 members are up, initiates the replica set.
@@ -58,3 +67,7 @@ volumes:
   mongo-data-1:
   mongo-data-2:
   mongo-data-3:
+
+networks:
+  mongo-net:
+    name: mongo-net

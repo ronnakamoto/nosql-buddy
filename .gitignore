@@ -57,6 +57,9 @@ Thumbs.db
 .env.audit
 # Generated attester Ed25519 signing key (created by nosqlbuddy-audit setup)
 attester.key
+# Generated Groth16 proving/verifying keys (regenerable from R1CS via zk-audit-ceremony)
+src-tauri/resources/circuits/*.pkey
+src-tauri/resources/circuits/*.vkey
 
 
 # Editor

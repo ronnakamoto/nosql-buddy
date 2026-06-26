@@ -37,7 +37,7 @@ services:
       - "--mode"
       - "publish"
       - "--mongo-uri"
-      - "mongodb://host.docker.internal:27017"
+      - "mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0"
       - "--port"
       - "9173"
       - "--data-dir"
@@ -48,11 +48,18 @@ services:
       - "testnet"
       - "--epoch-threshold"
       - "100"
+      - "--circuit-dir"
+      - "/opt/circuits"
+      - "--proving-key"
+      - "/opt/circuits/merkle_inclusion.pkey"
     env_file: .env.audit
     volumes:
       - audit-publisher-data:/data/publisher
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - mongo-net
     restart: unless-stopped
 
   # ─── Independent Attester ─────────────────────────────────────────────
@@ -71,7 +78,7 @@ services:
       - "--mode"
       - "attest"
       - "--mongo-uri"
-      - "mongodb://host.docker.internal:27019"
+      - "mongodb://mongo3:27017"
       - "--port"
       - "9174"
       - "--data-dir"
@@ -86,6 +93,9 @@ services:
       - ./attester.key:/data/attester/audit/attester.key:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - mongo-net
     restart: unless-stopped
 
   # ─── Reader ───────────────────────────────────────────────────────────
@@ -103,7 +113,7 @@ services:
       - "--mode"
       - "read"
       - "--mongo-uri"
-      - "mongodb://host.docker.internal:27019"
+      - "mongodb://mongo3:27017"
       - "--port"
       - "9175"
       - "--data-dir"
@@ -115,9 +125,17 @@ services:
       - audit-reader-data:/data/reader
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - mongo-net
     restart: unless-stopped
 
 volumes:
   audit-publisher-data:
   audit-attester-data:
   audit-reader-data:
+
+networks:
+  mongo-net:
+    external: true
+    name: mongo-net

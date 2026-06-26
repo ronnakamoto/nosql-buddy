@@ -35,3 +35,10 @@ num-traits = "0.2"
 thiserror = "2"
 rand = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread"] }
+
+[[bin]]
+name = "zk-audit-ceremony"
+path = "src/bin/ceremony.rs"
+
+[dev-dependencies]
+tempfile = "3"

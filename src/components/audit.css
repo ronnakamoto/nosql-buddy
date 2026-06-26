@@ -295,6 +295,73 @@
   background: var(--surface-2);
 }
 
+.audit-event-row-grid--with-action {
+  grid-template-columns: auto 1fr 1fr auto auto;
+}
+
+.audit-event-row--proven {
+  background: color-mix(in oklch, var(--success-500) 8%, var(--surface)) !important;
+  box-shadow: inset 2px 0 0 var(--success-500);
+}
+
+/* ─── Proof result ─────────────────────────────────────────────── */
+
+.audit-proof-dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--ink-faint);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  padding: 0;
+  transition: background 0.12s ease, color 0.12s ease;
+  flex-shrink: 0;
+}
+
+.audit-proof-dismiss:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.audit-proof-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.audit-proof-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.audit-proof-field:last-child {
+  border-bottom: none;
+}
+
+.audit-proof-field__label {
+  font-size: var(--font-size-xs);
+  color: var(--ink-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 500;
+}
+
+.audit-proof-field__value {
+  font-size: var(--font-size-sm);
+  font-family: var(--font-mono);
+  letter-spacing: var(--letter-mono);
+  color: var(--ink-muted);
+  word-break: break-all;
+  line-height: var(--line-height-tight);
+}
+
 /* ─── Epoch list ───────────────────────────────────────────────── */
 
 .audit-epoch-list {

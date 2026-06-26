@@ -34,7 +34,9 @@ use audit_service::auditd::{DaemonConfig, DaemonMode, DaemonState};
 /// Inlined from the Tauri app's `mongo::client_registry` to keep this crate
 /// independent of the desktop application.
 fn ensure_direct_connection(uri: &str) -> String {
-    if uri.contains("directConnection=") {
+    // If the URI specifies a replica set, don't force directConnection —
+    // the driver needs to discover all members to find the primary.
+    if uri.contains("replicaSet=") || uri.contains("directConnection=") {
         return uri.to_string();
     }
     if uri.contains('?') {
@@ -557,13 +559,19 @@ async fn cmd_start(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let epoch_manager = EpochManager::new(audit_service::audit::epoch::EpochConfig {
-        event_threshold: config.epoch_threshold,
-        time_threshold_secs: config.epoch_time_secs,
-    });
+    let epoch_file = config.data_dir.join("audit").join("epochs.json");
+    let epoch_manager = EpochManager::new_with_persistence(
+        audit_service::audit::epoch::EpochConfig {
+            event_threshold: config.epoch_threshold,
+            time_threshold_secs: config.epoch_time_secs,
+        },
+        &epoch_file,
+    );
     log::info!(
-        "epoch manager configured: threshold={} events, time={}s",
-        config.epoch_threshold, config.epoch_time_secs
+        "epoch manager configured: threshold={} events, time={}s, state={}",
+        config.epoch_threshold,
+        config.epoch_time_secs,
+        epoch_file.display()
     );
     let change_streams = ChangeStreamRegistry::new();
 
@@ -676,6 +684,7 @@ async fn cmd_start(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         change_streams,
         data_dir: config.data_dir.clone(),
         circuit_dir: config.circuit_dir.clone(),
+        proving_key_path: config.proving_key_path.clone(),
         ipfs_config: IpfsConfig {
             api_url: config.ipfs_api_url.clone(),
             cid_version: 1,
@@ -754,6 +763,12 @@ fn parse_start_args(args: &[String]) -> DaemonConfig {
                 i += 1;
                 if i < args.len() {
                     config.circuit_dir = Some(PathBuf::from(&args[i]));
+                }
+            }
+            "--proving-key" => {
+                i += 1;
+                if i < args.len() {
+                    config.proving_key_path = Some(PathBuf::from(&args[i]));
                 }
             }
             "--ipfs-api" => {
@@ -1134,6 +1149,7 @@ fn print_start_help() {
           --data-dir <dir>              Data directory (default: OS data dir)\n\
           --port <port>                 HTTP API port (default: 9173)\n\
           --circuit-dir <dir>           Circuit artifacts directory (for proof generation)\n\
+          --proving-key <path>          Path to pre-generated proving key (from ceremony; speeds up proofs)\n\
           --ipfs-api <url>              IPFS Kubo HTTP API URL (default: http://127.0.0.1:5001)\n\
           --rpc-url <url>               Stellar Soroban RPC URL (default: testnet)\n\
           --epoch-threshold <n>         Auto-close epoch after N events (default: 100, 0=disabled)\n\

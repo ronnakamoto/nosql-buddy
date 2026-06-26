@@ -98,6 +98,10 @@ pub struct DaemonConfig {
     pub data_dir: PathBuf,
     pub port: u16,
     pub circuit_dir: Option<PathBuf>,
+    /// Path to a pre-generated proving key (from the ceremony tool).
+    /// When set, proof generation uses this key instead of generating
+    /// fresh parameters on every call.
+    pub proving_key_path: Option<PathBuf>,
     pub ipfs_api_url: String,
     pub rpc_url: String,
     pub epoch_threshold: usize,
@@ -131,6 +135,7 @@ impl Default for DaemonConfig {
                 .join("nosqlbuddy-audit"),
             port: 9173,
             circuit_dir: None,
+            proving_key_path: None,
             ipfs_api_url: "http://127.0.0.1:5001".to_string(),
             rpc_url: crate::audit::stellar_rpc::TESTNET_RPC_URL.to_string(),
             epoch_threshold: 100,
@@ -154,6 +159,9 @@ pub struct DaemonState {
     pub change_streams: ChangeStreamRegistry,
     pub data_dir: PathBuf,
     pub circuit_dir: Option<PathBuf>,
+    /// Pre-generated proving key path (from ceremony). When set,
+    /// proof generation is significantly faster.
+    pub proving_key_path: Option<PathBuf>,
     pub ipfs_config: IpfsConfig,
     pub pinata_config: Option<PinataConfig>,
     pub rpc_url: String,
@@ -372,15 +380,20 @@ async fn check_ipfs_backend(state: &DaemonState) -> Result<bool, crate::error::A
 async fn auto_commit_loop(state: Arc<DaemonState>) {
     let mut last_event_count: usize = state.audit_log.event_count();
 
-    // If there are already events at startup, fast-forward the epoch manager
-    // to the current count without triggering commits for past events.
-    if last_event_count > 0 {
-        for i in 0..last_event_count as u64 {
-            let _ = state.epoch_manager.record_event(i, &state.audit_log);
-        }
+    // At startup, bring the open epoch in sync with the audit log. If events
+    // accumulated while the daemon was down, the count is restored. If the
+    // auto-close threshold was already crossed, the epoch is closed now.
+    if let Ok(Some(closed)) = state.epoch_manager.sync_open_epoch_with_audit_log(&state.audit_log) {
         log::info!(
-            "auto-commit: fast-forwarded epoch manager past {last_event_count} existing events"
+            "auto-commit: restored epoch {} and auto-closed it ({} events)",
+            closed.epoch_number,
+            closed.event_count
         );
+        if let Err(e) = publish_and_commit(&state, &closed).await {
+            log::error!("auto-commit: failed for restored epoch {}: {e}", closed.epoch_number);
+        }
+    } else {
+        log::info!("auto-commit: restored epoch manager to {last_event_count} events");
     }
 
     loop {
@@ -799,6 +812,7 @@ async fn generate_proof(
     use ark_ff::{BigInteger, PrimeField};
 
     let inclusion = state.audit_log.prove_inclusion(index).map_err(ApiError::from)?;
+    let root_for_hex = inclusion.root;
 
     let circuit_dir = state.circuit_dir.as_deref().ok_or_else(|| {
         ApiError(AuditError::Validation(
@@ -815,15 +829,20 @@ async fn generate_proof(
         .to_string_lossy()
         .to_string();
 
-    let prover = zk_audit::AuditProver::new(&r1cs, &wasm)
-        .map_err(|e| ApiError(AuditError::ZkAudit(e.to_string())))?;
-    let groth16_proof = prover
-        .prove(&inclusion)
+    let prover = if let Some(pk_path) = &state.proving_key_path {
+        zk_audit::AuditProver::with_proving_key(&r1cs, &wasm, pk_path.to_str().unwrap())
+    } else {
+        zk_audit::AuditProver::new(&r1cs, &wasm)
+    }
+    .map_err(|e| ApiError(AuditError::ZkAudit(e.to_string())))?;
+    let groth16_proof = tokio::task::spawn_blocking(move || prover.prove(&inclusion))
+        .await
+        .map_err(|e| ApiError(AuditError::ZkAudit(format!("proof task: {}", e))))?
         .map_err(|e| ApiError(AuditError::ZkAudit(e.to_string())))?;
     let soroban_args = zk_audit::AuditProver::serialize_for_soroban(&groth16_proof)
         .map_err(|e| ApiError(AuditError::ZkAudit(e.to_string())))?;
 
-    let root_bigint = inclusion.root.into_bigint();
+    let root_bigint = root_for_hex.into_bigint();
     let root_hex = hex::encode(&root_bigint.to_bytes_be());
 
     Ok(Json(ProofResponse {
