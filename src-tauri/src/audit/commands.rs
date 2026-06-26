@@ -291,9 +291,17 @@ pub async fn audit_record_event(
     // is stored on disk so replay can recompute and verify the leaf.
     let leaf = crate::audit::leaf_from_payload(&operation, &database, &collection, &payload);
 
-    Ok(state
+    let index = state
         .audit_log
-        .record(&operation, &database, &collection, &payload, leaf)?)
+        .record(&operation, &database, &collection, &payload, leaf)?;
+
+    // Advance the open batch (epoch) so the UI's "Batch · filling" counter
+    // tracks recorded events and the on-disk epoch state stays in sync.
+    if let Err(e) = state.epoch_manager.record_event(index, &state.audit_log) {
+        tracing::warn!(error = %e, "failed to update epoch for recorded event");
+    }
+
+    Ok(index)
 }
 
 /// Commit the current Merkle root to the Soroban contract on Stellar testnet.

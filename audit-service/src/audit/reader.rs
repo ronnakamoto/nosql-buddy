@@ -216,6 +216,18 @@ fn count_events(jsonl: &str) -> u64 {
         .count() as u64
 }
 
+/// Read a string field from a JSON event, tolerating both the snake_case
+/// keys written to disk by `PersistedEvent` (`root_after`, `leaf_hex`) and
+/// the camelCase keys used by the in-memory API types. The on-disk JSONL
+/// log is snake_case, so `snake` must be tried first; trying only the
+/// camelCase key (the original bug) made every lookup miss and produced
+/// spurious "tamper detected" reports.
+fn event_str<'a>(ev: &'a serde_json::Value, snake: &str, camel: &str) -> Option<&'a str> {
+    ev.get(snake)
+        .or_else(|| ev.get(camel))
+        .and_then(|v| v.as_str())
+}
+
 /// Search the JSONL log for an event whose `root_after` matches the
 /// given root hex. Returns the event index if found.
 fn find_root_in_log(jsonl: &str, root_hex: &str) -> Option<u64> {
@@ -225,7 +237,7 @@ fn find_root_in_log(jsonl: &str, root_hex: &str) -> Option<u64> {
             continue;
         }
         if let Ok(ev) = serde_json::from_str::<serde_json::Value>(line) {
-            if let Some(root_after) = ev.get("rootAfter").and_then(|v| v.as_str()) {
+            if let Some(root_after) = event_str(&ev, "root_after", "rootAfter") {
                 if root_after == root_hex {
                     return ev.get("index").and_then(|v| v.as_u64());
                 }
@@ -271,14 +283,8 @@ fn verify_root_chain(jsonl: &str, up_to_index: u64) -> bool {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let payload = ev.get("payload").and_then(|v| v.as_str()).unwrap_or("");
-        let stored_leaf = ev
-            .get("leafHex")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let stored_root = ev
-            .get("rootAfter")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let stored_leaf = event_str(&ev, "leaf_hex", "leafHex").unwrap_or("");
+        let stored_root = event_str(&ev, "root_after", "rootAfter").unwrap_or("");
 
         // Recompute the leaf and check it matches.
         let recomputed_leaf = leaf_from_payload(operation, database, collection, payload);
@@ -328,8 +334,8 @@ mod tests {
                     "database": db,
                     "collection": col,
                     "payload": payload,
-                    "leafHex": leaf_hex,
-                    "rootAfter": root,
+                    "leaf_hex": leaf_hex,
+                    "root_after": root,
                     "timestamp": "2026-06-23T00:00:00Z"
                 })
                 .to_string()
@@ -454,6 +460,29 @@ mod tests {
         assert_eq!(find_root_in_log(&jsonl, "root1"), Some(1));
         assert_eq!(find_root_in_log(&jsonl, "root0"), Some(0));
         assert_eq!(find_root_in_log(&jsonl, "nonexistent"), None);
+    }
+
+    #[test]
+    fn reader_mode_accepts_legacy_camel_case_events() {
+        let leaf = leaf_from_payload("insert", "db", "col", r#"{"a":1}"#);
+        let leaf_hex = {
+            use ark_ff::{BigInteger, PrimeField};
+            hex::encode(leaf.into_bigint().to_bytes_be())
+        };
+        let jsonl = serde_json::json!({
+            "index": 0,
+            "operation": "insert",
+            "database": "db",
+            "collection": "col",
+            "payload": r#"{"a":1}"#,
+            "leafHex": leaf_hex,
+            "rootAfter": "root0",
+            "timestamp": "2026-06-23T00:00:00Z"
+        })
+        .to_string();
+
+        assert_eq!(find_root_in_log(&jsonl, "root0"), Some(0));
+        assert!(verify_root_chain(&jsonl, 0));
     }
 
     #[test]

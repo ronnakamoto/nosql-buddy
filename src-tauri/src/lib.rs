@@ -285,6 +285,29 @@ pub fn run() {
                         );
                     }
 
+                    // Wire epoch (batch) persistence to the same audit dir and
+                    // reconcile the open batch's event count with the audit log
+                    // that was just replayed. Without this the desktop app's
+                    // batch counter resets to 0 on every launch while the audit
+                    // log (and on-chain anchor) keep advancing.
+                    let epoch_file = dir.join("audit").join("epochs.json");
+                    let app_state = app.state::<AppState>();
+                    if let Err(e) = app_state.epoch_manager.enable_persistence(&epoch_file) {
+                        tracing::error!(
+                            error = %e,
+                            epoch_file = %epoch_file.display(),
+                            "failed to initialize epoch persistence; batch state will reset on restart"
+                        );
+                    } else if let Err(e) = app_state
+                        .epoch_manager
+                        .sync_open_epoch_with_audit_log(&app_state.audit_log)
+                    {
+                        tracing::error!(
+                            error = %e,
+                            "failed to sync open epoch with audit log"
+                        );
+                    }
+
                     // Wire the attestation manager's sled store using
                     // the same sled DB path as the audit log. The
                     // attestation manager uses a separate tree within

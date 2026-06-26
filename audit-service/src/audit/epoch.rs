@@ -181,6 +181,29 @@ impl EpochManager {
         })
     }
 
+    /// Enable on-disk persistence at runtime and load any saved state.
+    ///
+    /// Unlike [`new_with_persistence`], this works on an already-constructed
+    /// manager (e.g. the Tauri `AppState` is created before the OS data dir
+    /// is known, then persistence is wired in `setup()`). If `path` exists,
+    /// the saved epoch list replaces the in-memory state; otherwise the
+    /// current state is persisted so the file exists going forward.
+    pub fn enable_persistence(&self, path: impl AsRef<Path>) -> AuditResult<()> {
+        let path = path.as_ref().to_path_buf();
+        if path.exists() {
+            let data = std::fs::read_to_string(&path)
+                .map_err(|e| AuditError::Internal(format!("read epoch state: {e}")))?;
+            let state: PersistedEpochState = serde_json::from_str(&data)
+                .map_err(|e| AuditError::Internal(format!("parse epoch state: {e}")))?;
+            *self.epochs.lock().unwrap_or_else(|e| e.into_inner()) = state.epochs;
+            *self.next_oplog_start_ts.lock().unwrap_or_else(|e| e.into_inner()) =
+                state.next_oplog_start_ts;
+        }
+        *self.persistence_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
+        // Persist current state so the file is created when absent.
+        self.save()
+    }
+
     /// Persist the current epoch state to disk, if a path is configured.
     fn save(&self) -> AuditResult<()> {
         let path = self
@@ -420,6 +443,10 @@ impl EpochManager {
             return Ok(Some(closed));
         }
 
+        // Persist the refreshed event count so the on-disk batch state
+        // reflects events recorded while the manager was offline.
+        drop(epochs);
+        self.save()?;
         Ok(None)
     }
 
