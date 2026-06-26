@@ -19,6 +19,24 @@ use crate::audit::stellar_native;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
+/// Resolve the active [`ChainConfig`] from persisted mode settings.
+///
+/// Testnet → the shared testnet defaults (RPC URL + bundled contract ID).
+/// Mainnet → the user-configured RPC URL + contract ID from the settings store.
+///
+/// All commands that touch the Stellar network must call this instead of
+/// hardcoding `ChainConfig::testnet()`.
+fn chain_config(app: &tauri::AppHandle) -> AppResult<ChainConfig> {
+    let mode = load_mode_config(app)?;
+    Ok(match mode.network {
+        AuditNetwork::Testnet => ChainConfig::testnet(),
+        AuditNetwork::Mainnet => ChainConfig::mainnet(
+            mode.mainnet_rpc_url,
+            mode.mainnet_contract_id,
+        ),
+    })
+}
+
 /// Status snapshot of the audit log.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -285,6 +303,7 @@ pub async fn audit_record_event(
 /// along with optional metadata (e.g. event count, timestamp).
 #[tauri::command]
 pub async fn audit_commit_root(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     metadata: Option<String>,
 ) -> AppResult<CommitResult> {
@@ -297,10 +316,11 @@ pub async fn audit_commit_root(
     let root_bytes = root_bigint.to_bytes_be();
     let root_hex = hex::encode(&root_bytes);
 
+    let chain = chain_config(&app)?;
+
     // Check if this root is already committed on-chain to avoid
     // RootAlreadyCommitted errors.
     let root_hex_check = root_hex.clone();
-    let chain = crate::audit::dev_setup::ChainConfig::testnet();
     let probe_kp = stellar_native::generate_keypair();
     let onchain = stellar_native::get_current_root_native(
         &probe_kp,
@@ -349,10 +369,10 @@ pub async fn audit_commit_root(
     Ok(result)
 }
 
-/// Get the latest committed root from the Soroban contract on Stellar testnet.
+/// Get the latest committed root from the Soroban contract on the active network.
 #[tauri::command]
-pub async fn audit_get_onchain_root() -> AppResult<Option<OnChainRoot>> {
-    let chain = crate::audit::dev_setup::ChainConfig::testnet();
+pub async fn audit_get_onchain_root(app: tauri::AppHandle) -> AppResult<Option<OnChainRoot>> {
+    let chain = chain_config(&app)?;
     let kp = stellar_native::generate_keypair();
     Ok(stellar_native::get_current_root_native(&kp, &chain.rpc_url, &chain.contract_id).await?)
 }
@@ -633,6 +653,7 @@ pub async fn audit_check_replica_set(
 /// the keypair from the OS keychain instead of the `stellar` CLI identity.
 #[tauri::command]
 pub async fn audit_commit_root_native(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     metadata: Option<String>,
 ) -> AppResult<CommitResult> {
@@ -644,11 +665,18 @@ pub async fn audit_commit_root_native(
     let root_bytes = root_bigint.to_bytes_be();
     let root_hex = hex::encode(&root_bytes);
 
+    let chain = chain_config(&app)?;
+
     // Check if this root is already committed on-chain to avoid
     // RootAlreadyCommitted errors (same guard as audit_commit_root).
     let root_hex_check = root_hex.clone();
-    let rpc_client = crate::audit::stellar_rpc::StellarRpcClient::new();
-    let onchain = rpc_client.get_current_root().await?;
+    let probe_kp = stellar_native::generate_keypair();
+    let onchain = stellar_native::get_current_root_native(
+        &probe_kp,
+        &chain.rpc_url,
+        &chain.contract_id,
+    )
+    .await?;
     if let Some(ref entry) = onchain {
         if entry.root_hex == root_hex_check {
             return Err(AppError::Validation(format!(
@@ -674,9 +702,6 @@ pub async fn audit_commit_root_native(
                 "no Stellar keypair found — run onboarding first".to_string(),
             )
         })?;
-
-    // Use testnet config (dev mode).
-    let chain = crate::audit::dev_setup::ChainConfig::testnet();
 
     // Commit via native signing.
     let result = crate::audit::stellar_native::commit_root_native(
@@ -978,21 +1003,20 @@ pub struct OplogIntegrityReport {
 /// - "error" — computation failed for an unexpected reason.
 #[tauri::command]
 pub async fn audit_verify_oplog_integrity(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     connection_id: String,
-    rpc_url: Option<String>,
 ) -> AppResult<OplogIntegrityReport> {
     use crate::audit::oplog::{compute_oplog_range_hash, OplogTimestamp};
+
+    let chain = chain_config(&app)?;
 
     // 1. Get the MongoDB client from the connection registry.
     let entry = state.clients.get(&connection_id).await?;
     let client = entry.client.clone();
 
     // 2. Get the latest on-chain root.
-    let rpc_url = rpc_url.unwrap_or_else(|| {
-        crate::audit::stellar_rpc::TESTNET_RPC_URL.to_string()
-    });
-    let rpc_client = crate::audit::stellar_rpc::StellarRpcClient::with_url(&rpc_url);
+    let rpc_client = crate::audit::stellar_rpc::StellarRpcClient::with_url(&chain.rpc_url);
     let onchain_root = rpc_client.get_current_root().await?;
 
     let sequence = match onchain_root {
@@ -1012,13 +1036,13 @@ pub async fn audit_verify_oplog_integrity(
         }
     };
 
-    // 3. Get the on-chain oplog commitment via native contract simulation.
+    // 3. Get the on-chain oplog commitment via native contract invocation.
     let probe_kp = stellar_native::generate_keypair();
     let on_chain_oplog = stellar_native::get_oplog_commitment_native(
         sequence,
         &probe_kp,
-        &rpc_url,
-        &crate::audit::dev_setup::ChainConfig::testnet().contract_id,
+        &chain.rpc_url,
+        &chain.contract_id,
     )
     .await?;
 
@@ -1152,9 +1176,10 @@ pub async fn audit_verify_oplog_integrity(
 /// auditor compares against their own independent computation.
 #[tauri::command]
 pub async fn audit_get_oplog_commitment(
+    app: tauri::AppHandle,
     sequence: u64,
 ) -> AppResult<Option<crate::audit::stellar::OnChainOplogCommitment>> {
-    let chain = crate::audit::dev_setup::ChainConfig::testnet();
+    let chain = chain_config(&app)?;
     let kp = stellar_native::generate_keypair();
     Ok(stellar_native::get_oplog_commitment_native(sequence, &kp, &chain.rpc_url, &chain.contract_id).await?)
 }

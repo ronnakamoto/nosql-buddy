@@ -327,14 +327,31 @@ async fn simulate_transaction(
     // Check for simulation-level error (the RPC returns this inside `result`,
     // not as a top-level JSON-RPC error).
     if let Some(sim_err) = &sim.error {
-        return Err(AuditError::Validation(format!(
-            "simulateTransaction returned error: {sim_err}"
-        )));
+        // Classify common Soroban host errors into actionable messages.
+        let msg = if sim_err.contains("MissingValue") && sim_err.contains("WasmVm") {
+            // The contract WASM on-chain doesn't export the invoked function.
+            // Most likely the deployed contract is an older build that predates
+            // this function being added.  The contract needs to be redeployed.
+            "Contract function not found on-chain. The deployed contract may be \
+             outdated — redeploy the Soroban contract and update the contract ID \
+             in settings.".to_string()
+        } else if sim_err.contains("InvalidAction") || sim_err.contains("not authorized") {
+            format!("Contract call not authorized: {sim_err}")
+        } else {
+            // Include the raw error in debug builds only; in release, summarise.
+            if cfg!(debug_assertions) {
+                format!("Contract invocation failed: {sim_err}")
+            } else {
+                "Contract invocation failed. Check the RPC endpoint and contract ID in settings.".to_string()
+            }
+        };
+        return Err(AuditError::Validation(msg));
     }
 
     if sim.transaction_data.is_none() {
         return Err(AuditError::Validation(
-            "simulateTransaction returned no transactionData — the contract function may not exist or the contract may not be initialized".to_string(),
+            "Contract call returned no data. The contract may not be deployed at the \
+             configured contract ID, or the RPC node may be unreachable.".to_string(),
         ));
     }
 
