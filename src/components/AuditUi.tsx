@@ -1,5 +1,5 @@
 import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
-import { IconClose } from "./Icons";
+import { X } from "lucide-react";
 import "./audit.css";
 
 /**
@@ -471,7 +471,7 @@ export function Modal({
             {subtitle && <div className="modal__subtitle">{subtitle}</div>}
           </div>
           <button className="modal__close" onClick={onClose} aria-label="Close">
-            <IconClose />
+            <X />
           </button>
         </div>
         <div className="modal__body">{children}</div>
@@ -567,7 +567,7 @@ export function LogsModal({
             onClick={() => setQuery("")}
             aria-label="Clear filter"
           >
-            <IconClose size={12} />
+            <X size={12} />
           </button>
         )}
       </div>

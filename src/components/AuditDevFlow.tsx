@@ -21,7 +21,7 @@ import {
   LogsModal,
 } from "./AuditUi";
 import type { ProofResult } from "../ipc/commands";
-import { IconBeaker, IconCircleDash, IconClose } from "./Icons";
+import { FlaskConical, CircleDashed, X, CheckCircle, ExternalLink } from "lucide-react";
 
 /**
  * Dev Mode — a guided, step-based audit control surface.
@@ -241,7 +241,7 @@ export function AuditDevFlow(_: { onShowSettings: () => void; onSwitchMode: () =
         ) : (
           <Card>
             <EmptyState
-              icon={<IconBeaker size={28} />}
+              icon={<FlaskConical size={28} />}
               title="Start the audit stack"
               body="The dev stack runs three Docker containers locally (publisher, attester, reader). Once started, every MongoDB insert, update, and delete is captured into a tamper-evident log that you can anchor to the Stellar blockchain."
               action={
@@ -836,7 +836,7 @@ function DevLiveView() {
               onClick={() => setProofError(null)}
               aria-label="Dismiss"
             >
-              <IconClose size={14} />
+              <X size={14} />
             </button>
           </div>
         </Alert>
@@ -854,7 +854,7 @@ function DevLiveView() {
                   onClick={() => { setProofResult(null); setProvenIndex(null); setShowProofDetails(false); }}
                   aria-label="Close proof"
                 >
-                  <IconClose size={14} />
+                  <X size={14} />
                 </button>
               </div>
             }
@@ -862,10 +862,7 @@ function DevLiveView() {
           <div className="audit-proof-card">
             <div className="audit-proof-card__summary">
               <div className="audit-proof-card__check">
-                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                  <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" />
-                  <path d="M8 12l3 3 5-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
+                <CheckCircle size={32} />
               </div>
               <div className="audit-proof-card__summary-text">
                 <div className="audit-proof-card__summary-title">
@@ -888,9 +885,7 @@ function DevLiveView() {
                   rel="noopener noreferrer"
                   title="View the on-chain verification transaction in Stellar Expert"
                 >
-                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                    <path d="M8 2h6v6M13 2L8 7M10 6v7a1 1 0 01-1 1H3a1 1 0 01-1-1V5a1 1 0 011-1h6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
+                  <ExternalLink size={14} />
                   View verification tx
                 </a>
               ) : (
@@ -911,9 +906,7 @@ function DevLiveView() {
                     </>
                   ) : (
                     <>
-                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                        <path d="M8 2h6v6M13 2L8 7M10 6v7a1 1 0 01-1 1H3a1 1 0 01-1-1V5a1 1 0 011-1h6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
+                      <ExternalLink size={14} />
                       Verify on-chain
                     </>
                   )}
@@ -1033,7 +1026,7 @@ function DevLiveView() {
           />
           {events.length === 0 ? (
             <InlineEmpty
-              icon={<IconCircleDash size={22} />}
+              icon={<CircleDashed size={22} />}
               title="No changes captured yet"
               body="Insert, update, or delete a document in MongoDB to populate the audit log."
             />

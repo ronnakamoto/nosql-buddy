@@ -1,7 +1,7 @@
 import { useMemo, useState, useRef, useCallback } from "react";
 import type { AuditEvent } from "../ipc/commands";
 import { Badge, Button, EmptyState, Spinner } from "./AuditUi";
-import { IconCircleDash } from "./Icons";
+import { CircleDashed } from "lucide-react";
 
 /**
  * AuditChangeFeed — real-time stream of audit events with filter chips + search.
@@ -289,7 +289,7 @@ export function AuditChangeFeed({
           {/* Event list */}
           {events.length === 0 ? (
             <EmptyState
-              icon={<IconCircleDash size={26} />}
+              icon={<CircleDashed size={26} />}
               title="No events yet"
               body="Write data to MongoDB (insert, update, delete) to populate the audit log."
             />

@@ -20,15 +20,15 @@ import { ToastStack, useToasts } from "./components/Toast";
 import AuditPanel from "./components/AuditPanel";
 import ErrorBoundary from "./components/ErrorBoundary";
 import {
-  IconSearch,
-  IconTerminal,
-  IconShieldCheck,
-  IconDatabase,
-  IconLayers,
-  IconGrid,
-  IconServer,
-  IconPlus,
-} from "./components/Icons";
+  Search,
+  Terminal,
+  ShieldCheck,
+  Database,
+  Layers,
+  LayoutGrid,
+  Server,
+  Plus,
+} from "lucide-react";
 
 type AuditView = "chooser" | "dev" | "production" | "settings";
 
@@ -112,7 +112,7 @@ function NewTabMenu({
         aria-expanded={open}
         title="New tab"
       >
-        <IconPlus size={16} />
+        <Plus size={16} />
       </button>
       {open && (
         <div
@@ -130,7 +130,7 @@ function NewTabMenu({
             role="menuitem"
             onClick={() => { setOpen(false); onNewQuery(); }}
           >
-            <span className="new-tab-menu__icon" aria-hidden="true"><IconSearch size={14} /></span>
+            <span className="new-tab-menu__icon" aria-hidden="true"><Search size={14} /></span>
             <span className="new-tab-menu__label">Query</span>
             <span className="new-tab-menu__hint">Find documents</span>
           </button>
@@ -139,7 +139,7 @@ function NewTabMenu({
             role="menuitem"
             onClick={() => { setOpen(false); onNewShell(); }}
           >
-            <span className="new-tab-menu__icon" aria-hidden="true"><IconTerminal size={14} /></span>
+            <span className="new-tab-menu__icon" aria-hidden="true"><Terminal size={14} /></span>
             <span className="new-tab-menu__label">Shell</span>
             <span className="new-tab-menu__hint">Run mongosh</span>
           </button>
@@ -148,7 +148,7 @@ function NewTabMenu({
             role="menuitem"
             onClick={() => { setOpen(false); onOpenAudit(); }}
           >
-            <span className="new-tab-menu__icon" aria-hidden="true"><IconShieldCheck size={14} /></span>
+            <span className="new-tab-menu__icon" aria-hidden="true"><ShieldCheck size={14} /></span>
             <span className="new-tab-menu__label">Audit Log</span>
             <span className="new-tab-menu__hint">ZK tamper-evident log</span>
           </button>
@@ -398,7 +398,7 @@ export default function App() {
           return (
             <div key={db.name} className="tree-group">
               <div className="tree-group__header">
-                <span className="tree-group__icon" aria-hidden="true"><IconDatabase size={13} /></span>
+                <span className="tree-group__icon" aria-hidden="true"><Database size={13} /></span>
                 <span className="tree-group__label">{db.name}</span>
                 <span className="tree-group__count">{collections.length} collections</span>
               </div>
@@ -418,7 +418,7 @@ export default function App() {
                       if (e.key === "Enter") openQueryTab(active.handle.connectionId, db.name, c.name);
                     }}
                   >
-                    <span className="tree-item__icon" aria-hidden="true"><IconLayers size={13} /></span>
+                    <span className="tree-item__icon" aria-hidden="true"><Layers size={13} /></span>
                     <span className="tree-item__name">{c.name}</span>
                     <span className="tree-item__meta">
                       {c.documentCount != null ? formatNumber(c.documentCount) : ""}
@@ -433,7 +433,7 @@ export default function App() {
                         title="Find documents"
                         aria-label="Find documents"
                       >
-                        <IconSearch size={13} />
+                        <Search size={13} />
                       </button>
                       <button
                         className="tree-item__action"
@@ -444,7 +444,7 @@ export default function App() {
                         title="Indexes"
                         aria-label="Indexes"
                       >
-                        <IconDatabase size={13} />
+                        <Database size={13} />
                       </button>
                       <button
                         className="tree-item__action"
@@ -455,7 +455,7 @@ export default function App() {
                         title="Schema"
                         aria-label="Schema"
                       >
-                        <IconGrid size={13} />
+                        <LayoutGrid size={13} />
                       </button>
                     </span>
                   </div>
@@ -540,7 +540,7 @@ export default function App() {
                   className={`tree-item ${active?.handle.profileId === p.id ? "is-active" : ""}`}
                 >
                   <span className="tree-item__icon" aria-hidden="true">
-                    <IconServer size={13} />
+                    <Server size={13} />
                   </span>
                   <span className="tree-item__name" title={p.maskedUri}>
                     {p.name}
@@ -568,7 +568,7 @@ export default function App() {
           </div>
         )}
         <div className="app__sidebar-search">
-          <span className="app__sidebar-search-icon" aria-hidden="true"><IconSearch size={13} /></span>
+          <span className="app__sidebar-search-icon" aria-hidden="true"><Search size={13} /></span>
           <input
             type="text"
             placeholder={active ? "Filter collections…" : "Filter connections…"}
@@ -608,14 +608,14 @@ export default function App() {
             >
               <span className="tab__icon" aria-hidden="true">
                 {t.kind === "query"
-                  ? <IconSearch size={14} />
+                  ? <Search size={14} />
                   : t.kind === "indexes"
-                    ? <IconDatabase size={14} />
+                    ? <Database size={14} />
                     : t.kind === "schema"
-                      ? <IconGrid size={14} />
+                      ? <LayoutGrid size={14} />
                       : t.kind === "shell"
-                        ? <IconTerminal size={14} />
-                        : <IconShieldCheck size={14} />}
+                        ? <Terminal size={14} />
+                        : <ShieldCheck size={14} />}
               </span>
               <span className="tab__label">
                 {t.kind === "query"

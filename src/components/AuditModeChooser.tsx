@@ -5,7 +5,7 @@ import commands, {
   formatError,
 } from "../ipc/commands";
 import { Card, Badge, Button, Spinner, Alert, injectAuditKeyframes } from "./AuditUi";
-import { IconBeaker, IconCheckCircle, IconChevronRight, IconShieldCheck } from "./Icons";
+import { FlaskConical, CheckCircle, ChevronRight, ShieldCheck } from "lucide-react";
 
 /**
  * The mode chooser — the landing page for the Audit tab.
@@ -68,7 +68,7 @@ export function AuditModeChooser({
       <div>
         <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", marginBottom: "var(--space-2)" }}>
           <span style={{ color: "var(--accent-600)", display: "flex" }}>
-            <IconShieldCheck size={20} />
+            <ShieldCheck size={20} />
           </span>
           <h1
             style={{
@@ -124,7 +124,7 @@ export function AuditModeChooser({
           loading={selecting === "dev"}
           onClick={() => choose("dev")}
           tone="accent"
-          symbol={<IconBeaker size={22} />}
+          symbol={<FlaskConical size={22} />}
           title="Dev Mode"
           description="Run the entire audit system locally with Docker. Best for trying it out or developing against the audit pipeline."
           bullets={[
@@ -141,7 +141,7 @@ export function AuditModeChooser({
           loading={selecting === "production"}
           onClick={() => choose("production")}
           tone="success"
-          symbol={<IconCheckCircle size={22} />}
+          symbol={<CheckCircle size={22} />}
           title="Production Mode"
           description="Use the built-in pipeline with your own Stellar keys. Commit to testnet or mainnet with real transactions."
           bullets={[
@@ -286,7 +286,7 @@ function ModeCard({
                 color: "var(--ink-muted)",
               }}
             >
-              <span style={{ color: accent, lineHeight: "var(--line-height-tight)", display: "flex", alignItems: "center" }}><IconChevronRight size={11} /></span>
+              <span style={{ color: accent, lineHeight: "var(--line-height-tight)", display: "flex", alignItems: "center" }}><ChevronRight size={11} /></span>
               <span>{b}</span>
             </li>
           ))}

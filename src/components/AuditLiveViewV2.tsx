@@ -24,7 +24,7 @@ import {
   TxHashLink,
   StatusCard,
 } from "./AuditUi";
-import { IconCircleDash } from "./Icons";
+import { CircleDashed } from "lucide-react";
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -482,7 +482,7 @@ export function AuditLiveViewV2({
         />
         {events.length === 0 ? (
           <EmptyState
-            icon={<IconCircleDash size={28} />}
+            icon={<CircleDashed size={28} />}
             title="No events yet"
             body="Write data to MongoDB (insert, update, delete) to populate the audit log. Events appear here in real time."
           />
