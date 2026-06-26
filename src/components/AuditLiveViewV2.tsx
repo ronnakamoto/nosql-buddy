@@ -450,11 +450,13 @@ export function AuditLiveViewV2({
                   ? "No commitment"
                   : oplogReport.verdict === "no_oplog_commitment"
                     ? "No oplog hash"
-                    : oplogReport.verdict === "stale"
-                      ? "Stale"
-                      : oplogReport.verdict === "complete"
-                        ? "Verified"
-                        : "Mismatch"
+                    : oplogReport.verdict === "contract_outdated"
+                      ? "Contract outdated"
+                      : oplogReport.verdict === "stale"
+                        ? "Stale"
+                        : oplogReport.verdict === "complete"
+                          ? "Verified"
+                          : "Mismatch"
               : "—"
           }
           detail={

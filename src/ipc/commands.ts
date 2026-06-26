@@ -541,7 +541,7 @@ export interface OplogIntegrityReport {
   oplogEntryCount: number | null;
   allMatch: boolean;
   onChainMatchesAuditor: boolean;
-  /** "complete", "mismatch", "stale", "no_commitment", "no_oplog_commitment", or "error" */
+  /** "complete", "mismatch", "stale", "no_commitment", "no_oplog_commitment", "contract_outdated", or "error" */
   verdict: string;
   explanation: string;
   alerts: string[];
@@ -674,16 +674,16 @@ const commands = {
     invoke<string>("audit_generate_stellar_account"),
   auditCheckReplicaSet: (connectionId: string) =>
     invoke<boolean>("audit_check_replica_set", { connectionId }),
-  auditCommitRootNative: (metadata?: string) =>
-    invoke<CommitResult>("audit_commit_root_native", { metadata }),
+  auditCommitRootNative: (metadata?: string, connectionId?: string) =>
+    invoke<CommitResult>("audit_commit_root_native", { metadata, connectionId }),
   auditPublishEpochToPinata: (epochNumber: number) =>
     invoke<IpfsPublishResult>("audit_publish_epoch_to_pinata", {
       epochNumber,
     }),
 
   // --- ZK Audit: Production mode (in-app pipeline, user's own keys) ---
-  auditCommitRootProduction: (metadata?: string) =>
-    invoke<CommitResult>("audit_commit_root_production", { metadata }),
+  auditCommitRootProduction: (metadata?: string, connectionId?: string) =>
+    invoke<CommitResult>("audit_commit_root_production", { metadata, connectionId }),
 
   // --- ZK Audit: Mode selection (dev / production) ---
   auditGetModeConfig: () => invoke<AuditModeConfig>("audit_get_mode_config"),

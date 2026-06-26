@@ -262,6 +262,14 @@ fn build_invoke_transaction(
 
 // ─── Transaction simulation ───────────────────────────────────────────
 
+pub const CONTRACT_FUNCTION_NOT_FOUND_MESSAGE: &str = "Contract function not found on-chain. The deployed contract may be outdated, redeploy the Soroban contract and update the contract ID in settings.";
+
+pub fn is_contract_function_not_found_error(error: &AuditError) -> bool {
+    let msg = error.to_string();
+    msg.contains(CONTRACT_FUNCTION_NOT_FOUND_MESSAGE)
+        || (msg.contains("MissingValue") && msg.contains("WasmVm"))
+}
+
 /// Simulate a transaction via the Soroban RPC `simulateTransaction` method.
 async fn simulate_transaction(
     rpc_url: &str,
@@ -332,9 +340,7 @@ async fn simulate_transaction(
             // The contract WASM on-chain doesn't export the invoked function.
             // Most likely the deployed contract is an older build that predates
             // this function being added.  The contract needs to be redeployed.
-            "Contract function not found on-chain. The deployed contract may be \
-             outdated — redeploy the Soroban contract and update the contract ID \
-             in settings.".to_string()
+            CONTRACT_FUNCTION_NOT_FOUND_MESSAGE.to_string()
         } else if sim_err.contains("InvalidAction") || sim_err.contains("not authorized") {
             format!("Contract call not authorized: {sim_err}")
         } else {
@@ -2054,6 +2060,21 @@ mod tests {
             100,
         );
         assert!(tx.is_ok());
+    }
+
+    #[test]
+    fn test_contract_function_not_found_error_detection() {
+        let classified =
+            AuditError::Validation(CONTRACT_FUNCTION_NOT_FOUND_MESSAGE.to_string());
+        assert!(is_contract_function_not_found_error(&classified));
+
+        let raw = AuditError::Validation(
+            "HostError: Error(WasmVm, InvalidAction) trapped with MissingValue".to_string(),
+        );
+        assert!(is_contract_function_not_found_error(&raw));
+
+        let unrelated = AuditError::Validation("RPC endpoint unavailable".to_string());
+        assert!(!is_contract_function_not_found_error(&unrelated));
     }
 
     #[test]

@@ -655,6 +655,146 @@ pub async fn audit_check_replica_set(
     Ok(crate::audit::dev_setup::check_mongodb_rs(&entry.client).await?)
 }
 
+/// Shared commit path for the desktop app's dev and production modes.
+///
+/// This mirrors the daemon's commit flow (`auditd::mod::commit_epoch`): it
+/// commits the most recent *sealed but uncommitted* epoch's frozen root, and
+/// when a MongoDB connection is supplied it also computes and attaches the
+/// epoch's oplog completeness hash, committing both on-chain via
+/// `commit_root_with_oplog_native`. Without a MongoDB connection (or a sealed
+/// epoch) it falls back to committing the root only.
+///
+/// Storing the oplog commitment here is what makes
+/// `audit_verify_oplog_integrity` able to verify completeness — previously the
+/// app never wrote an oplog commitment, so verification always reported
+/// `no_oplog_commitment`.
+async fn commit_latest_epoch_root(
+    state: &AppState,
+    metadata: Option<String>,
+    kp: &stellar_native::StellarKeypair,
+    chain: &ChainConfig,
+    connection_id: Option<String>,
+) -> AppResult<CommitResult> {
+    use crate::audit::oplog::{compute_oplog_range_hash, get_majority_commit_ts};
+
+    let audit = &state.audit_log;
+
+    // Find the most recent sealed (closed), uncommitted epoch. The UI seals an
+    // epoch before committing, so this is the epoch the user intends to commit.
+    let target_epoch = state
+        .epoch_manager
+        .list_epochs()
+        .into_iter()
+        .filter(|e| !e.committed && e.end_index.is_some() && e.root_hex.is_some())
+        .max_by_key(|e| e.epoch_number);
+
+    // The root to commit: the frozen epoch root if available, otherwise the
+    // live audit-log root (legacy behaviour when no epoch is sealed).
+    let root_hex = match &target_epoch {
+        Some(epoch) => epoch.root_hex.clone().expect("root_hex checked above"),
+        None => {
+            use ark_ff::{BigInteger, PrimeField};
+            let root_bytes = audit.root()?.into_bigint().to_bytes_be();
+            hex::encode(&root_bytes)
+        }
+    };
+
+    // Guard against re-committing the same root.
+    let rpc_client = crate::audit::stellar_rpc::StellarRpcClient::with_url(&chain.rpc_url);
+    if let Some(entry) = rpc_client.get_current_root().await? {
+        if entry.root_hex == root_hex {
+            return Err(AppError::Validation(format!(
+                "root 0x{}.. is already committed on-chain (seq #{}). New audit events are needed to produce a different root.",
+                &root_hex[..root_hex.len().min(16)],
+                entry.sequence
+            )));
+        }
+    }
+
+    let meta = metadata.unwrap_or_else(|| {
+        format!(
+            "events={} leaves={} network={}",
+            audit.event_count(),
+            audit.leaf_count(),
+            chain.network
+        )
+    });
+
+    // If we have both a sealed epoch and a MongoDB connection, attach the
+    // oplog completeness hash and commit it on-chain alongside the root.
+    if let (Some(epoch), Some(conn_id)) = (target_epoch.as_ref(), connection_id.as_ref()) {
+        let client = state.clients.get(conn_id).await?.client.clone();
+
+        // Reuse an already-attached oplog hash if present; otherwise compute
+        // the oplog range hash for this epoch and attach it.
+        let epoch_with_oplog = if epoch.oplog_merkle_root_hex.is_some() {
+            epoch.clone()
+        } else {
+            let start_ts = state.epoch_manager.next_oplog_start_ts();
+            let majority_ts = get_majority_commit_ts(&client).await?;
+            let range =
+                compute_oplog_range_hash(&client, epoch.epoch_number, start_ts, majority_ts).await?;
+            state.epoch_manager.attach_oplog_hash(
+                epoch.epoch_number,
+                range.start_ts,
+                range.end_ts,
+                range.entry_count,
+                range.oplog_merkle_root_hex.clone(),
+                range.majority_commit_ts,
+            )?
+        };
+
+        let oplog_root_hex = epoch_with_oplog
+            .oplog_merkle_root_hex
+            .clone()
+            .expect("oplog root attached above");
+        let oplog_start = epoch_with_oplog.oplog_start_ts.map_or(0, |ts| ts.pack_u64());
+        let oplog_end = epoch_with_oplog.oplog_end_ts.map_or(0, |ts| ts.pack_u64());
+        let oplog_count = epoch_with_oplog.oplog_entry_count.unwrap_or(0);
+
+        match stellar_native::commit_root_with_oplog_native(
+            &root_hex,
+            &oplog_root_hex,
+            oplog_start,
+            oplog_end,
+            oplog_count,
+            &meta,
+            kp,
+            &chain.rpc_url,
+            &chain.horizon_url,
+            &chain.contract_id,
+            &chain.passphrase,
+        )
+        .await
+        {
+            Ok(result) => return Ok(result),
+            // If the deployed contract is older than the oplog feature, don't
+            // block the commit — fall back to a root-only commit so audit
+            // anchoring keeps working. The verify path reports `contract_outdated`
+            // to prompt a redeploy.
+            Err(err) if stellar_native::is_contract_function_not_found_error(&err) => {
+                tracing::warn!(
+                    "commit: deployed contract lacks commit_root_with_oplog — committing root only (redeploy to enable oplog completeness)"
+                );
+            }
+            Err(err) => return Err(AppError::from(err)),
+        }
+    }
+
+    // No MongoDB connection (or no sealed epoch): commit the root only.
+    let result = stellar_native::commit_root_native(
+        &root_hex,
+        &meta,
+        kp,
+        &chain.rpc_url,
+        &chain.horizon_url,
+        &chain.contract_id,
+        &chain.passphrase,
+    )
+    .await?;
+    Ok(result)
+}
+
 /// Commit a root to Stellar using native signing (no CLI subprocess).
 ///
 /// This is the dev mode replacement for `audit_commit_root` that uses
@@ -664,44 +804,9 @@ pub async fn audit_commit_root_native(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     metadata: Option<String>,
+    connection_id: Option<String>,
 ) -> AppResult<CommitResult> {
-    let audit = &state.audit_log;
-    let root = audit.root()?;
-
-    use ark_ff::{BigInteger, PrimeField};
-    let root_bigint = root.into_bigint();
-    let root_bytes = root_bigint.to_bytes_be();
-    let root_hex = hex::encode(&root_bytes);
-
     let chain = chain_config(&app)?;
-
-    // Check if this root is already committed on-chain to avoid
-    // RootAlreadyCommitted errors (same guard as audit_commit_root).
-    let root_hex_check = root_hex.clone();
-    let probe_kp = stellar_native::generate_keypair();
-    let onchain = stellar_native::get_current_root_native(
-        &probe_kp,
-        &chain.rpc_url,
-        &chain.contract_id,
-    )
-    .await?;
-    if let Some(ref entry) = onchain {
-        if entry.root_hex == root_hex_check {
-            return Err(AppError::Validation(format!(
-                "root 0x{}.. is already committed on-chain (seq #{}). New audit events are needed to produce a different root.",
-                &root_hex_check[..16],
-                entry.sequence
-            )));
-        }
-    }
-
-    let meta = metadata.unwrap_or_else(|| {
-        format!(
-            "events={} leaves={}",
-            audit.event_count(),
-            audit.leaf_count()
-        )
-    });
 
     // Load keypair from keychain.
     let kp = crate::audit::dev_setup::load_keypair_from_keychain()?
@@ -711,19 +816,9 @@ pub async fn audit_commit_root_native(
             )
         })?;
 
-    // Commit via native signing.
-    let result = crate::audit::stellar_native::commit_root_native(
-        &root_hex,
-        &meta,
-        &kp,
-        &chain.rpc_url,
-        &chain.horizon_url,
-        &chain.contract_id,
-        &chain.passphrase,
-    )
-    .await?;
-
-    Ok(result)
+    // Commit the sealed epoch root (with oplog completeness when a MongoDB
+    // connection is available) via native signing.
+    commit_latest_epoch_root(&state, metadata, &kp, &chain, connection_id).await
 }
 
 /// Commit a root to Stellar using the **production** keypair + chosen network.
@@ -739,18 +834,10 @@ pub async fn audit_commit_root_production(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     metadata: Option<String>,
+    connection_id: Option<String>,
 ) -> AppResult<CommitResult> {
     use crate::audit::audit_mode::{load_mode_config, load_production_keypair, AuditNetwork};
     use crate::audit::dev_setup::ChainConfig;
-    use crate::audit::stellar_native;
-
-    let audit = &state.audit_log;
-    let root = audit.root()?;
-
-    use ark_ff::{BigInteger, PrimeField};
-    let root_bigint = root.into_bigint();
-    let root_bytes = root_bigint.to_bytes_be();
-    let root_hex = hex::encode(&root_bytes);
 
     // Load mode config to pick the network + contract/rpc.
     let config = load_mode_config(&app)?;
@@ -767,30 +854,6 @@ pub async fn audit_commit_root_production(
         }
     };
 
-    // Check if this root is already committed on-chain.
-    let root_hex_check = root_hex.clone();
-    let rpc_url = chain.rpc_url.clone();
-    let rpc_client = crate::audit::stellar_rpc::StellarRpcClient::with_url(&rpc_url);
-    let onchain = rpc_client.get_current_root().await?;
-    if let Some(ref entry) = onchain {
-        if entry.root_hex == root_hex_check {
-            return Err(AppError::Validation(format!(
-                "root 0x{}.. is already committed on-chain (seq #{}). New audit events are needed to produce a different root.",
-                &root_hex_check[..16],
-                entry.sequence
-            )));
-        }
-    }
-
-    let meta = metadata.unwrap_or_else(|| {
-        format!(
-            "events={} leaves={} network={}",
-            audit.event_count(),
-            audit.leaf_count(),
-            chain.network
-        )
-    });
-
     // Load the production keypair from the keychain.
     let kp = load_production_keypair()?.ok_or_else(|| {
         AppError::Validation(
@@ -799,18 +862,9 @@ pub async fn audit_commit_root_production(
         )
     })?;
 
-    let result = stellar_native::commit_root_native(
-        &root_hex,
-        &meta,
-        &kp,
-        &chain.rpc_url,
-        &chain.horizon_url,
-        &chain.contract_id,
-        &chain.passphrase,
-    )
-    .await?;
-
-    Ok(result)
+    // Commit the sealed epoch root (with oplog completeness when a MongoDB
+    // connection is available).
+    commit_latest_epoch_root(&state, metadata, &kp, &chain, connection_id).await
 }
 
 /// Publish an epoch batch to IPFS via Pinata (no daemon required).
@@ -1046,13 +1100,37 @@ pub async fn audit_verify_oplog_integrity(
 
     // 3. Get the on-chain oplog commitment via native contract invocation.
     let probe_kp = stellar_native::generate_keypair();
-    let on_chain_oplog = stellar_native::get_oplog_commitment_native(
+    let on_chain_oplog = match stellar_native::get_oplog_commitment_native(
         sequence,
         &probe_kp,
         &chain.rpc_url,
         &chain.contract_id,
     )
-    .await?;
+    .await
+    {
+        Ok(commitment) => commitment,
+        Err(err) if stellar_native::is_contract_function_not_found_error(&err) => {
+            return Ok(OplogIntegrityReport {
+                sequence,
+                on_chain_oplog_root: "none".to_string(),
+                auditor_oplog_root: None,
+                oplog_entry_count: None,
+                all_match: false,
+                on_chain_matches_auditor: false,
+                verdict: "contract_outdated".to_string(),
+                explanation: format!(
+                    "The deployed Soroban contract does not expose get_oplog_commitment, \
+                    so oplog completeness cannot be verified for epoch {sequence}. \
+                    Redeploy the current Soroban contract and update the contract ID in settings."
+                ),
+                alerts: vec![format!(
+                    "Contract {} is missing get_oplog_commitment",
+                    chain.contract_id
+                )],
+            });
+        }
+        Err(err) => return Err(AppError::from(err)),
+    };
 
     let on_chain_oplog_root = match on_chain_oplog {
         Some(ref oc) => oc.oplog_root_hex.clone(),

@@ -218,7 +218,7 @@ export function AuditProductionFlow({ onShowSettings, connectionId }: { onShowSe
   }
 
   // ─── Live view ─────────────────────────────────────────────────────
-  const commitFn = (metadata?: string) => commands.auditCommitRootProduction(metadata);
+  const commitFn = (metadata?: string) => commands.auditCommitRootProduction(metadata, connectionId ?? undefined);
   const badge = (
     <Badge tone="success" dot>
       Production · {network === "mainnet" ? "Mainnet" : "Testnet"}

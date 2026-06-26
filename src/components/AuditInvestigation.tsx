@@ -262,6 +262,7 @@ export function AuditInvestigation({
                 ? oplogReport.allMatch ? "Match"
                   : oplogReport.verdict === "no_commitment" ? "No commitment"
                   : oplogReport.verdict === "no_oplog_commitment" ? "No oplog hash"
+                  : oplogReport.verdict === "contract_outdated" ? "Contract outdated"
                   : oplogReport.verdict === "stale" ? "Stale"
                   : oplogReport.verdict === "complete" ? "Verified"
                   : "Mismatch"

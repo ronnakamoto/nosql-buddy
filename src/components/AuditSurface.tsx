@@ -193,11 +193,11 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
   const commitFn = useCallback(
     (metadata?: string): Promise<CommitResult> => {
       if (config.mode === "dev") {
-        return commands.auditCommitRootNative(metadata);
+        return commands.auditCommitRootNative(metadata, connectionId ?? undefined);
       }
-      return commands.auditCommitRootProduction(metadata);
+      return commands.auditCommitRootProduction(metadata, connectionId ?? undefined);
     },
-    [config.mode],
+    [config.mode, connectionId],
   );
 
   // ─── Handlers ─────────────────────────────────────────────────────────
