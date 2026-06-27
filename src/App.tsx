@@ -8,6 +8,7 @@ import commands, {
   type DatabaseSummary,
   type DocumentPage,
   type ProfileSummary,
+  type SaveProfileRequest,
 } from "./ipc/commands";
 import { onMenuAction } from "./ipc/events";
 import { ConnectionForm } from "./components/ConnectionForm";
@@ -28,6 +29,14 @@ import {
   LayoutGrid,
   Server,
   Plus,
+  ChevronsUpDown,
+  ChevronRight,
+  MoreHorizontal,
+  Pencil,
+  Copy,
+  Trash2,
+  Plug,
+  Unplug,
 } from "lucide-react";
 
 type AuditView = "chooser" | "dev" | "production" | "settings";
@@ -158,6 +167,283 @@ function NewTabMenu({
   );
 }
 
+// ─── Per-connection overflow menu ────────────────────────────────
+// Fixed-positioned so it escapes the popover's own scroll clipping,
+// mirroring the NewTabMenu technique.
+function ConnectionRowMenu({
+  isActive,
+  onConnect,
+  onDisconnect,
+  onEdit,
+  onDuplicate,
+  onDelete,
+}: {
+  isActive: boolean;
+  onConnect: () => void;
+  onDisconnect: () => void;
+  onEdit: () => void;
+  onDuplicate: () => void;
+  onDelete: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left: number | null; right: number | null }>({ top: 0, left: null, right: null });
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  const place = useCallback(() => {
+    const btn = triggerRef.current;
+    if (!btn) return;
+    const r = btn.getBoundingClientRect();
+    const width = 184;
+    const top = r.bottom + 4;
+    if (r.right - width < 8) setPos({ top, left: r.left, right: null });
+    else setPos({ top, left: null, right: window.innerWidth - r.right });
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    place();
+    const onDown = (e: MouseEvent) => {
+      if (menuRef.current?.contains(e.target as Node)) return;
+      if (triggerRef.current?.contains(e.target as Node)) return;
+      setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("resize", place);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", place);
+    };
+  }, [open, place]);
+
+  const run = (fn: () => void) => () => { setOpen(false); fn(); };
+
+  return (
+    <>
+      <button
+        ref={triggerRef}
+        className="conn-row__more"
+        aria-label="Connection actions"
+        aria-expanded={open}
+        title="Actions"
+        onClick={(e) => { e.stopPropagation(); if (!open) place(); setOpen((o) => !o); }}
+      >
+        <MoreHorizontal size={15} />
+      </button>
+      {open && (
+        <div
+          ref={menuRef}
+          className="row-menu"
+          role="menu"
+          style={{ position: "fixed", top: pos.top, left: pos.left ?? undefined, right: pos.right ?? undefined }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {isActive ? (
+            <button className="row-menu__item" role="menuitem" onClick={run(onDisconnect)}>
+              <Unplug size={14} aria-hidden="true" /> Disconnect
+            </button>
+          ) : (
+            <button className="row-menu__item" role="menuitem" onClick={run(onConnect)}>
+              <Plug size={14} aria-hidden="true" /> Connect
+            </button>
+          )}
+          <button className="row-menu__item" role="menuitem" onClick={run(onEdit)}>
+            <Pencil size={14} aria-hidden="true" /> Edit
+          </button>
+          <button className="row-menu__item" role="menuitem" onClick={run(onDuplicate)}>
+            <Copy size={14} aria-hidden="true" /> Duplicate
+          </button>
+          <div className="row-menu__sep" role="separator" />
+          <button className="row-menu__item row-menu__item--danger" role="menuitem" onClick={run(onDelete)}>
+            <Trash2 size={14} aria-hidden="true" /> Delete
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ─── Connection switcher (active status + searchable popover) ──────
+function ConnectionSwitcher({
+  active,
+  profiles,
+  error,
+  open,
+  onOpenChange,
+  onConnect,
+  onDisconnect,
+  onAdd,
+  onEdit,
+  onDuplicate,
+  onDelete,
+}: {
+  active: ActiveConnection | null;
+  profiles: ProfileSummary[];
+  error: string | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onConnect: (p: ProfileSummary) => void;
+  onDisconnect: () => void;
+  onAdd: () => void;
+  onEdit: (p: ProfileSummary) => void;
+  onDuplicate: (p: ProfileSummary) => void;
+  onDelete: (p: ProfileSummary) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const rootRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) onOpenChange(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onOpenChange(false); };
+    document.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    const raf = requestAnimationFrame(() => searchRef.current?.focus());
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+      cancelAnimationFrame(raf);
+    };
+  }, [open, onOpenChange]);
+
+  const status: "connected" | "error" | "idle" = active ? "connected" : error ? "error" : "idle";
+
+  const q = search.trim().toLowerCase();
+  const filtered = profiles.filter(
+    (p) => p.name.toLowerCase().includes(q) || (p.group ?? "").toLowerCase().includes(q),
+  );
+  const groups = new Map<string, ProfileSummary[]>();
+  for (const p of filtered) {
+    const key = p.group?.trim() || "Ungrouped";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(p);
+  }
+  const groupNames = [...groups.keys()].sort((a, b) =>
+    a === "Ungrouped" ? 1 : b === "Ungrouped" ? -1 : a.localeCompare(b),
+  );
+
+  return (
+    <div className="conn-switcher" ref={rootRef}>
+      <button
+        className="conn-switcher__trigger"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        onClick={() => onOpenChange(!open)}
+        title="Switch or manage connections"
+      >
+        <span className={`conn-status conn-status--${status}`} aria-hidden="true" />
+        <span className="conn-switcher__text">
+          <span className="conn-switcher__name">{active ? active.handle.name : "No connection"}</span>
+          <span className="conn-switcher__meta">
+            {active
+              ? (active.handle.serverInfo?.topology ?? "connected")
+              : error
+                ? "Connection error"
+                : `${profiles.length} saved connection${profiles.length === 1 ? "" : "s"}`}
+          </span>
+        </span>
+        <ChevronsUpDown size={15} className="conn-switcher__chevron" aria-hidden="true" />
+      </button>
+
+      {open && (
+        <div className="conn-pop" role="dialog" aria-label="Connections">
+          <div className="conn-pop__search">
+            <Search size={13} aria-hidden="true" />
+            <input
+              ref={searchRef}
+              type="text"
+              placeholder="Search connections…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              aria-label="Search connections"
+            />
+          </div>
+
+          <div className="conn-pop__list">
+            {filtered.length === 0 ? (
+              <div className="conn-pop__empty">
+                {profiles.length === 0 ? "No saved connections yet." : "No matches."}
+              </div>
+            ) : (
+              groupNames.map((g) => {
+                const items = groups.get(g)!;
+                const isCollapsed = !!collapsed[g];
+                return (
+                  <div className="conn-group" key={g}>
+                    <button
+                      className="conn-group__header"
+                      onClick={() => setCollapsed((c) => ({ ...c, [g]: !c[g] }))}
+                      aria-expanded={!isCollapsed}
+                    >
+                      <ChevronRight
+                        size={12}
+                        className={`conn-group__chevron ${isCollapsed ? "" : "is-open"}`}
+                        aria-hidden="true"
+                      />
+                      <span className="conn-group__label">{g}</span>
+                      <span className="conn-group__count">{items.length}</span>
+                    </button>
+                    {!isCollapsed &&
+                      items.map((p) => {
+                        const isActive = active?.profile.id === p.id;
+                        return (
+                          <div
+                            key={p.id}
+                            className={`conn-row ${isActive ? "is-active" : ""}`}
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => { if (!isActive) onConnect(p); onOpenChange(false); }}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") { if (!isActive) onConnect(p); onOpenChange(false); }
+                            }}
+                            title={p.maskedUri}
+                          >
+                            <Server
+                              size={14}
+                              className="conn-row__icon"
+                              style={!isActive && p.color ? { color: p.color } : undefined}
+                              aria-hidden="true"
+                            />
+                            <span className="conn-row__text">
+                              <span className="conn-row__name">{p.name}</span>
+                              <span className="conn-row__uri">{p.maskedUri}</span>
+                            </span>
+                            {isActive && <span className="conn-row__badge">Connected</span>}
+                            <ConnectionRowMenu
+                              isActive={isActive}
+                              onConnect={() => { onConnect(p); onOpenChange(false); }}
+                              onDisconnect={() => { onDisconnect(); onOpenChange(false); }}
+                              onEdit={() => { onEdit(p); onOpenChange(false); }}
+                              onDuplicate={() => { onDuplicate(p); onOpenChange(false); }}
+                              onDelete={() => onDelete(p)}
+                            />
+                          </div>
+                        );
+                      })}
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <div className="conn-pop__footer">
+            <button className="conn-pop__add" onClick={() => { onOpenChange(false); onAdd(); }}>
+              <Plus size={14} aria-hidden="true" /> Add connection
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [info, setInfo] = useState<AppInfo | null>(null);
@@ -165,6 +451,9 @@ export default function App() {
   const [active, setActive] = useState<ActiveConnection | null>(null);
   const [treeFilter, setTreeFilter] = useState("");
   const [connectionFormOpen, setConnectionFormOpen] = useState(false);
+  const [connFormInitial, setConnFormInitial] = useState<Partial<SaveProfileRequest> | undefined>(undefined);
+  const [connFormKey, setConnFormKey] = useState(0);
+  const [connSwitcherOpen, setConnSwitcherOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
@@ -276,6 +565,65 @@ export default function App() {
     setActive(null);
     setTabs([]);
     setActiveTabId(null);
+  }
+
+  // Switch the active connection: close the current handle (and its tabs),
+  // then open the chosen profile. Re-selecting the active one is a no-op.
+  async function switchConnection(profile: ProfileSummary) {
+    if (active?.profile.id === profile.id) return;
+    if (active) {
+      try {
+        await commands.closeConnection(active.handle.connectionId);
+      } catch {
+        // ignore
+      }
+      setTabs([]);
+      setActiveTabId(null);
+    }
+    await openProfile(profile);
+  }
+
+  function openAddConnection() {
+    setConnFormInitial(undefined);
+    setConnFormKey((k) => k + 1);
+    setConnectionFormOpen(true);
+  }
+
+  async function editConnection(profile: ProfileSummary) {
+    let uri = profile.maskedUri;
+    try {
+      uri = await commands.resolveProfileUri(profile.id);
+    } catch {
+      // fall back to masked URI; saving still updates name/group/notes
+    }
+    setConnFormInitial({
+      id: profile.id,
+      name: profile.name,
+      uri,
+      authMechanism: profile.authMechanism,
+      group: profile.group,
+      notes: profile.notes,
+    });
+    setConnFormKey((k) => k + 1);
+    setConnectionFormOpen(true);
+  }
+
+  async function duplicateConnection(profile: ProfileSummary) {
+    let uri = profile.maskedUri;
+    try {
+      uri = await commands.resolveProfileUri(profile.id);
+    } catch {
+      // fall back to masked URI
+    }
+    setConnFormInitial({
+      name: `${profile.name} copy`,
+      uri,
+      authMechanism: profile.authMechanism,
+      group: profile.group,
+      notes: profile.notes,
+    });
+    setConnFormKey((k) => k + 1);
+    setConnectionFormOpen(true);
   }
 
   async function setTheme(theme: AppSettings["theme"]) {
@@ -511,83 +859,57 @@ export default function App() {
           )}
         </div>
       </header>
-      <aside className="app__sidebar" aria-label="Connection tree">
-        <div className="app__sidebar-header">
-          <h2 className="app__sidebar-title">Connections</h2>
-          <button
-            className="btn btn--sm"
-            onClick={() => setConnectionFormOpen(true)}
-            style={{ marginLeft: "auto" }}
-            title="Add a new connection profile"
-          >
-            Add
-          </button>
-        </div>
-        {profiles.length === 0 ? (
-          <div className="app__sidebar-empty">
-            <p>No saved connections yet.</p>
-            <button className="btn btn--primary" onClick={() => setConnectionFormOpen(true)}>
-              Add your first connection
-            </button>
-          </div>
-        ) : (
-          <div className="app__sidebar-list">
-            {profiles
-              .filter((p) => p.name.toLowerCase().includes(treeFilter.toLowerCase()))
-              .map((p) => (
-                <div
-                  key={p.id}
-                  className={`tree-item ${active?.handle.profileId === p.id ? "is-active" : ""}`}
-                >
-                  <span className="tree-item__icon" aria-hidden="true">
-                    <Server size={13} />
-                  </span>
-                  <span className="tree-item__name" title={p.maskedUri}>
-                    {p.name}
-                    {p.group && (
-                      <span style={{ color: "var(--ink-faint)", marginLeft: 6 }}>· {p.group}</span>
-                    )}
-                  </span>
+      <aside className="app__sidebar" aria-label="Connections">
+        <ConnectionSwitcher
+          active={active}
+          profiles={profiles}
+          error={error}
+          open={connSwitcherOpen}
+          onOpenChange={setConnSwitcherOpen}
+          onConnect={switchConnection}
+          onDisconnect={closeConnection}
+          onAdd={openAddConnection}
+          onEdit={editConnection}
+          onDuplicate={duplicateConnection}
+          onDelete={deleteProfile}
+        />
+        <div className="app__sidebar-explorer">
+          {active ? (
+            <>
+              <div className="app__sidebar-search">
+                <span className="app__sidebar-search-icon" aria-hidden="true"><Search size={13} /></span>
+                <input
+                  type="text"
+                  placeholder="Filter collections…"
+                  value={treeFilter}
+                  onChange={(e) => setTreeFilter(e.target.value)}
+                  aria-label="Filter collections"
+                />
+                {treeFilter && (
                   <button
-                    className="btn btn--ghost btn--sm"
-                    onClick={() => openProfile(p)}
-                    title="Connect"
-                  >
-                    Open
-                  </button>
-                  <button
-                    className="btn btn--ghost btn--sm"
-                    onClick={() => deleteProfile(p)}
-                    title="Delete connection"
-                    aria-label={`Delete ${p.name}`}
+                    className="app__sidebar-search-clear"
+                    onClick={() => setTreeFilter("")}
+                    title="Clear filter"
+                    aria-label="Clear filter"
                   >
                     ×
                   </button>
-                </div>
-              ))}
-          </div>
-        )}
-        <div className="app__sidebar-search">
-          <span className="app__sidebar-search-icon" aria-hidden="true"><Search size={13} /></span>
-          <input
-            type="text"
-            placeholder={active ? "Filter collections…" : "Filter connections…"}
-            value={treeFilter}
-            onChange={(e) => setTreeFilter(e.target.value)}
-            aria-label={active ? "Filter collections" : "Filter connections"}
-          />
-          {treeFilter && (
-            <button
-              className="app__sidebar-search-clear"
-              onClick={() => setTreeFilter("")}
-              title="Clear filter"
-              aria-label="Clear filter"
-            >
-              ×
-            </button>
+                )}
+              </div>
+              {tree}
+            </>
+          ) : (
+            <div className="app__sidebar-empty">
+              <p>{profiles.length === 0 ? "No saved connections yet." : "Not connected."}</p>
+              <button
+                className="btn btn--primary btn--sm"
+                onClick={() => (profiles.length === 0 ? openAddConnection() : setConnSwitcherOpen(true))}
+              >
+                {profiles.length === 0 ? "Add your first connection" : "Choose a connection"}
+              </button>
+            </div>
           )}
         </div>
-        {tree}
         <div className="app__sidebar-footer">
           <span className="kbd-bar">
             <span className="kbd">Cmd</span>+<span className="kbd">K</span> palette
@@ -733,9 +1055,11 @@ export default function App() {
         </span>
       </footer>
       <ConnectionForm
+        key={connFormKey}
         open={connectionFormOpen}
-        onClose={() => setConnectionFormOpen(false)}
+        onClose={() => { setConnectionFormOpen(false); setConnFormInitial(undefined); }}
         onSaved={refreshProfiles}
+        initial={connFormInitial}
       />
       <CommandPalette
         open={paletteOpen}
