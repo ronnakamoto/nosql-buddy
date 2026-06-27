@@ -27,7 +27,7 @@ interface HistoryEntry {
 }
 
 /**
- * IntelliShell tab — production-grade mongo shell REPL.
+ * Shell tab — production-grade mongo shell REPL.
  *
  * Architecture:
  *  - Multi-line textarea for input. Enter runs the script;

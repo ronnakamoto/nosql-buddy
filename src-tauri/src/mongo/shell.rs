@@ -2,14 +2,13 @@
 //!
 //! ## Why boa_engine?
 //!
-//! Studio 3T's IntelliShell (the gold standard the user asked
-//! for) supports real JavaScript: `for` / `while` / `try-catch`,
-//! variable scope, string concatenation, function calls, cursor
-//! chaining. A hand-rolled structured parser can't deliver that
-//! without effectively reimplementing JavaScript. `boa_engine`
-//! is a pure-Rust ES2024 engine — zero FFI risk, ~3 MB of
-//! compiled binaries, and the same JS semantics as the user's
-//! browser.
+//! A production-grade mongo shell supports real JavaScript:
+//! `for` / `while` / `try-catch`, variable scope, string
+//! concatenation, function calls, cursor chaining. A hand-rolled
+//! structured parser can't deliver that without effectively
+//! reimplementing JavaScript. `boa_engine` is a pure-Rust ES2024
+//! engine — zero FFI risk, ~3 MB of compiled binaries, and the
+//! same JS semantics as the user's browser.
 //!
 //! ## Architecture
 //!
@@ -316,9 +315,9 @@ fn run_shell_thread(rx: Receiver<ShellMessage>, initial_db: String) {
                 // assigns interesting values to `__last`
                 // explicitly, or they use `printjson(...)` to
                 // emit intermediate results. This matches
-                // Studio 3T's behaviour: the final evaluated
-                // expression (if it's a bare expression on a
-                // line by itself) becomes the return value.
+                // the standard mongo shell behaviour: the final
+                // evaluated expression (if it's a bare expression
+                // on a line by itself) becomes the return value.
                 //
                 // We approximate this by injecting
                 // `__last = ...` before the last `;` if the last

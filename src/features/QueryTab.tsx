@@ -130,6 +130,119 @@ function parsePipeline(text: string): unknown[] {
   }
 }
 
+/** Status-bar text for the current page. Renders the loaded count against
+ *  the (possibly approximate) total so users on large collections see how
+ *  much of the result set is on this page. */
+function formatResultSummary(page: DocumentPage, loadingPage: boolean): string {
+  const loaded = page.documents.length;
+  const ms = page.executionMs ?? 0;
+  const tail = loadingPage ? " · loading…" : "";
+  const total = page.totalCount;
+  if (total == null) return `${loaded} shown · ${ms} ms${tail}`;
+  const approx = page.totalCountApprox ? "≈" : "";
+  return `${loaded} of ${approx}${total.toLocaleString()} shown · ${ms} ms${tail}`;
+}
+
+const PAGE_SIZE_OPTIONS = [25, 50, 100, 200, 500];
+
+/** Footer below the results grid that drives page-based navigation.
+ *
+ * First/Prev/Page N/Next/Last controls using skip/limit paging. The page-size
+ * selector bounds memory per page (default 50, max 1000); changing it
+ * triggers a fresh page-1 fetch so the new size takes effect immediately.
+ */
+function PagingBar({
+  total,
+  totalApprox,
+  hasMore,
+  loadingPage,
+  pageSize,
+  currentPage,
+  onPageSize,
+  onJump,
+}: {
+  total: number | null;
+  totalApprox: boolean;
+  hasMore: boolean;
+  loadingPage: boolean;
+  pageSize: number;
+  currentPage: number;
+  onPageSize: (n: number) => void;
+  onJump: (n: number) => void;
+}) {
+  const totalPages = total != null ? Math.max(1, Math.ceil(total / pageSize)) : null;
+  const approx = totalApprox ? "≈" : "";
+  const atStart = currentPage <= 1;
+  const atEnd =
+    (totalPages != null && currentPage >= totalPages) || !hasMore;
+
+  return (
+    <div className="paging-bar" role="navigation" aria-label="Result paging">
+      <label className="paging-bar__size" title="Rows per page (re-runs from page 1)">
+        <span>Page size</span>
+        <select
+          value={pageSize}
+          onChange={(e) => onPageSize(Number(e.target.value))}
+          disabled={loadingPage}
+        >
+          {PAGE_SIZE_OPTIONS.map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <div className="paging-bar__spacer" />
+
+      <div className="paging-bar__pages">
+        {total != null && (
+          <span className="paging-bar__count">
+            {approx}{total.toLocaleString()} total
+          </span>
+        )}
+        <button
+          className="btn btn--sm"
+          onClick={() => onJump(1)}
+          disabled={atStart || loadingPage}
+          title="First page"
+        >
+          «
+        </button>
+        <button
+          className="btn btn--sm"
+          onClick={() => onJump(currentPage - 1)}
+          disabled={atStart || loadingPage}
+          title="Previous page"
+        >
+          ‹
+        </button>
+        <span className="paging-bar__page">
+          {totalPages != null
+            ? `Page ${currentPage} of ${totalPages}`
+            : `Page ${currentPage}`}
+        </span>
+        <button
+          className="btn btn--sm"
+          onClick={() => onJump(currentPage + 1)}
+          disabled={atEnd || loadingPage}
+          title="Next page"
+        >
+          ›
+        </button>
+        <button
+          className="btn btn--sm"
+          onClick={() => onJump(totalPages ?? currentPage + 1)}
+          disabled={atEnd || loadingPage}
+          title="Last page"
+        >
+          »
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /** A compact dropdown menu for secondary pane actions. The dropdown is
  *  rendered with `position: fixed` so it can never be clipped by an
  *  overflow container. */
@@ -267,6 +380,25 @@ export function QueryTab({
   const [viewMode, setViewMode] = useState<ResultsViewMode>("table");
   const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(() => new Set());
 
+  // ─── Paging state (find mode) ───────────────────────────────────────
+  // `page: DocumentPage` remains the single source of truth for the visible
+  // rows: keyset "load more" *appends* to `page.documents`, while skip/limit
+  // page-jumping *replaces* it. This keeps the existing row-index-based edit,
+  // delete, and selection flows working without change. `nextAfterId` on the
+  // page is the keyset cursor; `hasMore` is the "more likely exist" signal.
+  const [pageSize, setPageSize] = useState(50);
+  // Mirror `pageSize` into a ref so a page-size change can re-run immediately
+  // without waiting a tick for state to propagate (the new fetch must use the
+  // new size, not the value closed over by `run`).
+  const pageSizeRef = useRef(pageSize);
+  pageSizeRef.current = pageSize;
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  /** Gates history capture so page jumps don't log a new entry per jump —
+   *  only a fresh Run does. Set true at the start of `run()`, set false
+   *  before any page jump that is not a fresh Run. */
+  const captureHistoryRef = useRef(true);
+
   const valid = useMemo(() => {
     try {
       if (mode === "find") {
@@ -300,25 +432,33 @@ export function QueryTab({
     }
     setError(null);
     setRunning(true);
+    // A fresh Run always starts at page 1 and is the only thing that should
+    // log a query-history entry; subsequent load-more/jump appends are not
+    // new queries.
+    captureHistoryRef.current = true;
+    setCurrentPage(1);
+    setSelectedRowIds(new Set());
     try {
       if (mode === "find") {
-        const result = await commands.findDocuments({
+        const result = await commands.findPage({
           connectionId,
           database,
           collection,
           filterJson: filterText,
           projectionJson: projectionText || null,
           sortJson: sortText || null,
-          limit: 50,
+          pageSize: pageSizeRef.current,
+          countMode: "estimated",
         });
         setPage(result);
       } else if (mode === "aggregate") {
-        const result = await commands.aggregateDocuments({
+        const result = await commands.aggregatePage({
           connectionId,
           database,
           collection,
           pipelineJson: pipelineText,
-          limit: 50,
+          pageSize: pageSizeRef.current,
+          countMode: "none",
         });
         setPage(result);
       } else {
@@ -329,12 +469,13 @@ export function QueryTab({
           warnings: translated.warnings,
           code: translated.code,
         });
-        const result = await commands.aggregateDocuments({
+        const result = await commands.aggregatePage({
           connectionId,
           database,
           collection,
           pipelineJson: JSON.stringify(translated.pipeline),
-          limit: 50,
+          pageSize: pageSizeRef.current,
+          countMode: "none",
         });
         setPage(result);
       }
@@ -343,6 +484,86 @@ export function QueryTab({
     } finally {
       setRunning(false);
     }
+  }
+
+  /** Skip/limit page jump. Replaces the visible rows with the requested
+   *  page. `n` is 1-based. Dispatches by mode: find uses `findPage`
+   *  skip/limit; aggregate/SQL use `aggregatePage` (`$skip`/`$limit`). */
+  async function jumpToPage(n: number) {
+    if (n < 1 || loadingMore) return;
+    setLoadingMore(true);
+    captureHistoryRef.current = false;
+    try {
+      let result: DocumentPage;
+      if (mode === "find") {
+        result = await commands.findPage({
+          connectionId,
+          database,
+          collection,
+          filterJson: filterText,
+          projectionJson: projectionText || null,
+          sortJson: sortText || null,
+          page: n,
+          pageSize: pageSizeRef.current,
+          countMode: "none",
+        });
+      } else if (mode === "aggregate") {
+        result = await commands.aggregatePage({
+          connectionId,
+          database,
+          collection,
+          pipelineJson: pipelineText,
+          page: n,
+          pageSize: pageSizeRef.current,
+          countMode: "none",
+        });
+      } else {
+        // SQL: page the already-translated pipeline. If translation is stale
+        // or missing, fall back to re-running page 1 via `run()`.
+        const pipeline = sqlResult?.pipeline;
+        if (!pipeline) {
+          void run();
+          return;
+        }
+        result = await commands.aggregatePage({
+          connectionId,
+          database,
+          collection,
+          pipelineJson: JSON.stringify(pipeline),
+          page: n,
+          pageSize: pageSizeRef.current,
+          countMode: "none",
+        });
+      }
+      setCurrentPage(n);
+      setSelectedRowIds(new Set());
+      // Preserve the first page's total across jumps so the footer count
+      // stays stable and we don't re-run a count per jump.
+      setPage((prev) =>
+        prev
+          ? {
+              ...prev,
+              documents: result.documents,
+              hasMore: result.hasMore,
+              limit: result.limit,
+              skip: result.skip,
+            }
+          : result,
+      );
+    } catch (e) {
+      setError(describeError(e));
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
+  function handlePageSize(n: number) {
+    if (n === pageSize) return;
+    // Update the ref synchronously so the immediate `run()` fetches with the
+    // new size rather than the value closed over by `run`.
+    pageSizeRef.current = n;
+    setPageSize(n);
+    void run();
   }
 
   useEffect(() => {
@@ -362,10 +583,15 @@ export function QueryTab({
     if (onResult) onResult(page);
   }, [page, onResult]);
 
-  // History capture: every successful run appends to the
-  // per-collection, per-mode history list (capped at HISTORY_CAPACITY).
+  // History capture: a successful *Run* (not a load-more append or page
+  // jump) appends to the per-collection, per-mode history list (capped at
+  // HISTORY_CAPACITY). `captureHistoryRef` is set true only at the start of
+  // `run()` and consumed here, so paging actions that mutate `page` don't
+  // spam the history with one entry per batch.
   useEffect(() => {
     if (!page || running) return;
+    if (!captureHistoryRef.current) return;
+    captureHistoryRef.current = false;
     const inputText = currentTextForMode();
     pushHistory(connectionId, database, collection, mode as QueryMode, {
       ts: Date.now(),
@@ -729,7 +955,7 @@ export function QueryTab({
           {running
             ? "Running…"
             : page
-              ? `${page.documents.length} returned · ${page.executionMs ?? 0} ms`
+              ? formatResultSummary(page, loadingMore)
               : "Idle"}
         </div>
         <div className="pane__actions">
@@ -1035,6 +1261,16 @@ export function QueryTab({
                 selectedRowIds={selectedRowIds}
                 onSelectionChange={setSelectedRowIds}
                 getRowId={getRowId}
+              />
+              <PagingBar
+                total={page.totalCount}
+                totalApprox={!!page.totalCountApprox}
+                hasMore={page.hasMore}
+                loadingPage={loadingMore}
+                pageSize={pageSize}
+                currentPage={currentPage}
+                onPageSize={handlePageSize}
+                onJump={jumpToPage}
               />
             </>
           ) : (

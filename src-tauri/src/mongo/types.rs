@@ -254,6 +254,13 @@ pub enum CollectionKind {
 
 /// Result of a find / aggregate query, encoded as MongoDB Extended JSON so
 /// the frontend preserves ObjectId, Date, Decimal128, and Binary types.
+///
+/// Paging: the backend uses skip/limit paging (`skip = (page - 1) *
+/// page_size`). `has_more` is true when the page was full
+/// (`docs.len() == page_size`), signalling more rows likely exist.
+/// `total_count_approx` marks `total_count` as coming from the collection
+/// metadata (`estimatedDocumentCount`, ~constant time) rather than a real
+/// scan, so the UI can render it with a leading "≈".
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentPage {
@@ -263,6 +270,14 @@ pub struct DocumentPage {
     pub has_more: bool,
     pub execution_ms: Option<u64>,
     pub total_count: Option<u64>,
+    /// True when `total_count` came from `estimatedDocumentCount` (metadata,
+    /// fast, approximate) rather than a filtered `countDocuments` (scan).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub total_count_approx: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !b
 }
 
 /// Collation configuration. Mirrors the subset of MongoDB `Collation`

@@ -1,6 +1,6 @@
 //! Path-placeholder resolution for export destinations.
 //!
-//! Studio 3T-style placeholders let a user declare a target path template
+//! Path-template placeholders let a user declare a target path template
 //! (`backups/${db}/${collection}_${date}.json`) that the backend resolves at
 //! export time against the live connection context. Resolution happens *before*
 //! path-safety validation, so an invalid expanded path is still rejected by

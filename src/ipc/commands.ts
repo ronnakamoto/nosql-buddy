@@ -126,7 +126,24 @@ export interface DocumentPage {
   hasMore: boolean;
   executionMs: number | null;
   totalCount: number | null;
+  /**
+   * `true` when `totalCount` came from `estimatedDocumentCount` (collection
+   * metadata, ~constant time, approximate). Render such counts with a
+   * leading "≈". `false` (or undefined) means an exact `countDocuments`
+   * against the filter.
+   */
+  totalCountApprox?: boolean;
 }
+
+/**
+ * How the backend computes `totalCount` for a paged find.
+ * - `estimated` (default): collection metadata via `estimatedDocumentCount`,
+ *   ~constant time. Rendered with "≈" in the UI.
+ * - `exact`: real `countDocuments` against the filter. O(scan); opt in only
+ *   for filtered queries where an estimate would mislead.
+ * - `none`: skip the count entirely for the lowest-latency first paint.
+ */
+export type CountMode = "estimated" | "exact" | "none";
 
 export interface CollectionStats {
   name: string;
@@ -460,12 +477,53 @@ export interface FindRequest {
   skip?: number | null;
 }
 
+/**
+ * Paged find request. Uses skip/limit paging: `skip = (page - 1) *
+ * pageSize`. `sortJson` is honored as-is; when absent the driver's natural
+ * order is used. Memory is bounded per page (`pageSize`), not by total
+ * collection size.
+ */
+export interface FindPageRequest {
+  connectionId: string;
+  database: string;
+  collection: string;
+  filterJson: string;
+  projectionJson?: string | null;
+  sortJson?: string | null;
+  /** 1-based page number (default 1). */
+  page?: number;
+  /** Page size (default 50, max 1000). Bounds memory per page, not total. */
+  pageSize?: number | null;
+  /** Count strategy; default `estimated`. */
+  countMode?: CountMode;
+}
+
 export interface AggregateRequest {
   connectionId: string;
   database: string;
   collection: string;
   pipelineJson: string;
   limit?: number | null;
+}
+
+/**
+ * Paged aggregation request. Aggregation output has no guaranteed `_id`
+ * order, so paging is skip/limit only (`$skip`/`$limit` appended to the
+ * pipeline) — no keyset. `countMode: "exact"` runs the pipeline again with a
+ * `$count` stage (expensive, opt-in); `estimated` is treated as `none` since
+ * a collection-size estimate is meaningless for pipeline output.
+ */
+export interface AggregatePageRequest {
+  connectionId: string;
+  database: string;
+  collection: string;
+  pipelineJson: string;
+  /** 1-based page number (default 1). */
+  page?: number;
+  /** Page size (default 50, max 1000). */
+  pageSize?: number | null;
+  /** Count strategy; default `none` for aggregation. */
+  countMode?: CountMode;
 }
 
 export interface CountRequest {
@@ -962,8 +1020,12 @@ const commands = {
     }),
   findDocuments: (request: FindRequest) =>
     invoke<DocumentPage>("find_documents", { request }),
+  findPage: (request: FindPageRequest) =>
+    invoke<DocumentPage>("find_page", { request }),
   aggregateDocuments: (request: AggregateRequest) =>
     invoke<DocumentPage>("aggregate_documents", { request }),
+  aggregatePage: (request: AggregatePageRequest) =>
+    invoke<DocumentPage>("aggregate_page", { request }),
   countDocuments: (request: CountRequest) =>
     invoke<number>("count_documents", { request }),
   listIndexes: (connectionId: string, database: string, collection: string) =>

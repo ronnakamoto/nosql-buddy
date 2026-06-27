@@ -1,4 +1,4 @@
-//! Pure autocomplete logic for the IntelliShell.
+//! Pure autocomplete logic for the shell.
 //!
 //! The IPC command (`commands::shell::shell_autocomplete`) feeds
 //! the script text + cursor position into [`autocomplete_context`]

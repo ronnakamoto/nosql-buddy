@@ -1301,6 +1301,48 @@
   white-space: nowrap;
 }
 
+/* Paging bar — sits below the results grid and drives skip/limit page
+ * navigation. Kept compact and sticky to the bottom of the pane so it stays
+ * reachable while scrolling thousands of rows. */
+.paging-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--border);
+  background: var(--surface-1);
+  font-size: var(--font-size-xs);
+  color: var(--ink-muted);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.paging-bar__size {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.paging-bar__size select {
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 4px;
+}
+.paging-bar__spacer {
+  flex: 1 1 auto;
+}
+.paging-bar__pages {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.paging-bar__count,
+.paging-bar__page {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .kind-badge {
   display: inline-flex;
   align-items: center;

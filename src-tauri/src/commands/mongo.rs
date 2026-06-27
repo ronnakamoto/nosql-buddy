@@ -85,6 +85,27 @@ const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 500;
 const DEFAULT_SAMPLE: u32 = 200;
 
+/// Per-page bound for the paging commands. Memory per page is bounded by
+/// `page_size * avg_doc_size`, never by total collection size, so a generous
+/// cap is safe and lets users who want a bigger initial window set one.
+const MAX_PAGE_SIZE: u32 = 1000;
+const DEFAULT_PAGE_SIZE: u32 = 50;
+
+/// How the backend computes `total_count` for a `DocumentPage`. The default
+/// (`Estimated`) hits collection metadata via `estimatedDocumentCount` and is
+/// ~constant time regardless of collection size; `Exact` runs a real
+/// `countDocuments` against the (optional) filter and is only used when the
+/// user explicitly asks, since it is O(scan) on large collections; `None`
+/// skips the count entirely for the lowest-latency first paint.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum CountMode {
+    #[default]
+    Estimated,
+    Exact,
+    None,
+}
+
 #[tauri::command]
 pub async fn list_databases(
     connection_id: String,
@@ -205,7 +226,10 @@ pub async fn find_documents(
     let docs: Vec<Document> = cursor.try_collect().await?;
     let has_more = docs.len() as u32 == limit;
     let elapsed = started.elapsed().as_millis() as u64;
-    let total = coll.count_documents(bson::doc! {}).await.ok();
+    // Legacy single-shot find keeps an estimated count; the per-find full
+    // collection scan (`count_documents({})`) it used to run was a latent
+    // perf bug on large collections and the field was barely surfaced.
+    let (total, approx) = estimate_count(&coll).await;
     let documents = docs
         .iter()
         .map(doc_to_display_json)
@@ -217,6 +241,126 @@ pub async fn find_documents(
         has_more,
         execution_ms: Some(elapsed),
         total_count: total,
+        total_count_approx: approx,
+    })
+}
+
+/// Paged find request. Uses skip/limit paging: `skip = (page - 1) *
+/// page_size`. `page_size` bounds one page (default 50, max 1000); memory is
+/// bounded per page, not by total collection size. `sort_json` is honored
+/// as-is; when absent the driver's natural order is used.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindPageRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub collection: String,
+    pub filter_json: String,
+    pub projection_json: Option<String>,
+    pub sort_json: Option<String>,
+    /// 1-based page number. `skip = (page - 1) * page_size`. Default 1.
+    #[serde(default = "default_page")]
+    pub page: u64,
+    pub page_size: Option<u32>,
+    /// How to compute `total_count`. Defaults to `Estimated` (metadata,
+    /// ~constant time).
+    #[serde(default)]
+    pub count_mode: CountMode,
+}
+
+fn default_page() -> u64 {
+    1
+}
+
+/// Resolve the effective page size, clamped to `[1, MAX_PAGE_SIZE]` with the
+/// default applied when unset. Kept tiny so every entry point shares one
+/// definition of the bound.
+fn resolve_page_size(req_size: Option<u32>) -> u32 {
+    req_size.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, MAX_PAGE_SIZE)
+}
+
+/// Fast approximate count via collection metadata. Returns `(count, true)`
+/// so the UI can render the value with a leading "≈". Falls back to `(None,
+/// true)` if the server refuses the estimate (e.g. on some Atlas tiers).
+async fn estimate_count(coll: &mongodb::Collection<Document>) -> (Option<u64>, bool) {
+    (coll.estimated_document_count().await.ok(), true)
+}
+
+/// Exact count against `filter` (O(scan)). Only used when the user opts in
+/// via `CountMode::Exact`, typically for filtered queries where an estimate
+/// would be misleading.
+async fn exact_count(coll: &mongodb::Collection<Document>, filter: &Document) -> Option<u64> {
+    coll.count_documents(filter.clone()).await.ok()
+}
+
+#[tauri::command]
+pub async fn find_page(
+    request: FindPageRequest,
+    state: State<'_, AppState>,
+) -> AppResult<DocumentPage> {
+    let entry = state.clients.get(&request.connection_id).await?;
+    let page_size = resolve_page_size(request.page_size);
+    let user_filter = parse_optional_doc(Some(&request.filter_json))?.unwrap_or_default();
+    let projection = parse_optional_doc(request.projection_json.as_deref())?;
+    let user_sort = parse_optional_doc(request.sort_json.as_deref())?;
+    let coll = entry
+        .client
+        .database(&request.database)
+        .collection::<Document>(&request.collection);
+
+    // Skip/limit paging. `skip = (page - 1) * page_size`. Deep pages are
+    // O(skip) on the server, but this is the only correct strategy when the
+    // user may supply an arbitrary sort; the UI caps practical depth via the
+    // page controls.
+    let skip = request.page.saturating_sub(1) * page_size as u64;
+
+    let started = Instant::now();
+    // Fetch one extra row to detect "more" without a count round-trip: if we
+    // get back `page_size + 1` docs there is at least one more page, and we
+    // trim the extra before returning. This keeps `has_more` accurate even
+    // when the count is approximate or omitted.
+    let fetch_limit = (page_size + 1) as i64;
+    // `find` takes ownership of the filter; clone so the original stays
+    // available for the exact-count path below.
+    let mut find = coll.find(user_filter.clone()).limit(fetch_limit).skip(skip);
+    if let Some(p) = projection {
+        find = find.projection(p);
+    }
+    if let Some(s) = user_sort {
+        find = find.sort(s);
+    }
+    // Match the export path's batch size so the driver pulls a full page per
+    // network round-trip instead of the default 101-batch first getMore.
+    find = find.batch_size(page_size);
+    let cursor = find.await?;
+    let mut docs: Vec<Document> = cursor.try_collect().await?;
+    let has_more = docs.len() > page_size as usize;
+    if has_more {
+        docs.truncate(page_size as usize);
+    }
+
+    let elapsed = started.elapsed().as_millis() as u64;
+    let (total, approx) = match request.count_mode {
+        CountMode::None => (None, false),
+        CountMode::Exact => match exact_count(&coll, &user_filter).await {
+            Some(n) => (Some(n), false),
+            None => estimate_count(&coll).await,
+        },
+        CountMode::Estimated => estimate_count(&coll).await,
+    };
+
+    let documents = docs
+        .iter()
+        .map(doc_to_display_json)
+        .collect::<AppResult<Vec<_>>>()?;
+    Ok(DocumentPage {
+        documents,
+        limit: page_size,
+        skip,
+        has_more,
+        execution_ms: Some(elapsed),
+        total_count: total,
+        total_count_approx: approx,
     })
 }
 
@@ -261,6 +405,97 @@ pub async fn aggregate_documents(
         has_more,
         execution_ms: Some(elapsed),
         total_count: None,
+        total_count_approx: false,
+    })
+}
+
+/// Paged aggregation request. Aggregation output has no guaranteed `_id`
+/// order, so keyset paging does not apply — this command uses skip/limit
+/// page jumping (`$skip`/`$limit` appended to the user pipeline). The count
+/// is opt-in: `Estimated` is treated as `None` (an estimate of the collection
+/// size is meaningless for a pipeline's output), and `Exact` runs the user
+/// pipeline with a trailing `$count` stage in a second round-trip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AggregatePageRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub collection: String,
+    pub pipeline_json: String,
+    #[serde(default = "default_page")]
+    pub page: u64,
+    pub page_size: Option<u32>,
+    #[serde(default)]
+    pub count_mode: CountMode,
+}
+
+#[tauri::command]
+pub async fn aggregate_page(
+    request: AggregatePageRequest,
+    state: State<'_, AppState>,
+) -> AppResult<DocumentPage> {
+    let entry = state.clients.get(&request.connection_id).await?;
+    let page_size = resolve_page_size(request.page_size);
+    let skip = request.page.saturating_sub(1) * page_size as u64;
+    let mut pipeline: Vec<Document> = serde_json::from_str(&request.pipeline_json)?;
+    // Append the paging stages at the end so they page the final output.
+    // Fetch one extra to detect "more" without a count, matching `find_page`.
+    if skip > 0 {
+        pipeline.push(bson::doc! { "$skip": skip as i64 });
+    }
+    pipeline.push(bson::doc! { "$limit": (page_size + 1) as i64 });
+
+    let coll = entry
+        .client
+        .database(&request.database)
+        .collection::<Document>(&request.collection);
+    let started = Instant::now();
+    let cursor = coll.aggregate(pipeline).batch_size(page_size).await?;
+    let mut docs: Vec<Document> = cursor.try_collect().await?;
+    let has_more = docs.len() > page_size as usize;
+    if has_more {
+        docs.truncate(page_size as usize);
+    }
+    let elapsed = started.elapsed().as_millis() as u64;
+
+    // Exact count = run the user pipeline (no paging stages) + `$count`.
+    // Expensive (re-runs the pipeline), so only on explicit opt-in. Estimated
+    // is meaningless for pipeline output, so it collapses to "no count".
+    let total: Option<u64> = if matches!(request.count_mode, CountMode::Exact) {
+        let mut count_pipeline: Vec<Document> = serde_json::from_str(&request.pipeline_json)?;
+        count_pipeline.push(bson::doc! { "$count": "n" });
+        match coll.aggregate(count_pipeline).await.ok() {
+            Some(mut c) => {
+                if c.advance().await.unwrap_or(false) {
+                    c.deserialize_current().ok().and_then(|doc| {
+                        doc.get_i64("n")
+                            .ok()
+                            .map(|v| v as u64)
+                            .or_else(|| doc.get_i32("n").ok().map(|v| v as u64))
+                    })
+                } else {
+                    None
+                }
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    let documents = docs
+        .iter()
+        .map(doc_to_display_json)
+        .collect::<AppResult<Vec<_>>>()?;
+    Ok(DocumentPage {
+        documents,
+        limit: page_size,
+        skip,
+        has_more,
+        execution_ms: Some(elapsed),
+        total_count: total,
+        // Aggregation counts are always exact when present.
+        total_count_approx: false,
     })
 }
 
