@@ -10,6 +10,7 @@ import commands, {
 import { ResultsTable } from "../components/ResultsTable";
 import { ExplainTree } from "../components/ExplainTree";
 import { DriverCodePanel } from "../components/DriverCodePanel";
+import { Alert } from "../components/Alert";
 
 export interface ShellTabProps {
   connectionId: string;
@@ -373,9 +374,7 @@ export function ShellTab({
       </div>
 
       {error && (
-        <div className="toast toast--error" style={{ margin: "0 var(--space-3) var(--space-2)" }}>
-          {error}
-        </div>
+        <Alert tone="danger" style={{ margin: "0 var(--space-3) var(--space-2)" }}>{error}</Alert>
       )}
 
       {codeOpen && lastPipeline && lastCollection && (

@@ -13,6 +13,7 @@ import commands, {
   type PreviewImportResult,
 } from "../../ipc/commands";
 import { onImportExportProgress } from "../../ipc/events";
+import { Alert } from "../../components/Alert";
 import {
   FieldMappingTable,
   discoveredFieldsFromInference,
@@ -483,9 +484,9 @@ export function ImportWizard({
                 </table>
               </div>
               {preview.errors.length > 0 && (
-                <div className="toast toast--warning" style={{ position: "static", margin: "var(--space-2) 0 0" }}>
+                <Alert tone="warning" style={{ margin: "var(--space-2) 0 0" }}>
                   First error: row {preview.errors[0].row ?? "?"}: {preview.errors[0].message}
-                </div>
+                </Alert>
               )}
             </div>
           )}
@@ -609,19 +610,15 @@ export function ImportWizard({
           )}
 
           {message && phase !== "running" && (
-            <div className="toast toast--success" style={{ position: "static", margin: 0 }}>
-              {message}
-            </div>
+            <Alert tone="success" style={{ margin: 0 }}>{message}</Alert>
           )}
           {result && result.rowErrors.length > 0 && phase === "done" && (
-            <div className="toast toast--warning" style={{ position: "static", margin: 0 }}>
+            <Alert tone="warning" style={{ margin: 0 }}>
               First row error: row {result.rowErrors[0].row ?? "?"}: {result.rowErrors[0].message}
-            </div>
+            </Alert>
           )}
           {error && (
-            <div className="toast toast--error" style={{ position: "static", margin: 0 }}>
-              {error}
-            </div>
+            <Alert tone="danger" style={{ margin: 0 }}>{error}</Alert>
           )}
         </div>
 

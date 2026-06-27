@@ -4,6 +4,7 @@ import { ResultsTable } from "../components/ResultsTable";
 import { ExplainTree } from "../components/ExplainTree";
 import { DriverCodePanel } from "../components/DriverCodePanel";
 import type { Language } from "../components/driverCodeTypes";
+import { Alert } from "../components/Alert";
 
 export interface AggregationEditorProps {
   connectionId: string;
@@ -397,9 +398,7 @@ export function AggregationEditor({
         </div>
       </div>
       {error && (
-        <div className="toast toast--error" style={{ margin: "0 var(--space-3) var(--space-2)" }}>
-          {error}
-        </div>
+        <Alert tone="danger" style={{ margin: "0 var(--space-3) var(--space-2)" }}>{error}</Alert>
       )}
       {notice && !error && (
         <div className="agg-editor__notice">{notice}</div>

@@ -1678,39 +1678,247 @@
   margin-left: auto;
 }
 
-.toast {
-  position: fixed;
-  bottom: 36px;
-  right: 16px;
-  background: var(--ink);
-  color: var(--bg);
+/* ─── Alert (inline notification banner) ────────────────────────────
+   Shared visual language with the floating toast stack. Restrained
+   product-register styling: a tone-tinted surface, a tone accent stripe,
+   a lucide icon, and ink-mixed tone colors so semantic hues stay
+   readable on both light and dark surfaces (pure warning yellow on
+   near-white fails contrast; mixing toward ink fixes both themes). */
+
+.alert {
+  --alert-tone: var(--info-500);
+  --alert-tone-ink: color-mix(in oklch, var(--alert-tone) 78%, var(--ink));
+  --alert-tint: color-mix(in oklch, var(--alert-tone) 10%, var(--surface));
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
+  background: var(--alert-tint);
+  border: 1px solid color-mix(in oklch, var(--alert-tone) 18%, var(--border));
+  border-left: 3px solid var(--alert-tone-ink);
   border-radius: var(--radius-md);
   font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+  color: var(--ink);
+}
+
+.alert__icon {
+  color: var(--alert-tone-ink);
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.alert__body {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.alert__title {
+  font-weight: 600;
+  color: var(--ink);
+  font-size: var(--font-size-sm);
+  letter-spacing: -0.005em;
+}
+
+.alert__text {
+  color: var(--ink-muted);
+}
+
+.alert__text code,
+.alert__title code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: color-mix(in oklch, var(--alert-tone) 14%, transparent);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+}
+
+.alert__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--ink-faint);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 120ms ease-out, color 120ms ease-out;
+}
+.alert__close:hover {
+  background: color-mix(in oklch, var(--ink) 8%, transparent);
+  color: var(--ink);
+}
+.alert__close:focus-visible {
+  outline: 2px solid var(--accent-500);
+  outline-offset: 1px;
+}
+
+.alert--info    { --alert-tone: var(--info-500); }
+.alert--success { --alert-tone: var(--success-500); }
+.alert--warning { --alert-tone: var(--warning-500); }
+.alert--danger  { --alert-tone: var(--danger-500); }
+
+/* Compact: no surface, no stripe — icon + text inline. For quiet
+   toolbar-embedded confirmations (e.g. "Copied to clipboard"). Reads as
+   a status, not a banner. */
+.alert--compact {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-left: none;
+  font-size: var(--font-size-xs);
+  color: var(--ink-muted);
+}
+.alert--compact .alert__icon { margin-top: 0; }
+.alert--compact .alert__body { display: inline; }
+.alert--compact .alert__title,
+.alert--compact .alert__text {
+  display: inline;
+  color: var(--ink-muted);
   font-weight: 500;
-  max-width: 360px;
+}
+
+/* ─── Toast (floating notification) ─────────────────────────────────
+   Echoes the alert language but elevated: surface base with a tone
+   stripe + tinted border, deeper shadow, a depleting progress timer,
+   and a close button. Newest toast sits nearest the corner; the stack
+   grows upward and collapses as toasts dismiss. */
+
+.toast-stack {
+  position: fixed;
+  bottom: var(--space-6);
+  right: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-2);
+  width: min(380px, 92vw);
   z-index: var(--z-toast);
-  box-shadow: 0 12px 32px color-mix(in oklch, var(--ink), transparent 80%);
-  animation: toast-slide-in 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: none;
 }
-@keyframes toast-slide-in {
-  from { opacity: 0; transform: translateX(20px) scale(0.97); }
-  to { opacity: 1; transform: translateX(0) scale(1); }
+
+.toast {
+  --toast-tone: var(--info-500);
+  --toast-tone-ink: color-mix(in oklch, var(--toast-tone) 78%, var(--ink));
+  pointer-events: auto;
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-3) var(--space-4) calc(var(--space-3) + 4px);
+  background: var(--surface);
+  border: 1px solid color-mix(in oklch, var(--toast-tone) 20%, var(--border));
+  border-left: 3px solid var(--toast-tone-ink);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+  color: var(--ink);
+  overflow: hidden;
+  animation: toast-in 220ms cubic-bezier(0.16, 1, 0.3, 1);
 }
+
+.toast.is-leaving {
+  animation: toast-out 180ms cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+
+.toast__icon {
+  color: var(--toast-tone-ink);
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.toast__body {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.toast__title {
+  font-weight: 600;
+  color: var(--ink);
+  font-size: var(--font-size-sm);
+  letter-spacing: -0.005em;
+}
+
+.toast__text {
+  color: var(--ink-muted);
+}
+
+.toast__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--ink-faint);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 120ms ease-out, color 120ms ease-out;
+}
+.toast__close:hover {
+  background: color-mix(in oklch, var(--ink) 8%, transparent);
+  color: var(--ink);
+}
+.toast__close:focus-visible {
+  outline: 2px solid var(--accent-500);
+  outline-offset: 1px;
+}
+
+/* Progress timer: depletes left-to-right over --toast-duration. Pauses
+   on hover alongside the JS dismiss timer so the bar and the timeout
+   stay in sync. Hidden under reduced-motion (the JS timer still fires). */
+.toast__progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: var(--toast-tone-ink);
+  opacity: 0.4;
+  transform-origin: left;
+  animation: toast-progress linear forwards;
+  animation-duration: var(--toast-duration, 3000ms);
+}
+.toast:hover .toast__progress {
+  animation-play-state: paused;
+}
+
+.toast--info    { --toast-tone: var(--info-500); }
+.toast--success { --toast-tone: var(--success-500); }
+.toast--warning { --toast-tone: var(--warning-500); }
+.toast--error   { --toast-tone: var(--danger-500); }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(12px) scale(0.98); }
+  to   { opacity: 1; transform: translateX(0) scale(1); }
+}
+@keyframes toast-out {
+  from { opacity: 1; transform: translateX(0) scale(1); }
+  to   { opacity: 0; transform: translateX(12px) scale(0.98); }
+}
+@keyframes toast-progress {
+  from { transform: scaleX(1); }
+  to   { transform: scaleX(0); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .toast { animation: none; }
-}
-.toast--success {
-  background: var(--success-500);
-  color: oklch(0.99 0.002 240);
-}
-.toast--error {
-  background: var(--danger-500);
-  color: oklch(0.99 0.002 240);
-}
-.toast--warning {
-  background: var(--warning-500);
-  color: oklch(0.18 0.005 240);
+  .toast.is-leaving { animation: none; }
+  .toast__progress { display: none; }
 }
 
 .split {

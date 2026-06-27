@@ -13,6 +13,7 @@ import commands, {
   type SchemaReport,
 } from "../../ipc/commands";
 import { onImportExportProgress } from "../../ipc/events";
+import { Alert } from "../../components/Alert";
 import {
   FieldMappingTable,
   type DiscoveredField,
@@ -577,11 +578,11 @@ export function ExportWizard({
                 />
                 <span style={{ fontSize: 13 }}>Include header row</span>
               </label>
-              <div className="toast toast--warning" style={{ position: "static", margin: 0 }}>
+              <Alert tone="warning" style={{ margin: 0 }}>
                 CSV cannot represent all BSON types. Nested objects, arrays, and
                 binary become JSON strings; ObjectId and dates become their
                 display form. Use JSON for a lossless export.
-              </div>
+              </Alert>
             </>
           )}
 
@@ -610,9 +611,7 @@ export function ExportWizard({
                 )}
               </div>
               {mappingError && (
-                <div className="toast toast--error" style={{ position: "static", margin: 0 }}>
-                  {mappingError}
-                </div>
+                <Alert tone="danger" style={{ margin: 0 }}>{mappingError}</Alert>
               )}
               {showMapping && (
                 <FieldMappingTable
@@ -724,14 +723,10 @@ export function ExportWizard({
           )}
 
           {message && phase !== "running" && (
-            <div className="toast toast--success" style={{ position: "static", margin: 0 }}>
-              {message}
-            </div>
+            <Alert tone="success" style={{ margin: 0 }}>{message}</Alert>
           )}
           {error && (
-            <div className="toast toast--error" style={{ position: "static", margin: 0 }}>
-              {error}
-            </div>
+            <Alert tone="danger" style={{ margin: 0 }}>{error}</Alert>
           )}
         </div>
 

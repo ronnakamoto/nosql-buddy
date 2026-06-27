@@ -416,22 +416,11 @@ export function KeyValue({
 }
 
 // ─── Alert ──────────────────────────────────────────────────────────────
+// Re-exported from the app-wide Alert component so every surface (audit
+// and main app) shares one notification vocabulary: lucide icons, a tinted
+// surface, and a tone accent stripe. See components/Alert.tsx.
 
-export function Alert({
-  tone = "info",
-  children,
-}: {
-  tone?: "info" | "success" | "warning" | "danger";
-  children: ReactNode;
-}) {
-  const icon = tone === "success" ? "✓" : tone === "warning" ? "▲" : tone === "danger" ? "!" : "i";
-  return (
-    <div className={`audit-alert audit-alert--${tone}`}>
-      <span className="audit-alert__icon">{icon}</span>
-      <div className="audit-alert__body">{children}</div>
-    </div>
-  );
-}
+export { Alert } from "./Alert";
 
 // ─── Modal ───────────────────────────────────────────────────────────────
 //

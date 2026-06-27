@@ -6,6 +6,7 @@ import commands, {
   type IndexStats,
 } from "../ipc/commands";
 import { Modal } from "../components/Modal";
+import { Alert } from "../components/Alert";
 
 export interface IndexTabProps {
   connectionId: string;
@@ -380,14 +381,10 @@ export function IndexTab({ connectionId, database, collection }: IndexTabProps) 
       </div>
       <div className="pane__body" style={{ padding: 16, display: "grid", gap: 16 }}>
         {error && (
-          <div className="toast toast--error" style={{ position: "static" }}>
-            {error}
-          </div>
+          <Alert tone="danger">{error}</Alert>
         )}
         {notice && (
-          <div className="toast toast--success" style={{ position: "static" }}>
-            {notice}
-          </div>
+          <Alert tone="success">{notice}</Alert>
         )}
 
         <div className="row" style={{ justifyContent: "space-between" }}>

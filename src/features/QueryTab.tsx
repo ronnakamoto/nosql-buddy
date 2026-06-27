@@ -22,6 +22,7 @@ import "prismjs/components/prism-csharp";
 import "prismjs/components/prism-ruby";
 import "prismjs/components/prism-bash";
 import { HighlightedTextarea } from "../components/HighlightedTextarea";
+import { Alert } from "../components/Alert";
 
 /** Prism grammar name for each driver-code language. Mirrors the map
  *  in DriverCodePanel so the SQL tab's read-only code block shares the
@@ -253,7 +254,7 @@ export function QueryTab({
   } | null>(null);
   const [sqlLanguage, setSqlLanguage] = useState<SqlLanguage>("node-js");
   const [sqlNotice, setSqlNotice] = useState<string | null>(null);
-  const [copyNotice, setCopyNotice] = useState<string | null>(null);
+  const [copyNotice, setCopyNotice] = useState<{ text: string; tone: "success" | "warning" } | null>(null);
   const [page, setPage] = useState<DocumentPage | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -589,10 +590,10 @@ export function QueryTab({
     if (!code) return;
     try {
       await navigator.clipboard.writeText(code);
-      setCopyNotice("Copied to clipboard.");
+      setCopyNotice({ text: "Copied to clipboard.", tone: "success" });
       setTimeout(() => setCopyNotice(null), 1500);
     } catch {
-      setCopyNotice("Clipboard copy failed.");
+      setCopyNotice({ text: "Clipboard copy failed.", tone: "warning" });
     }
   }
 
@@ -898,7 +899,7 @@ export function QueryTab({
                   Open in Agg Editor
                 </button>
                 {sqlNotice && (
-                  <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>{sqlNotice}</span>
+                  <Alert tone="success" compact>{sqlNotice}</Alert>
                 )}
               </div>
               <div>
@@ -931,11 +932,9 @@ export function QueryTab({
                   )}
                 </pre>
                 {sqlResult && sqlResult.warnings.length > 0 && (
-                  <div style={{ padding: "0 var(--space-3)" }}>
+                  <div style={{ padding: "0 var(--space-3)", display: "grid", gap: "var(--space-2)" }}>
                     {sqlResult.warnings.map((w, i) => (
-                      <div key={i} className="toast toast--warning" style={{ position: "static", margin: "8px 0" }}>
-                        {w}
-                      </div>
+                      <Alert key={i} tone="warning">{w}</Alert>
                     ))}
                   </div>
                 )}
@@ -965,7 +964,7 @@ export function QueryTab({
                     Copy
                   </button>
                   {copyNotice && (
-                    <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>{copyNotice}</span>
+                    <Alert tone={copyNotice.tone} compact>{copyNotice.text}</Alert>
                   )}
                 </div>
                 <pre className="json-view" style={{ background: "var(--surface)" }}>
@@ -985,14 +984,10 @@ export function QueryTab({
         <div className="split__handle" aria-hidden="true" />
         <div className="pane__body">
           {error && (
-            <div className="toast toast--error" style={{ margin: 16 }}>
-              {error}
-            </div>
+            <Alert tone="danger" style={{ margin: 16 }}>{error}</Alert>
           )}
           {notice && (
-            <div className="toast toast--success" style={{ margin: 16 }}>
-              {notice}
-            </div>
+            <Alert tone="success" style={{ margin: 16 }}>{notice}</Alert>
           )}
           {page ? (
             <>

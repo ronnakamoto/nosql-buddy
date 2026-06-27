@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import type { FieldMappingEntry, TypeOverride } from "../../ipc/commands";
+import { Alert } from "../../components/Alert";
 
 /**
  * Field-mapping table for the import/export wizards. Lets the user rename,
@@ -140,9 +141,9 @@ export function FieldMappingTable({
 
   if (entries.length === 0) {
     return (
-      <div className="toast toast--warning" style={{ position: "static", margin: 0 }}>
+      <Alert tone="warning" style={{ margin: 0 }}>
         No fields discovered yet. Run a preview or provide a source with data.
-      </div>
+      </Alert>
     );
   }
 

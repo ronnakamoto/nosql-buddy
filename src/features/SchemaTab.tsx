@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import commands, { type SchemaField, type SchemaReport } from "../ipc/commands";
+import { Alert } from "../components/Alert";
 import {
   DateHistogramChart,
   DateStatLine,
@@ -57,9 +58,7 @@ export function SchemaTab({ connectionId, database, collection }: SchemaTabProps
       </div>
       <div className="pane__body" style={{ padding: 16 }}>
         {error && (
-          <div className="toast toast--error" style={{ position: "static" }}>
-            {error}
-          </div>
+          <Alert tone="danger">{error}</Alert>
         )}
         {report && (
           <div className="schema-list">

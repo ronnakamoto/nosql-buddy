@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Modal } from "./Modal";
+import { Alert } from "./Alert";
 import commands from "../ipc/commands";
 
 export interface InsertDocumentModalProps {
@@ -109,9 +110,7 @@ export function InsertDocumentModal({
           }}
         />
         {localError && (
-          <div className="toast toast--error" style={{ position: "static", margin: 0 }}>
-            {localError}
-          </div>
+          <Alert tone="danger" style={{ margin: 0 }}>{localError}</Alert>
         )}
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
           <button

@@ -1343,34 +1343,6 @@ button.audit-proof-card__primary-link:disabled {
   letter-spacing: var(--letter-mono);
 }
 
-/* ─── Alert ────────────────────────────────────────────────────── */
-
-.audit-alert {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-md);
-  font-size: var(--font-size-sm);
-  line-height: var(--line-height-normal);
-}
-
-.audit-alert__icon {
-  font-weight: 700;
-  line-height: var(--line-height-normal);
-  flex-shrink: 0;
-}
-
-.audit-alert__body {
-  flex: 1;
-  min-width: 0;
-}
-
-.audit-alert--info { background: color-mix(in oklch, var(--info-500) 10%, transparent); color: var(--info-500); }
-.audit-alert--success { background: color-mix(in oklch, var(--success-500) 10%, transparent); color: var(--success-500); }
-.audit-alert--warning { background: color-mix(in oklch, var(--warning-500) 12%, transparent); color: var(--warning-500); }
-.audit-alert--danger { background: color-mix(in oklch, var(--danger-500) 10%, transparent); color: var(--danger-500); }
-
 /* ─── StatusCard ───────────────────────────────────────────────── */
 
 .audit-status-card {

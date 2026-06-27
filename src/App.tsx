@@ -1072,7 +1072,7 @@ export default function App() {
         onClose={() => setPaletteOpen(false)}
         items={paletteItems}
       />
-      <ToastStack toasts={toasts.toasts} />
+      <ToastStack toasts={toasts.toasts} onDismiss={toasts.dismiss} />
     </div>
   );
 }
