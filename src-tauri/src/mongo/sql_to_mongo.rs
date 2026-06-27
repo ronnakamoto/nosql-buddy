@@ -43,8 +43,12 @@ pub fn translate(database: &str, sql: &str) -> AppResult<SqlTranslation> {
     let mut find_skip: Option<u64> = None;
 
     if let Some(filter) = stmt.where_clause {
-        let mut value = expr_to_value(&filter, &mut warnings)?;
-        value = wrap_field_comparisons_in_expr(value);
+        // WHERE is a pre-group filter document, so emit MongoDB filter
+        // shape (`{field: {$op: value}}` or `{field: value}` for `$eq`)
+        // and only fall back to `{$expr: ...}` when both sides are field
+        // references or the comparison is non-scalar. This keeps indexes
+        // usable for the common `field <op> literal` case.
+        let value = expr_to_filter(&filter, &mut warnings)?;
         find_filter = Some(value.clone());
         stages.push(serde_json::json!({ "$match": value }));
     }
@@ -73,8 +77,12 @@ pub fn translate(database: &str, sql: &str) -> AppResult<SqlTranslation> {
     }
 
     if let Some(having) = &stmt.having {
-        let value = expr_to_value(having, &mut warnings)?;
-        stages.push(serde_json::json!({ "$match": value }));
+        // HAVING runs after $group, so every reference is an aggregation
+        // expression and must be wrapped in $expr to be valid inside a
+        // $match stage. Bare `{$gt: [...]}` would hit the same
+        // "unknown top level operator" error as the WHERE bug.
+        let value = expr_to_agg_expr(having, &mut warnings)?;
+        stages.push(serde_json::json!({ "$match": { "$expr": value } }));
     }
 
     if !stmt.order_by.is_empty() {
@@ -661,6 +669,7 @@ impl<'a> Parser<'a> {
                     }
                     if self.peek_keyword("IN") {
                         self.consume_keyword("IN")?;
+                        self.skip_ws();
                         self.expect_char('(')?;
                         let mut values = Vec::new();
                         if self.peek_char() != Some(')') {
@@ -811,7 +820,7 @@ impl<'a> Parser<'a> {
     }
 }
 
-fn expr_to_value(expr: &Expr, warnings: &mut Vec<String>) -> AppResult<serde_json::Value> {
+fn expr_to_agg_expr(expr: &Expr, warnings: &mut Vec<String>) -> AppResult<serde_json::Value> {
     Ok(match expr {
         Expr::Field(name) => serde_json::json!(format!("${name}")),
         Expr::Number(n) => serde_json::json!(n),
@@ -827,41 +836,41 @@ fn expr_to_value(expr: &Expr, warnings: &mut Vec<String>) -> AppResult<serde_jso
             }
         }
         Expr::Eq(l, r) => {
-            serde_json::json!({ "$eq": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] })
+            serde_json::json!({ "$eq": [expr_to_agg_expr(l, warnings)?, expr_to_agg_expr(r, warnings)?] })
         }
         Expr::Ne(l, r) => {
-            serde_json::json!({ "$ne": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] })
+            serde_json::json!({ "$ne": [expr_to_agg_expr(l, warnings)?, expr_to_agg_expr(r, warnings)?] })
         }
         Expr::Lt(l, r) => {
-            serde_json::json!({ "$lt": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] })
+            serde_json::json!({ "$lt": [expr_to_agg_expr(l, warnings)?, expr_to_agg_expr(r, warnings)?] })
         }
         Expr::Le(l, r) => {
-            serde_json::json!({ "$lte": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] })
+            serde_json::json!({ "$lte": [expr_to_agg_expr(l, warnings)?, expr_to_agg_expr(r, warnings)?] })
         }
         Expr::Gt(l, r) => {
-            serde_json::json!({ "$gt": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] })
+            serde_json::json!({ "$gt": [expr_to_agg_expr(l, warnings)?, expr_to_agg_expr(r, warnings)?] })
         }
         Expr::Ge(l, r) => {
-            serde_json::json!({ "$gte": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] })
+            serde_json::json!({ "$gte": [expr_to_agg_expr(l, warnings)?, expr_to_agg_expr(r, warnings)?] })
         }
         Expr::And(l, r) => {
-            serde_json::json!({ "$and": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] })
+            serde_json::json!({ "$and": [expr_to_agg_expr(l, warnings)?, expr_to_agg_expr(r, warnings)?] })
         }
         Expr::Or(l, r) => {
-            serde_json::json!({ "$or": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] })
+            serde_json::json!({ "$or": [expr_to_agg_expr(l, warnings)?, expr_to_agg_expr(r, warnings)?] })
         }
         Expr::In(l, values) => {
             let arr: Vec<_> = values
                 .iter()
-                .map(|v| expr_to_value(v, warnings))
+                .map(|v| expr_to_agg_expr(v, warnings))
                 .collect::<AppResult<Vec<_>>>()?;
-            serde_json::json!({ "$in": [expr_to_value(l, warnings)?, serde_json::Value::Array(arr)] })
+            serde_json::json!({ "$in": [expr_to_agg_expr(l, warnings)?, serde_json::Value::Array(arr)] })
         }
         Expr::IsNull(inner) => {
-            serde_json::json!({ "$eq": [expr_to_value(inner, warnings)?, serde_json::Value::Null] })
+            serde_json::json!({ "$eq": [expr_to_agg_expr(inner, warnings)?, serde_json::Value::Null] })
         }
         Expr::IsNotNull(inner) => {
-            serde_json::json!({ "$ne": [expr_to_value(inner, warnings)?, serde_json::Value::Null] })
+            serde_json::json!({ "$ne": [expr_to_agg_expr(inner, warnings)?, serde_json::Value::Null] })
         }
         Expr::Func { name, args } => {
             let upper = name.to_uppercase();
@@ -880,7 +889,7 @@ fn expr_to_value(expr: &Expr, warnings: &mut Vec<String>) -> AppResult<serde_jso
                         "MIN" => "$min",
                         _ => "$max",
                     };
-                    serde_json::json!({ op: expr_to_value(inner, warnings)? })
+                    serde_json::json!({ op: expr_to_agg_expr(inner, warnings)? })
                 }
                 "REGEX" | "REGEXMATCH" => {
                     // REGEX(input, pattern[, options])
@@ -889,13 +898,13 @@ fn expr_to_value(expr: &Expr, warnings: &mut Vec<String>) -> AppResult<serde_jso
                             "REGEX requires at least 2 arguments: input, pattern".into(),
                         ));
                     }
-                    let input = expr_to_value(&args[0], warnings)?;
-                    let pattern = expr_to_value(&args[1], warnings)?;
+                    let input = expr_to_agg_expr(&args[0], warnings)?;
+                    let pattern = expr_to_agg_expr(&args[1], warnings)?;
                     let mut obj = serde_json::Map::new();
                     obj.insert("input".into(), input);
                     obj.insert("regex".into(), pattern);
                     if let Some(opts) = args.get(2) {
-                        obj.insert("options".into(), expr_to_value(opts, warnings)?);
+                        obj.insert("options".into(), expr_to_agg_expr(opts, warnings)?);
                     }
                     serde_json::json!({ "$regexMatch": serde_json::Value::Object(obj) })
                 }
@@ -922,7 +931,7 @@ fn build_project_stage(
                     (None, Expr::Field(f)) => f.clone(),
                     _ => "expr".to_string(),
                 };
-                let value = expr_to_value(expr, warnings)?;
+                let value = expr_to_agg_expr(expr, warnings)?;
                 out.insert(name, value);
             }
         }
@@ -962,75 +971,168 @@ fn build_distinct_group_key(
     Ok(serde_json::Value::Object(out))
 }
 
-/// Field references in Mongo are written as `"$x"`, not as nested
-/// operators like `{ $field: "x" }`. A SQL filter like `WHERE x = y`
-/// therefore needs to be emitted as `{ $expr: { $eq: ["$x", "$y"] } }`
-/// instead of `{ $eq: ["$x", "$y"] }` (the latter would be misinterpreted
-/// as a literal-string equality). This pass wraps any subtree whose
-/// shape is "operator applied to field-ref leaves" inside `$expr`.
+/// Convert a WHERE-clause expression into a MongoDB **filter document**.
 ///
-/// We recurse into `$and` / `$or` so that
-/// `WHERE x = y AND z = w` becomes
-/// `{ $and: [{ $expr: { $eq: [...] } }, { $expr: { $eq: [...] } }] }`.
-/// Mixed literal/field branches inside a single `$and` are left alone
-/// at the parent level (the leaf comparisons stay valid); only
-/// pure-field-ref branches get wrapped.
-fn wrap_field_comparisons_in_expr(v: serde_json::Value) -> serde_json::Value {
-    let serde_json::Value::Object(mut map) = v else {
-        return v;
-    };
-    if map.len() != 1 {
-        return serde_json::Value::Object(map);
-    }
-    let (key, inner_raw) = {
-        let (k, v) = map.iter().next().expect("len 1");
-        (k.clone(), v.clone())
-    };
-    let inner = wrap_field_comparisons_in_expr(inner_raw);
-    match key.as_str() {
-        "$and" | "$or" => {
-            // First try the whole-array wrap.
-            if let serde_json::Value::Array(arr) = &inner {
-                if !arr.is_empty() && arr.iter().all(is_field_ref) {
-                    return serde_json::json!({ "$expr": { key: inner } });
-                }
-            }
-            // Otherwise recurse into each child so per-child field
-            // comparisons still get wrapped.
-            let inner = if let serde_json::Value::Array(arr) = inner {
-                serde_json::Value::Array(
-                    arr.into_iter()
-                        .map(wrap_field_comparisons_in_expr)
-                        .collect(),
-                )
+/// This is distinct from [`expr_to_agg_expr`], which produces aggregation
+/// expression shape (`{$op: [a, b]}`). A filter document must never have a
+/// top-level `$op` key (MongoDB rejects it with "unknown top level
+/// operator"); instead conditions bind to a field name:
+/// `{field: {$op: value}}`, or the index-friendlier `{field: value}` for
+/// `$eq`.
+///
+/// Emission rules:
+/// - `field <op> literal`  -> `{field: {$op: literal}}` (`{field: literal}`
+///   for `$eq`). Keeps single-field indexes usable.
+/// - `literal <op> field`  -> swap operands (and flip `$lt`/`$gt`/`$lte`/
+///   `$gte` for ordered ops) so the same index-friendly form applies.
+/// - `field <op> field`    -> `{$expr: {$op: ["$a", "$b"]}}` (the only case
+///   that genuinely requires expression evaluation).
+/// - `a AND b`             -> merge into one object when both sides are
+///   simple field conditions on disjoint keys (`{x: 1, y: 2}`); otherwise
+///   fall back to `{$and: [...]}`. Sharing a key (e.g. two ranges on the
+///   same field) is left as `$and` so neither condition is dropped.
+/// - `a OR b`              -> `{$or: [...]}` (cannot be merged).
+/// - `field IN (...)`      -> `{field: {$in: [...]}}`.
+/// - `field IS NULL`       -> `{field: null}`; `IS NOT NULL` ->
+///   `{field: {$ne: null}}`.
+/// - Functions (`REGEX`, etc.) and any non-scalar shape fall back to
+///   `{$expr: <agg expr>}` so they remain valid inside `$match`.
+fn expr_to_filter(expr: &Expr, warnings: &mut Vec<String>) -> AppResult<serde_json::Value> {
+    Ok(match expr {
+        Expr::Eq(l, r) => comparison_to_filter("$eq", l, r, warnings)?,
+        Expr::Ne(l, r) => comparison_to_filter("$ne", l, r, warnings)?,
+        Expr::Lt(l, r) => comparison_to_filter("$lt", l, r, warnings)?,
+        Expr::Le(l, r) => comparison_to_filter("$lte", l, r, warnings)?,
+        Expr::Gt(l, r) => comparison_to_filter("$gt", l, r, warnings)?,
+        Expr::Ge(l, r) => comparison_to_filter("$gte", l, r, warnings)?,
+        Expr::And(l, r) => {
+            let left = expr_to_filter(l, warnings)?;
+            let right = expr_to_filter(r, warnings)?;
+            merge_and(left, right)
+        }
+        Expr::Or(l, r) => {
+            let left = expr_to_filter(l, warnings)?;
+            let right = expr_to_filter(r, warnings)?;
+            serde_json::json!({ "$or": [left, right] })
+        }
+        Expr::In(l, values) => {
+            let arr: Vec<_> = values
+                .iter()
+                .map(|v| expr_to_agg_expr(v, warnings))
+                .collect::<AppResult<Vec<_>>>()?;
+            if let Some(field) = field_name(l) {
+                serde_json::json!({ field: { "$in": serde_json::Value::Array(arr) } })
             } else {
-                inner
-            };
-            map.insert(key, inner);
-            serde_json::Value::Object(map)
-        }
-        "$eq" | "$ne" | "$lt" | "$lte" | "$gt" | "$gte" => {
-            if let serde_json::Value::Array(arr) = &inner {
-                if arr.len() == 2 && arr.iter().all(is_field_ref) {
-                    return serde_json::json!({ "$expr": { key: inner } });
-                }
+                let left = expr_to_agg_expr(l, warnings)?;
+                serde_json::json!({ "$expr": { "$in": [left, serde_json::Value::Array(arr)] } })
             }
-            map.insert(key, inner);
-            serde_json::Value::Object(map)
         }
-        _ => {
-            map.insert(key, inner);
-            serde_json::Value::Object(map)
+        Expr::IsNull(inner) => match field_name(inner) {
+            Some(field) => serde_json::json!({ field: serde_json::Value::Null }),
+            None => {
+                let inner_expr = expr_to_agg_expr(inner, warnings)?;
+                serde_json::json!({ "$expr": { "$eq": [inner_expr, serde_json::Value::Null] } })
+            }
+        },
+        Expr::IsNotNull(inner) => match field_name(inner) {
+            Some(field) => serde_json::json!({ field: { "$ne": serde_json::Value::Null } }),
+            None => {
+                let inner_expr = expr_to_agg_expr(inner, warnings)?;
+                serde_json::json!({ "$expr": { "$ne": [inner_expr, serde_json::Value::Null] } })
+            }
+        },
+        // Functions (REGEX, aggregates, ...) and bare scalars are
+        // aggregation expressions; wrap them so they are legal in $match.
+        Expr::Func { .. } | Expr::Field(_) | Expr::Number(_) | Expr::Str(_)
+        | Expr::Bool(_) | Expr::Null | Expr::DateTag(_) => {
+            let agg = expr_to_agg_expr(expr, warnings)?;
+            serde_json::json!({ "$expr": agg })
         }
+    })
+}
+
+/// Build a single comparison as a filter document. See [`expr_to_filter`]
+/// for the shape rules. `op` is the MongoDB operator (`$eq`, `$gt`, ...).
+fn comparison_to_filter(
+    op: &str,
+    l: &Expr,
+    r: &Expr,
+    warnings: &mut Vec<String>,
+) -> AppResult<serde_json::Value> {
+    // field <op> literal -> {field: {$op: literal}} (or {field: literal} for $eq)
+    if let (Some(field), true) = (field_name(l), is_literal(r)) {
+        let lit = expr_to_agg_expr(r, warnings)?;
+        return Ok(simple_field_filter(op, field, lit));
+    }
+    // literal <op> field -> normalize to field <op> literal.
+    if let (true, Some(field)) = (is_literal(l), field_name(r)) {
+        let lit = expr_to_agg_expr(l, warnings)?;
+        // For ordered ops, swap the operator so the semantics are
+        // preserved: `5 < total` == `total > 5`, etc. `$eq`/`$ne` are
+        // commutative and need no swap.
+        let swapped = match op {
+            "$lt" => "$gt",
+            "$gt" => "$lt",
+            "$lte" => "$gte",
+            "$gte" => "$lte",
+            other => other,
+        };
+        return Ok(simple_field_filter(swapped, field, lit));
+    }
+    // Both sides are fields, or a non-scalar expression is involved ->
+    // genuine aggregation expression; wrap in $expr.
+    let left = expr_to_agg_expr(l, warnings)?;
+    let right = expr_to_agg_expr(r, warnings)?;
+    Ok(serde_json::json!({ "$expr": { op: [left, right] } }))
+}
+
+/// Emit `{field: value}` for `$eq`, otherwise `{field: {$op: value}}`.
+fn simple_field_filter(op: &str, field: &str, value: serde_json::Value) -> serde_json::Value {
+    if op == "$eq" {
+        serde_json::json!({ field: value })
+    } else {
+        serde_json::json!({ field: { op: value } })
     }
 }
 
-fn is_field_ref(v: &serde_json::Value) -> bool {
-    if let serde_json::Value::String(s) = v {
-        s.starts_with('$') && s.len() > 1
-    } else {
-        false
+/// Combine two `$and` children. When both are simple field-condition
+/// objects (`{field: ...}` with no top-level `$`-keys) on **disjoint**
+/// keys, merge them into one object — this is cheaper for the planner and
+/// preserves index intersection. If they share a key (e.g. two ranges on
+/// the same field) or either side uses logical/expression operators, fall
+/// back to `{$and: [left, right]}` so no condition is silently dropped.
+fn merge_and(left: serde_json::Value, right: serde_json::Value) -> serde_json::Value {
+    if let (serde_json::Value::Object(l), serde_json::Value::Object(r)) = (&left, &right) {
+        let l_simple = l.keys().all(|k| !k.starts_with('$'));
+        let r_simple = r.keys().all(|k| !k.starts_with('$'));
+        let disjoint = !l.keys().any(|k| r.contains_key(k));
+        if l_simple && r_simple && disjoint {
+            let mut merged = l.clone();
+            for (k, v) in r {
+                merged.insert(k.clone(), v.clone());
+            }
+            return serde_json::Value::Object(merged);
+        }
     }
+    serde_json::json!({ "$and": [left, right] })
+}
+
+/// `Some(name)` when `expr` is a bare field reference.
+fn field_name(e: &Expr) -> Option<&str> {
+    if let Expr::Field(name) = e {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+/// `true` when `expr` is a scalar literal (number, string, bool, null, or
+/// a date tag that resolves to a concrete value).
+fn is_literal(e: &Expr) -> bool {
+    matches!(
+        e,
+        Expr::Number(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Null | Expr::DateTag(_)
+    )
 }
 
 fn build_group_stage(
@@ -1059,11 +1161,11 @@ fn build_group_stage(
                 continue;
             }
             if let Expr::Func { .. } = expr {
-                let value = expr_to_value(expr, warnings)?;
+                let value = expr_to_agg_expr(expr, warnings)?;
                 group.insert(key_name, value);
             } else {
                 // For non-aggregate projections, use $first.
-                let field = expr_to_value(expr, warnings)?;
+                let field = expr_to_agg_expr(expr, warnings)?;
                 group.insert(key_name, serde_json::json!({ "$first": field }));
             }
         }
@@ -1225,10 +1327,10 @@ mod tests {
             .iter()
             .find(|s| s.get("$match").is_some())
             .expect("match");
-        assert_eq!(m["$match"]["$regexMatch"]["regex"], "^foo");
-        assert!(m["$match"]["$regexMatch"]["input"].as_str().is_some());
+        assert_eq!(m["$match"]["$expr"]["$regexMatch"]["regex"], "^foo");
+        assert!(m["$match"]["$expr"]["$regexMatch"]["input"].as_str().is_some());
         // options key absent when not supplied
-        assert!(m["$match"]["$regexMatch"].get("options").is_none());
+        assert!(m["$match"]["$expr"]["$regexMatch"].get("options").is_none());
     }
 
     #[test]
@@ -1243,8 +1345,8 @@ mod tests {
             .iter()
             .find(|s| s.get("$match").is_some())
             .expect("match");
-        assert_eq!(m["$match"]["$regexMatch"]["regex"], "^FOO");
-        assert_eq!(m["$match"]["$regexMatch"]["options"], "i");
+        assert_eq!(m["$match"]["$expr"]["$regexMatch"]["regex"], "^FOO");
+        assert_eq!(m["$match"]["$expr"]["$regexMatch"]["options"], "i");
     }
 
     #[test]
@@ -1262,25 +1364,28 @@ mod tests {
     }
 
     #[test]
-    fn literal_comparison_in_where_stays_unwrapped() {
+    fn literal_eq_collapses_to_field_value_filter() {
+        // `field = literal` emits the index-friendly `{field: literal}`
+        // form, NOT a top-level `$eq` (which MongoDB rejects) and NOT a
+        // `$expr` wrapper (which would defeat single-field indexes).
         let t = translate("shop", "SELECT * FROM products WHERE total = 5").expect("translate");
         let stages = t.pipeline.as_array().expect("array");
         let m = stages
             .iter()
             .find(|s| s.get("$match").is_some())
             .expect("match");
-        // The match document must NOT be wrapped in $expr because one
-        // side is a literal.
         assert!(m["$match"].get("$expr").is_none());
-        assert_eq!(m["$match"]["$eq"][0], "$total");
-        assert_eq!(m["$match"]["$eq"][1], 5.0);
+        assert!(m["$match"].get("$eq").is_none());
+        assert_eq!(m["$match"]["total"], 5.0);
     }
 
     #[test]
     fn mixed_and_wraps_each_field_comparison_branch() {
-        // Mixed: literal comparison + field comparison. Each branch is
-        // processed independently, so the field-vs-field branch gets
-        // wrapped in $expr while the literal branch stays as-is.
+        // Mixed: literal comparison + field comparison. The literal branch
+        // becomes `{total: {$gt: 5}}`; the field-vs-field branch needs
+        // `$expr` so it stays legal in a filter document. The two cannot
+        // merge (one has a `$expr` top-level key), so they remain under
+        // `$and`.
         let t = translate("shop", "SELECT * FROM products WHERE total > 5 AND x = y")
             .expect("translate");
         let stages = t.pipeline.as_array().expect("array");
@@ -1289,19 +1394,17 @@ mod tests {
             .find(|s| s.get("$match").is_some())
             .expect("match");
         let and = m["$match"]["$and"].as_array().expect("and array");
-        // Find the literal branch and the field branch.
+        // Literal branch: {total: {$gt: 5}}
         let literal_branch = and
             .iter()
-            .find(|b| b.get("$gt").is_some())
-            .expect("literal $gt branch");
+            .find(|b| b.get("total").is_some())
+            .expect("literal total branch");
+        assert_eq!(literal_branch["total"]["$gt"], 5.0);
+        // Field branch: {$expr: {$eq: ["$x", "$y"]}}
         let field_branch = and
             .iter()
             .find(|b| b.get("$expr").is_some())
             .expect("field $expr branch");
-        // Literal branch is unwrapped.
-        assert_eq!(literal_branch["$gt"][0], "$total");
-        assert_eq!(literal_branch["$gt"][1], 5.0);
-        // Field branch is wrapped in $expr.
         assert_eq!(field_branch["$expr"]["$eq"][0], "$x");
         assert_eq!(field_branch["$expr"]["$eq"][1], "$y");
     }
@@ -1315,7 +1418,8 @@ mod tests {
             .iter()
             .find(|s| s.get("$match").is_some())
             .expect("match");
-        let date = &m["$match"]["$gte"][1];
+        // `field >= literal` -> {field: {$gte: <date>}}
+        let date = &m["$match"]["createdAt"]["$gte"];
         assert!(date.get("$date").is_some());
     }
 
@@ -1331,10 +1435,13 @@ mod tests {
             .iter()
             .find(|s| s.get("$match").is_some())
             .expect("match");
+        // Same field on both branches -> keys collide -> cannot merge,
+        // so the result stays under `$and` and neither range is dropped.
         let and = m["$match"]["$and"].as_array().expect("and");
-        assert!(and
-            .iter()
-            .all(|b| b["$gte"][1].get("$date").is_some() || b["$lt"][1].get("$date").is_some()));
+        assert!(and.iter().all(|b| {
+            b["createdAt"]["$gte"].get("$date").is_some()
+                || b["createdAt"]["$lt"].get("$date").is_some()
+        }));
     }
 
     #[test]
@@ -1342,5 +1449,199 @@ mod tests {
         let t =
             translate("shop", "SELECT * FROM events WHERE createdAt = #nope").expect("translate");
         assert!(t.warnings.iter().any(|w| w.contains("unknown date tag")));
+    }
+
+    // ---- Regression + optimization coverage for the filter-shape fix ----
+
+    /// The exact query that originally surfaced
+    /// "unknown top level operator: $eq". Must now emit a legal filter.
+    #[test]
+    fn user_query_eq_string_literal_emits_field_filter() {
+        let t = translate(
+            "shop",
+            "SELECT * FROM categories WHERE name=\"Audio\" ORDER BY _id LIMIT 50",
+        )
+        .expect("translate");
+        let stages = t.pipeline.as_array().expect("array");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
+        assert_eq!(m["$match"]["name"], "Audio");
+        assert!(m["$match"].get("$expr").is_none());
+        assert!(m["$match"].get("$eq").is_none());
+    }
+
+    #[test]
+    fn ne_literal_keeps_ne_operator() {
+        let t = translate(
+            "shop",
+            "SELECT * FROM products WHERE status != \"active\"",
+        )
+        .expect("translate");
+        let stages = t.pipeline.as_array().expect("array");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
+        assert_eq!(m["$match"]["status"]["$ne"], "active");
+        assert!(m["$match"].get("$expr").is_none());
+    }
+
+    #[test]
+    fn gt_literal_uses_field_op_literal_form() {
+        let t = translate("shop", "SELECT * FROM products WHERE price > 10").expect("translate");
+        let stages = t.pipeline.as_array().expect("array");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
+        assert_eq!(m["$match"]["price"]["$gt"], 10.0);
+        assert!(m["$match"].get("$expr").is_none());
+    }
+
+    #[test]
+    fn and_of_disjoint_literal_fields_merges_into_one_object() {
+        // Two simple conditions on different fields -> merge into a single
+        // flat object instead of `{$and: [...]}`. Cheaper for the planner
+        // and preserves index intersection.
+        let t = translate("shop", "SELECT * FROM products WHERE x = 5 AND y = 10").expect("translate");
+        let stages = t.pipeline.as_array().expect("array");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
+        assert!(m["$match"].get("$and").is_none());
+        assert_eq!(m["$match"]["x"], 5.0);
+        assert_eq!(m["$match"]["y"], 10.0);
+    }
+
+    #[test]
+    fn and_of_same_field_does_not_merge() {
+        // Two ranges on the same field must NOT merge — that would
+        // overwrite one condition. They stay under `$and`.
+        let t = translate(
+            "shop",
+            "SELECT * FROM products WHERE price >= 5 AND price <= 50",
+        )
+        .expect("translate");
+        let stages = t.pipeline.as_array().expect("array");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
+        let and = m["$match"]["$and"].as_array().expect("and");
+        assert_eq!(and.len(), 2);
+        assert!(and.iter().all(|b| b.get("price").is_some()));
+    }
+
+    #[test]
+    fn literal_lt_field_swaps_to_field_gt_literal() {
+        // `5 < total` == `total > 5`. Normalizing to the field-on-left
+        // form keeps single-field indexes usable.
+        let t = translate("shop", "SELECT * FROM products WHERE 5 < total").expect("translate");
+        let stages = t.pipeline.as_array().expect("array");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
+        assert_eq!(m["$match"]["total"]["$gt"], 5.0);
+        assert!(m["$match"].get("$expr").is_none());
+    }
+
+    #[test]
+    fn literal_eq_field_swaps_to_field_eq_literal() {
+        let t = translate("shop", "SELECT * FROM products WHERE 5 = total").expect("translate");
+        let stages = t.pipeline.as_array().expect("array");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
+        assert_eq!(m["$match"]["total"], 5.0);
+        assert!(m["$match"].get("$expr").is_none());
+    }
+
+    #[test]
+    fn or_keeps_or_with_branches() {
+        let t = translate("shop", "SELECT * FROM products WHERE x = 5 OR y = 10").expect("translate");
+        let stages = t.pipeline.as_array().expect("array");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
+        // $or never merges even for disjoint simple branches.
+        let or = m["$match"]["$or"].as_array().expect("or");
+        assert_eq!(or.len(), 2);
+        assert_eq!(or[0]["x"], 5.0);
+        assert_eq!(or[1]["y"], 10.0);
+    }
+
+    #[test]
+    fn in_literal_list_emits_field_in_filter() {
+        let t = translate(
+            "shop",
+            "SELECT * FROM products WHERE category IN (\"a\", \"b\", \"c\")",
+        )
+        .expect("translate");
+        let stages = t.pipeline.as_array().expect("array");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
+        let arr = m["$match"]["category"]["$in"].as_array().expect("in array");
+        assert_eq!(arr.len(), 3);
+        assert!(m["$match"].get("$expr").is_none());
+    }
+
+    #[test]
+    fn is_null_field_emits_field_null_filter() {
+        let t = translate("shop", "SELECT * FROM products WHERE deletedAt IS NULL").expect("translate");
+        let stages = t.pipeline.as_array().expect("array");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
+        assert!(m["$match"]["deletedAt"].is_null());
+        assert!(m["$match"].get("$expr").is_none());
+    }
+
+    #[test]
+    fn is_not_null_field_emits_field_ne_null() {
+        let t = translate(
+            "shop",
+            "SELECT * FROM products WHERE deletedAt IS NOT NULL",
+        )
+        .expect("translate");
+        let stages = t.pipeline.as_array().expect("array");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
+        assert_eq!(m["$match"]["deletedAt"]["$ne"], serde_json::Value::Null);
+        assert!(m["$match"].get("$expr").is_none());
+    }
+
+    #[test]
+    fn having_clause_wraps_in_expr() {
+        // HAVING runs after $group, so its body is an aggregation
+        // expression and must be wrapped in $expr to be valid inside a
+        // $match stage. A bare `{$gt: [...]}` would reproduce the same
+        // "unknown top level operator" bug the WHERE path had.
+        let t = translate(
+            "shop",
+            "SELECT category, COUNT(*) AS c FROM products GROUP BY category HAVING COUNT(*) > 1",
+        )
+        .expect("translate");
+        let stages = t.pipeline.as_array().expect("array");
+        let group_pos = stages
+            .iter()
+            .position(|s| s.get("$group").is_some())
+            .expect("$group stage");
+        let m = stages[group_pos + 1..]
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("post-group $match");
+        assert!(m["$match"].get("$expr").is_some());
+        assert!(m["$match"]["$expr"].get("$gt").is_some());
     }
 }
