@@ -97,7 +97,45 @@ impl From<keyring::Error> for AppError {
 
 impl From<mongodb::error::Error> for AppError {
     fn from(err: mongodb::error::Error) -> Self {
+        // A "not primary" rejection (server code 10107 / NotWritablePrimary)
+        // means the connection is pinned to a replica-set secondary, so it
+        // can't accept writes. This happens when a single-host URI lands on a
+        // member that is currently a secondary (e.g. after an election). The
+        // raw driver text is opaque, so surface an actionable hint instead.
+        if is_not_writable_primary(&err) {
+            return AppError::Mongo(
+                "write rejected: connected to a replica-set secondary, which cannot accept \
+                 writes (server error 10107, NotWritablePrimary). Reconnect using a \
+                 replica-set connection string that lists every member and the set name \
+                 (e.g. mongodb://host1,host2,host3/?replicaSet=<name>) so the driver routes \
+                 writes to the current primary. Avoid pinning to one node with \
+                 directConnection=true for write workloads."
+                    .to_string(),
+            );
+        }
         AppError::Mongo(Redactor::new().redact(&err.to_string()))
+    }
+}
+
+/// Whether a MongoDB error is a "not primary" write rejection (server error
+/// code 10107, `NotWritablePrimary`), in any of the shapes the driver reports
+/// it (command error, write error, or bulk write error).
+fn is_not_writable_primary(err: &mongodb::error::Error) -> bool {
+    use mongodb::error::ErrorKind;
+
+    const NOT_WRITABLE_PRIMARY: i32 = 10107;
+
+    match err.kind.as_ref() {
+        ErrorKind::Command(cmd) => cmd.code == NOT_WRITABLE_PRIMARY,
+        ErrorKind::Write(failure) => match failure {
+            mongodb::error::WriteFailure::WriteError(we) => we.code == NOT_WRITABLE_PRIMARY,
+            _ => false,
+        },
+        ErrorKind::BulkWrite(bulk) => bulk
+            .write_errors
+            .values()
+            .any(|we| we.code == NOT_WRITABLE_PRIMARY),
+        _ => false,
     }
 }
 

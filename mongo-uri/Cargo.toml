@@ -1,0 +1,14 @@
+[package]
+name = "mongo-uri"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+publish = false
+description = "Canonical MongoDB connection-string normalization shared by the NoSQLBuddy desktop app and the standalone audit service."
+
+[lib]
+name = "mongo_uri"
+
+[dependencies]
+
+[dev-dependencies]

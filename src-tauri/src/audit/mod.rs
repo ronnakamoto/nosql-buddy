@@ -11,6 +11,7 @@
 pub use audit_service::audit::{
     attestation, change_stream, dev_proxy, dev_setup, epoch, interceptor, ipfs, oplog,
     oplog_canon, pinata, reader, sled_store, stellar, stellar_native, stellar_rpc,
+    verification_store,
     AuditEvent, AuditLog, leaf_from_payload,
 };
 

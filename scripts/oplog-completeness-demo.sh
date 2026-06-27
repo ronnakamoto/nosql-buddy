@@ -27,23 +27,20 @@ echo ""
 # Step 1: Start the replica set
 echo "▶ Step 1: Starting 3-member MongoDB replica set..."
 cd "$PROJECT_DIR"
-docker compose up -d
+# The audit-db compose file brings up the 3-node set AND runs rs-init + seeder.
+docker compose -f docker-compose.audit-db.yml up -d
 echo "  Waiting for replica set to initialize..."
-sleep 10
-
-# Initialize the replica set if not already done
-docker exec mongo-rs-1 mongosh --nodb /scripts/rs-init.js 2>/dev/null || true
-sleep 5
+sleep 15
 
 echo "  ✓ Replica set is running"
-echo "    - mongo-rs-1 (primary, operator)    : localhost:27017"
-echo "    - mongo-rs-2 (secondary, operator)  : localhost:27018"
-echo "    - mongo-rs-3 (secondary, independent): localhost:27019"
+echo "    - mongo1 (primary, operator)    : localhost:27017"
+echo "    - mongo2 (secondary, operator)  : localhost:27018"
+echo "    - mongo3 (secondary, independent): localhost:27019"
 echo ""
 
 # Step 2: Insert test data
 echo "▶ Step 2: Inserting test data..."
-docker exec mongo-rs-1 mongosh --eval '
+docker compose -f docker-compose.audit-db.yml exec -T mongo1 mongosh --eval '
   db.getSiblingDB("demo").products.insertMany([
     { name: "Widget", price: 9.99 },
     { name: "Gadget", price: 19.99 },

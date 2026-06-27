@@ -21,9 +21,10 @@ mod omission {
     use crate::audit::oplog::*;
     use bson::doc;
     use mongodb::Client;
+    use mongo_uri::force_direct_connection;
 
     async fn connect(uri: &str) -> Client {
-        let uri = format!("{}?directConnection=true", uri);
+        let uri = force_direct_connection(uri);
         Client::with_uri_str(&uri)
             .await
             .expect("failed to connect to MongoDB")

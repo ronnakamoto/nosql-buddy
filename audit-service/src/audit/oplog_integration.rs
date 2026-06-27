@@ -15,18 +15,13 @@ mod integration {
     use crate::audit::oplog::*;
     use bson::doc;
     use mongodb::Client;
+    use mongo_uri::force_direct_connection;
 
     async fn connect(uri: &str) -> Client {
-        // Use directConnection=true to bypass replica set topology discovery.
-        // The rs is configured with internal Docker hostnames (mongo1, mongo2,
-        // mongo3) that aren't resolvable from the host. directConnection makes
-        // the driver talk only to the specified server — which is exactly what
-        // an auditor does when connecting to the independent member directly.
-        let uri = if uri.contains('?') {
-            format!("{}&directConnection=true", uri)
-        } else {
-            format!("{}?directConnection=true", uri)
-        };
+        // Pin to the specified member: the rs is configured with internal Docker
+        // hostnames (mongo1, mongo2, mongo3) that aren't resolvable from the host,
+        // and an auditor deliberately reads one specific member's own oplog copy.
+        let uri = force_direct_connection(uri);
         Client::with_uri_str(&uri)
             .await
             .expect("failed to connect to MongoDB")

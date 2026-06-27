@@ -1,10 +1,16 @@
-// Single-node replica set initializer (default local dev database).
+// 3-node replica set initializer for the AUDIT trust-anchor demo.
 // Started with `mongosh --nodb` so we can control connection timing.
 //
-// The lone member advertises itself as `localhost:27017`. That address is what
-// the driver will use after topology discovery, and it resolves from the host
-// (where the desktop app runs) with no /etc/hosts alias. A single-member set is
-// always its own primary, so writes never hit NotWritablePrimary.
+// Members (advertised by their internal Docker hostnames, all on port 27017):
+//   mongo1:27017 — primary (operator)
+//   mongo2:27017 — secondary (operator)
+//   mongo3:27017 — secondary (independent — auditor/regulator)
+//
+// These names resolve inside the Docker network, where the audit services run.
+// The host does NOT consume this set directly via topology discovery; if you
+// need to inspect a specific member from the host, connect to its published
+// port with an explicit `?directConnection=true` (e.g. the independent member
+// mongo3 on localhost:27019).
 
 function waitForHost(host, maxAttempts) {
   for (let i = 0; i < maxAttempts; i++) {
@@ -22,14 +28,16 @@ function waitForHost(host, maxAttempts) {
 }
 
 const maxAttempts = 60;
+const hosts = ["mongo1:27017", "mongo2:27017", "mongo3:27017"];
 
-if (!waitForHost("mongo1:27017", maxAttempts)) {
-  printjson({ error: "could not reach mongo1:27017" });
-  quit(1);
+for (const h of hosts) {
+  if (!waitForHost(h, maxAttempts)) {
+    printjson({ error: "could not reach " + h });
+    quit(1);
+  }
 }
 
-// Connect to the node directly and initiate a single-member set.
-print("mongo1 reachable. Initiating single-node replica set rs0...");
+print("All members reachable. Initiating replica set rs0...");
 const conn = new Mongo("mongo1:27017");
 const db = conn.getDB("admin");
 
@@ -37,16 +45,18 @@ try {
   const result = db.adminCommand({
     replSetInitiate: {
       _id: "rs0",
-      members: [{ _id: 0, host: "localhost:27017" }],
+      members: [
+        { _id: 0, host: "mongo1:27017" },
+        { _id: 1, host: "mongo2:27017" },
+        { _id: 2, host: "mongo3:27017" },
+      ],
     },
   });
   printjson(result);
 } catch (e) {
-  // Already initiated — that's fine
   print("rs.initiate returned: " + e);
 }
 
-// Wait for primary election.
 print("Waiting for primary election...");
 for (let i = 0; i < 30; i++) {
   try {

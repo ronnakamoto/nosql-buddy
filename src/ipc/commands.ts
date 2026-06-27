@@ -438,6 +438,12 @@ export interface VerificationReport {
   summary: string;
 }
 
+/** One persisted reader-mode verification run. */
+export interface VerificationRecord {
+  runAt: number;
+  report: VerificationReport;
+}
+
 /** Result of publishing an epoch batch to IPFS. */
 export interface IpfsPublishResult {
   cid: string;
@@ -612,6 +618,8 @@ const commands = {
   // --- ZK Audit: Phase 3 — Reader mode, IPFS, RPC, Attestation ---
   auditVerifyReaderMode: () =>
     invoke<VerificationReport>("audit_verify_reader_mode"),
+  auditListVerificationHistory: () =>
+    invoke<VerificationRecord[]>("audit_list_verification_history"),
   auditPublishEpochToIpfs: (epochNumber: number, apiUrl?: string) =>
     invoke<IpfsPublishResult>("audit_publish_epoch_to_ipfs", {
       epochNumber,

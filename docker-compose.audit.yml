@@ -4,20 +4,25 @@
 #   - attester:  independent replica → oplog hash → on-chain attestation
 #   - reader:    on-chain root query → local verification
 #
-# This is SEPARATE from docker-compose.yml (the 3-node MongoDB replica set +
-# seeder). Run the replica set first:
-#   docker compose up -d            # brings up mongo1/2/3 + rs-init + seeder
-#   docker compose -f docker-compose.audit.yml up -d   # brings up the audit stack
+# This is SEPARATE from docker-compose.yml (the single-node dev database). The
+# audit stack needs the 3-node replica set. Run it first:
+#   docker compose -f docker-compose.audit-db.yml up -d   # mongo1/2/3 + seeder
+#   docker compose -f docker-compose.audit.yml up -d      # the audit stack
 #
-# The audit containers connect to the replica set via the host network
-# (host.docker.internal) on ports 27017/27019.
+# The audit containers connect to the replica set over the shared `mongo-net`
+# Docker network, by container name: the publisher uses
+# mongo1/mongo2/mongo3:27017 and the attester/reader use mongo3:27017. The
+# `host.docker.internal` mapping below is only for reaching host services such
+# as a local IPFS daemon, not MongoDB.
 #
 # The daemon signs Stellar transactions natively (ed25519 + Soroban RPC).
 # No `stellar` CLI or identity mount is needed — pass the secret keys via
 # environment variables (STELLAR_SECRET_KEY, ATTESTER_SECRET_KEY) in .env.audit.
 #
-# Credentials are read from .env.audit (gitignored). Copy audit-stack.env.example
-# to .env.audit and fill in your Pinata keys + Stellar secret keys.
+# Credentials are read from .env.audit (gitignored). The `setup` wizard writes
+# this file for you (see README → Dev Mode). The `env_file` entries below are
+# marked optional (required: false) so the one-off `setup` service can run and
+# create .env.audit before it exists; `up` then loads it normally.
 
 name: nosqlbuddy-audit
 
@@ -52,9 +57,11 @@ services:
       - "/opt/circuits"
       - "--proving-key"
       - "/opt/circuits/merkle_inclusion.pkey"
-    env_file: .env.audit
     volumes:
       - audit-publisher-data:/data/publisher
+    env_file:
+      - path: .env.audit
+        required: false
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -87,10 +94,12 @@ services:
       - "https://soroban-testnet.stellar.org:443"
       - "--network"
       - "testnet"
-    env_file: .env.audit
     volumes:
       - audit-attester-data:/data/attester
       - ./attester.key:/data/attester/audit/attester.key:ro
+    env_file:
+      - path: .env.audit
+        required: false
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -120,15 +129,39 @@ services:
       - "/data/reader"
       - "--rpc-url"
       - "https://soroban-testnet.stellar.org:443"
-    env_file: .env.audit
     volumes:
       - audit-reader-data:/data/reader
+    env_file:
+      - path: .env.audit
+        required: false
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
       - default
       - mongo-net
     restart: unless-stopped
+
+  # ─── One-off setup wizard (Dev Mode) ──────────────────────────────────
+  # Interactive wizard that does all the audit key setup for you: generates
+  # the publisher + attester Stellar keypairs, funds them on testnet via
+  # Friendbot, uses the bundled testnet contract, generates the attester
+  # ed25519 oplog key, authorizes the attester on the contract, and writes
+  # ./attester.key + .env.audit into the project root (mounted at /work) —
+  # exactly where the publisher/attester/reader services pick them up.
+  #
+  # Gated behind the "setup" profile so it never starts with `up`. Run it in
+  # an interactive terminal with:
+  #   docker compose -f docker-compose.audit.yml run --build --rm setup
+  setup:
+    image: nosqlbuddy-audit:dev
+    build:
+      context: .
+      dockerfile: audit-service/Dockerfile.audit
+    profiles: ["setup"]
+    working_dir: /work
+    volumes:
+      - .:/work
+    command: ["setup"]
 
 volumes:
   audit-publisher-data:

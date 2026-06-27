@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 import type {
   OnChainRoot,
-  VerificationReport,
+  VerificationRecord,
   ProofResult,
   OplogIntegrityReport,
 } from "../ipc/commands";
@@ -79,11 +79,6 @@ function RootCompare({
 }
 
 // ─── Tamper timeline ─────────────────────────────────────────────────────────
-
-export interface VerificationRecord {
-  runAt: number; // Date.now() when verification was run
-  report: VerificationReport;
-}
 
 function TamperTimeline({ history }: { history: VerificationRecord[] }) {
   if (history.length === 0) {

@@ -28,23 +28,7 @@ use audit_service::audit::ipfs::IpfsConfig;
 use audit_service::audit::sled_store::SledTreeStore;
 use audit_service::audit::AuditLog;
 use audit_service::auditd::{DaemonConfig, DaemonMode, DaemonState};
-
-/// Ensure the MongoDB URI has `directConnection=true`.
-///
-/// Inlined from the Tauri app's `mongo::client_registry` to keep this crate
-/// independent of the desktop application.
-fn ensure_direct_connection(uri: &str) -> String {
-    // If the URI specifies a replica set, don't force directConnection —
-    // the driver needs to discover all members to find the primary.
-    if uri.contains("replicaSet=") || uri.contains("directConnection=") {
-        return uri.to_string();
-    }
-    if uri.contains('?') {
-        format!("{}&directConnection=true", uri)
-    } else {
-        format!("{}?directConnection=true", uri)
-    }
-}
+use mongo_uri::force_direct_connection;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -585,8 +569,11 @@ async fn cmd_start(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         })?;
 
         log::info!("connecting to MongoDB: {}", redact_uri(mongo_uri));
-        let mongo_uri = ensure_direct_connection(mongo_uri);
-        let client = mongodb::Client::with_uri_str(&mongo_uri).await?;
+        // Pass the URI through untouched: the publisher watches change streams,
+        // which require talking to the replica set (the primary). Forcing
+        // directConnection would pin to one seed and break that. Operators who
+        // really want a pinned connection add ?directConnection=true themselves.
+        let client = mongodb::Client::with_uri_str(mongo_uri).await?;
         let connection_id = "audit".to_string();
 
         change_streams
@@ -601,14 +588,14 @@ async fn cmd_start(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         })?;
 
         log::info!("attester: connecting to independent replica: {}", redact_uri(mongo_uri));
-        let mongo_uri = ensure_direct_connection(mongo_uri);
+        let mongo_uri = force_direct_connection(mongo_uri);
         let client = mongodb::Client::with_uri_str(&mongo_uri).await?;
         log::info!("attester: connected to independent replica member");
         mongo_client = Some(client);
     } else if config.mode == DaemonMode::Read {
         if let Some(mongo_uri) = config.mongo_uri.as_deref() {
             log::info!("reader: connecting to independent replica for oplog verification: {}", redact_uri(mongo_uri));
-            let mongo_uri = ensure_direct_connection(mongo_uri);
+            let mongo_uri = force_direct_connection(mongo_uri);
             let client = mongodb::Client::with_uri_str(&mongo_uri).await?;
             log::info!("reader: connected to independent replica member");
             mongo_client = Some(client);

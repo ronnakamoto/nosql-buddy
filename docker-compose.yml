@@ -1,5 +1,26 @@
+# ─── Default local dev database ──────────────────────────────────────────
+# A SINGLE-NODE replica set. A single-member set is always its own primary, so:
+#   - writes never fail with NotWritablePrimary (there is no secondary, and no
+#     elections to demote it),
+#   - it still supports change streams and transactions (which require a
+#     replica set), and
+#   - it is reachable directly from the host at localhost:27017 because the
+#     member advertises `localhost:27017` — no /etc/hosts alias and no
+#     directConnection override are needed.
+#
+# Connect the desktop app with:
+#   mongodb://localhost:27017/?replicaSet=rs0
+#
+# The 3-node replica set used by the audit trust-anchor demo lives in
+# docker-compose.audit-db.yml (it advertises internal container names and is
+# meant to be consumed by the in-network audit services, not the host). The dev
+# DB intentionally stays OFF the shared `mongo-net` network: it is single-node
+# and host-consumed, so it has no need for a shared network, and keeping it off
+# `mongo-net` avoids a service-name collision with the audit set's `mongo1`
+# (both stacks define a service named `mongo1`; on a shared network Docker DNS
+# would resolve that name ambiguously and the audit members couldn't find each
+# other). Only the audit stack (audit-db + audit services) uses `mongo-net`.
 services:
-  # ─── Primary (operator) ───────────────────────────────────────────────
   mongo1:
     image: mongo:7
     ports:
@@ -9,50 +30,21 @@ services:
       - mongo-data-1:/data/db
     networks:
       - default
-      - mongo-net
 
-  # ─── Secondary 1 (operator) ──────────────────────────────────────────
-  mongo2:
-    image: mongo:7
-    ports:
-      - "27018:27017"
-    command: ["--replSet", "rs0", "--bind_ip_all"]
-    volumes:
-      - mongo-data-2:/data/db
-    networks:
-      - default
-      - mongo-net
-
-  # ─── Secondary 2 (independent — auditor/regulator) ───────────────────
-  # This member is the trust anchor for oplog completeness verification.
-  # The independent attester daemon connects here to compute the real
-  # oplog hash from its own replicated copy.
-  mongo3:
-    image: mongo:7
-    ports:
-      - "27019:27017"
-    command: ["--replSet", "rs0", "--bind_ip_all"]
-    volumes:
-      - mongo-data-3:/data/db
-    networks:
-      - default
-      - mongo-net
-
-  # ─── Replica set initializer ─────────────────────────────────────────
-  # Runs after all 3 members are up, initiates the replica set.
+  # Initiates the single-node replica set, advertising the member as
+  # localhost:27017 so the driver can reach it from the host without tricks.
   rs-init:
     image: mongo:7
     depends_on:
       - mongo1
-      - mongo2
-      - mongo3
     volumes:
       - ./scripts/rs-init.js:/scripts/rs-init.js:ro
     entrypoint: ["mongosh", "--nodb", "/scripts/rs-init.js"]
     restart: "no"
 
-  # ─── Data seeder ─────────────────────────────────────────────────────
-  # Runs after the replica set is initiated and a primary is elected.
+  # Seeds demo data once the set has a primary. It pins to the node directly
+  # (single node = always primary) so it does not depend on host-side name
+  # resolution of the advertised `localhost:27017` address.
   seeder:
     image: mongo:7
     depends_on:
@@ -60,14 +52,11 @@ services:
         condition: service_completed_successfully
     volumes:
       - ./scripts/seed.js:/scripts/seed.js:ro
-    entrypoint: ["mongosh", "mongodb://mongo1:27017", "/scripts/seed.js"]
+    entrypoint:
+      - "mongosh"
+      - "mongodb://mongo1:27017/?directConnection=true"
+      - "/scripts/seed.js"
     restart: "no"
 
 volumes:
   mongo-data-1:
-  mongo-data-2:
-  mongo-data-3:
-
-networks:
-  mongo-net:
-    name: mongo-net

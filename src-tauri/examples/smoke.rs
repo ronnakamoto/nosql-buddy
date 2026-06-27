@@ -21,7 +21,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "127.0.0.1:27017".to_string());
-    let uri = format!("mongodb://{}/?directConnection=true", host);
+    // Smoke test deliberately pins to the single host it was given.
+    let uri = mongo_uri::force_direct_connection(&format!("mongodb://{}/", host));
     println!("== NoSQLBuddy smoke test ==");
     println!("uri: {}", uri);
 

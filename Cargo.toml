@@ -1,5 +1,5 @@
 [workspace]
-members = ["src-tauri", "audit-service", "zk-audit"]
+members = ["src-tauri", "audit-service", "zk-audit", "mongo-uri"]
 resolver = "2"
 
 [workspace.package]

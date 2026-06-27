@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::audit::attestation::AttestationManager;
 use crate::audit::change_stream::ChangeStreamRegistry;
 use crate::audit::epoch::EpochManager;
+use crate::audit::verification_store::VerificationStore;
 use crate::audit::AuditLog;
 use crate::mongo::client_registry::ClientRegistry;
 use crate::mongo::credentials::{InMemorySecretStore, KeyringSecretStore, SecretStore};
@@ -24,6 +25,7 @@ pub struct AppState {
     pub change_streams: ChangeStreamRegistry,
     pub epoch_manager: EpochManager,
     pub attestation_manager: AttestationManager,
+    pub verification_store: VerificationStore,
 }
 
 impl AppState {
@@ -50,6 +52,7 @@ impl AppState {
             change_streams: ChangeStreamRegistry::new(),
             epoch_manager: EpochManager::default(),
             attestation_manager: AttestationManager::default(),
+            verification_store: VerificationStore::default(),
         }
     }
 }

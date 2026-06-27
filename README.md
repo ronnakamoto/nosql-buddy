@@ -4,6 +4,47 @@ A cross-platform MongoDB management studio for developers, SREs, and database en
 
 NoSQLBuddy connects to MongoDB, lets you browse data, run queries, build aggregations, translate SQL to MongoDB, inspect schema and indexes, and review performance — all from a native desktop app built with Tauri, Rust, React, and TypeScript.
 
+## Contents
+
+- [Quickstart](#quickstart) — run the app and connect in minutes
+- [Features](#features)
+- [Using NoSQLBuddy](#using-nosqlbuddy) — how to use the core features
+- [ZK Audit Log](#zk-audit-log) — [Dev Mode](#dev-mode-full-stack-locally) · [Production Mode](#production-mode-in-app-your-keys)
+- [Standalone audit service](#standalone-audit-service-nosqlbuddy-audit) (advanced / reference)
+- [Security](#security)
+- [Testing](#testing)
+
+## Quickstart
+
+Get the app running and connected to MongoDB in a few minutes.
+
+1. **Install dependencies:**
+   ```bash
+   git clone https://github.com/ronnakamoto/nosql-buddy.git
+   cd nosql-buddy
+   npm install
+   ```
+
+2. **Get a MongoDB to connect to.** Already have one (local, Atlas, remote)? Use it. Otherwise start a local single-node replica set (requires Docker):
+   ```bash
+   docker compose up -d   # MongoDB at localhost:27017, seeded with demo data
+   ```
+
+3. **Launch NoSQLBuddy:**
+   ```bash
+   npm run tauri dev
+   ```
+
+4. **Connect.** In the app, click **New Connection**, paste a connection string, and click **Connect**:
+   - Local dev DB: `mongodb://localhost:27017/?replicaSet=rs0`
+   - Atlas / remote: your own `mongodb://…` or `mongodb+srv://…` URI
+
+5. **Explore** your data — see [Using NoSQLBuddy](#using-nosqlbuddy).
+
+> Want the tamper-evident, on-chain audit log? See [ZK Audit Log](#zk-audit-log).
+
+Prerequisites: [Node.js](https://nodejs.org/) 18+, [Rust](https://www.rust-lang.org/tools/install) 1.77+, and (optional) [Docker Desktop](https://www.docker.com/products/docker-desktop/) for the local database and audit stack. Full details under [Getting started](#getting-started).
+
 ## Features
 
 - **Connection management** — Save connection profiles with secrets stored in the OS keychain. URIs and credentials are redacted from logs and UI responses.
@@ -36,7 +77,7 @@ NoSQLBuddy connects to MongoDB, lets you browse data, run queries, build aggrega
 
 - [Node.js](https://nodejs.org/) 18+
 - [Rust](https://www.rust-lang.org/tools/install) 1.77+
-- A MongoDB instance (local or remote) for live features
+- A MongoDB instance (local or remote) for live features. No instance handy? `docker compose up -d` starts a **single-node replica set** reachable at `mongodb://localhost:27017/?replicaSet=rs0` (always primary, no extra host configuration).
 
 #### Audit daemon (optional)
 
@@ -48,7 +89,7 @@ NoSQLBuddy connects to MongoDB, lets you browse data, run queries, build aggrega
 #### Dev Mode Docker stack (optional)
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) with the Compose plugin
-- The 3-node MongoDB replica set running (`docker compose up -d` from the project root)
+- The 3-node MongoDB replica set running (`docker compose -f docker-compose.audit-db.yml up -d` from the project root). The default `docker compose up -d` starts the single-node dev database instead; the audit features need the 3-node set for the independent attester member.
 
 ### Installation
 
@@ -79,68 +120,67 @@ npm run build      # Production frontend build
 npm run tauri build  # Native app bundle for the current platform
 ```
 
-## ZK Audit Log — Dev Mode vs. Production Mode
+## Using NoSQLBuddy
 
-The Audit tab in the desktop app offers two modes, shown as cards every time you open the tab:
+After you connect (see [Quickstart](#quickstart)), the main workspace puts the core tools one click away:
+
+- **Browse and edit data** — Pick a database and collection in the sidebar to page through documents. Switch between JSON and table views, and edit a document inline then save it back.
+- **Run queries** — Type a MongoDB filter in the query bar, or use the **visual query builder** to compose filter, projection, and sort without writing raw JSON.
+- **Build aggregations** — Open the aggregation editor to assemble a pipeline stage by stage and preview results as you go.
+- **Translate SQL** — Write a `SELECT … FROM … WHERE … JOIN … GROUP BY … ORDER BY … LIMIT` statement and NoSQLBuddy converts it into an aggregation pipeline you can run or copy.
+- **Inspect schema and indexes** — Sample a collection to infer its field shape, cardinality, and which indexes are used.
+- **Diagnose slow queries** — Run a query with explain to get a navigable execution-plan tree.
+- **Generate driver code** — Export any query or pipeline as ready-to-paste code for Node.js, Python, Java, C#, Ruby, Rust, or the mongo shell.
+
+Connection profiles are saved with their secrets in your OS keychain; URIs and credentials are redacted from logs and responses.
+
+## ZK Audit Log
+
+NoSQLBuddy can produce a tamper-evident, independently verifiable audit log of every database write: Merkle-tree proofs committed on-chain (Stellar), batches stored on IPFS, and an independent attester that detects omitted writes.
+
+There are two ways to run it (the Audit tab shows both as cards). Pick based on what you're trying to do:
+
+| | Dev Mode | Production Mode |
+|---|---|---|
+| **Runs where** | Full stack in Docker on your machine | In-app pipeline — no Docker, no daemons |
+| **Stellar keys** | Two testnet keys you generate (publisher + attester) | Your own keypair |
+| **Contract** | Bundled testnet contract | Auto-funded on testnet, or your own on mainnet |
+| **Network** | Testnet | Testnet or mainnet |
+| **MongoDB** | 3-node replica set (`docker-compose.audit-db.yml`) | Your own replica set / cluster |
+| **Best for** | Learning and demoing the full system (publisher + independent attester + reader, K-of-N, oplog completeness) | Auditing your real data with keys and a contract you control |
+
+**New to this?** Start with **Dev Mode** to watch the whole system work end to end, then move to **Production Mode** with your own keys.
 
 ### Dev Mode (full stack locally)
 
 Runs the **complete audit system** on your machine via Docker — publisher, independent attester, and reader daemons — with K-of-N attestation, oplog completeness verification, and on-chain commitments to Stellar testnet.
 
-**Prerequisites:** Docker Desktop + the 3-node MongoDB replica set running.
+**Use this when:** you want to see or demo the entire audit system working end to end, without deploying anything of your own.
+
+**Prerequisites:** Docker Desktop, the 3-node MongoDB replica set running, and a [Pinata](https://pinata.cloud) account (or local IPFS) for batch publishing.
 
 **Steps:**
 
-1. Start the MongoDB replica set (from the project root):
+1. Start the 3-node MongoDB replica set (from the project root):
    ```bash
-   docker compose up -d
+   docker compose -f docker-compose.audit-db.yml up -d
    ```
 
-2. Generate **two separate** Stellar testnet secret keys — one for the publisher (operator) and one for the attester (auditor). They must be different keys, controlled by different parties:
+2. Run the setup wizard (interactive, in Docker). This one command does all the key work for you — it generates the two independent Stellar keypairs (publisher + attester), funds them on testnet via Friendbot, uses the bundled testnet contract, generates the attester's ed25519 oplog key, authorizes the attester on the contract, and writes `./attester.key` and `.env.audit` into the project root:
    ```bash
-   # Install the stellar CLI once (only for key generation — not needed at runtime):
-   # https://docs.stellar.org/tools/developer-tools/cli/install
-
-   # Publisher key (controlled by the operator who runs MongoDB):
-   stellar keys generate --global publisher --network testnet
-   stellar keys show publisher --secret-key   # → STELLAR_SECRET_KEY in .env.audit
-
-   # Attester key (controlled by the auditor/regulator who runs the independent replica):
-   stellar keys generate --global attester --network testnet
-   stellar keys show attester --secret-key   # → ATTESTER_SECRET_KEY in .env.audit
+   docker compose -f docker-compose.audit.yml run --build --rm setup
    ```
+   Press Enter to accept the defaults (testnet, generate both keys, bundled contract, `./attester.key`, `.env.audit`) and enter your Pinata API key/secret when prompted. The wizard runs in a container with the project root mounted, so the files land exactly where the audit stack expects them: `docker-compose.audit.yml` mounts `./attester.key` and reads `.env.audit`.
 
-   > **Why two keys?** The trust model requires the attester to be independent from the operator. If both use the same key, the operator could submit fake attestations themselves, defeating the independent verification.
+   > **No `stellar` CLI needed for Dev Mode.** The wizard funds accounts and authorizes the attester with native signing against the bundled testnet contract. The CLI is only required if you choose to *deploy* a brand-new contract, which Dev Mode doesn't.
+   >
+   > **Why two keys?** The trust model requires the attester to be independent from the operator. If both used the same key, the operator could submit fake attestations themselves, defeating independent verification — so the wizard generates two separate keypairs.
 
-3. Create `.env.audit` with the keys you just generated:
-   ```bash
-   cp audit-stack.env.example .env.audit
-   # Edit .env.audit — fill in STELLAR_SECRET_KEY, ATTESTER_SECRET_KEY, PINATA_API_KEY, PINATA_API_SECRET
-   ```
+3. Open the app, go to the Audit tab, select **Dev Mode**, and click **Start Stack** (this launches the publisher, attester, and reader containers using the `.env.audit` and `./attester.key` the wizard produced).
 
-4. Authorize the attester on the contract. The attester daemon auto-generates a separate ed25519 oplog signing key on first run and logs its public key. You need both the Stellar address and the ed25519 public key to authorize:
-   ```bash
-   # Build and start the attester once to generate the ed25519 key, then check the logs:
-   docker compose -f docker-compose.audit.yml up -d --build attester
-   docker compose -f docker-compose.audit.yml logs attester | grep "public key"
+4. The live view shows: event feed, epoch progress, on-chain root, K-of-N attestation status, oplog completeness verification, and epoch history — all querying the Docker daemons in real time.
 
-   # Authorize on the contract (one-time):
-   stellar contract invoke --id <testnet-contract-id> --network testnet -- \
-     authorize_attester \
-     --address <attester-stellar-address-G...> \
-     --pubkey <attester-ed25519-pubkey-hex-from-logs>
-   ```
-
-   The attester has **three** keys total:
-   - `ATTESTER_SECRET_KEY` (Stellar S...) — signs the on-chain `attest_oplog` transaction.
-   - Ed25519 oplog signing key (auto-generated at `--attester-key-file`) — signs the oplog hash itself.
-   - Contract authorization — links the Stellar address to the ed25519 pubkey so the contract accepts attestations.
-
-5. Open the app, go to the Audit tab, select **Dev Mode**, and click **Start Stack**.
-
-6. The live view shows: event feed, epoch progress, on-chain root, K-of-N attestation status, oplog completeness verification, and epoch history — all querying the Docker daemons in real time.
-
-7. Click **Commit Now** to close the epoch, pin to IPFS, and commit the root on-chain.
+5. Click **Commit Now** to close the epoch, pin to IPFS, and commit the root on-chain.
 
 **Manual Docker commands** (alternative to the in-app Start Stack button):
 ```bash
@@ -153,6 +193,12 @@ docker compose -f docker-compose.audit.yml down     # stop the stack
 ### Production Mode (in-app, your keys)
 
 Runs the in-app audit pipeline with **your own Stellar keypair** and contract. Choose testnet or mainnet — this is the "double check" that an audit system you deployed elsewhere works end to end. No daemon, no Docker.
+
+**Use this when:** you want to audit your real data with keys and a contract you control — no Docker, no background daemons.
+
+**What you need:**
+- Your Stellar secret key (`S…`). On **testnet** the app auto-funds a fresh contract for you, so the key alone is enough to try it. On **mainnet** you also need your deployed contract ID (`C…`) and an RPC URL.
+- A MongoDB **replica set** connection (change streams and oplog require it; a standalone `mongod` won't work).
 
 **Steps:**
 
@@ -172,6 +218,8 @@ Runs the in-app audit pipeline with **your own Stellar keypair** and contract. C
 
 ## Standalone audit service (`nosqlbuddy-audit`)
 
+> **Advanced / reference.** Most users don't need this — [Dev Mode](#dev-mode-full-stack-locally) and [Production Mode](#production-mode-in-app-your-keys) above cover the common workflows. This section documents running the audit daemon directly (CLI flags, HTTP API, and the end-to-end protocol).
+
 The audit service runs as a separate process from the desktop app. It captures MongoDB writes via change streams, builds a tamper-evident Poseidon Merkle tree, batches events into epochs, publishes batches to IPFS, and commits Merkle roots to a Soroban contract on Stellar.
 
 ### Build
@@ -187,32 +235,18 @@ If you don't want to install the Rust toolchain, you can run the full audit stac
 
 **Prerequisites:** Docker Desktop + the 3-node MongoDB replica set running.
 
-1. Start the MongoDB replica set (from the project root):
+1. Start the 3-node MongoDB replica set (from the project root):
    ```bash
-   docker compose up -d
+   docker compose -f docker-compose.audit-db.yml up -d
    ```
 
-2. Generate two separate Stellar testnet secret keys (publisher + attester) — see the [Dev Mode](#dev-mode-full-stack-locally) section for detailed key generation steps.
-
-3. Create `.env.audit` with the keys you just generated:
+2. Run the setup wizard (interactive, in Docker). It generates the publisher + attester keypairs, funds them on testnet, uses the bundled testnet contract, generates and authorizes the attester's ed25519 oplog key, and writes `./attester.key` + `.env.audit` into the project root:
    ```bash
-   cp audit-stack.env.example .env.audit
-   # Edit .env.audit — fill in STELLAR_SECRET_KEY, ATTESTER_SECRET_KEY, PINATA_API_KEY, PINATA_API_SECRET
+   docker compose -f docker-compose.audit.yml run --build --rm setup
    ```
+   Accept the defaults and enter your Pinata API key/secret when prompted. See [Dev Mode](#dev-mode-full-stack-locally) for more detail.
 
-4. Build and start the attester to auto-generate its ed25519 oplog key, then authorize it on the contract (one-time):
-   ```bash
-   docker compose -f docker-compose.audit.yml up -d --build attester
-   docker compose -f docker-compose.audit.yml logs attester | grep "public key"
-
-   # Authorize on the contract:
-   stellar contract invoke --id <testnet-contract-id> --network testnet -- \
-     authorize_attester \
-     --address <attester-stellar-address-G...> \
-     --pubkey <attester-ed25519-pubkey-hex-from-logs>
-   ```
-
-5. Start the full audit stack:
+3. Start the full audit stack:
    ```bash
    docker compose -f docker-compose.audit.yml up -d --build
    ```
@@ -225,7 +259,7 @@ If you don't want to install the Rust toolchain, you can run the full audit stac
    | `attester` | 9174 | attest | mongo3 (port 27019) | Independently computes oplog hash, submits ed25519 attestations to the contract |
    | `reader` | 9175 | read | mongo3 (port 27019) | Verifies on-chain roots against local audit log and oplog |
 
-6. Manage the stack:
+4. Manage the stack:
    ```bash
    docker compose -f docker-compose.audit.yml ps       # check status
    docker compose -f docker-compose.audit.yml logs -f  # tail all logs
@@ -235,16 +269,24 @@ If you don't want to install the Rust toolchain, you can run the full audit stac
 
 > **Restarting:** Always run `docker compose -f docker-compose.audit.yml down` before `up` if you made changes to `.env.audit` or the Dockerfile. Use `--build` on first run or after code changes.
 >
-> **Tip:** The audit stack uses a separate Compose project name (`nosqlbuddy-audit`) so it won't trigger orphan-container warnings from the MongoDB replica set. The audit containers connect to the replica set via `host.docker.internal` — on Linux, Docker Compose automatically adds the `host-gateway` mapping.
+> **Tip:** The audit stack uses a separate Compose project name (`nosqlbuddy-audit`) so it won't trigger orphan-container warnings from the MongoDB replica set. The audit containers reach the replica set over the shared `mongo-net` Docker network by container name (`mongo1`, `mongo2`, `mongo3`), so start the DB with `docker compose -f docker-compose.audit-db.yml up -d` first. The `host.docker.internal` mapping is only used to reach host services such as a local IPFS daemon.
 
 ### Setup wizard (one-time)
 
-The `setup` subcommand is an interactive wizard that generates Stellar keypairs, optionally deploys the contract, initializes it, authorizes the attester, and writes `.env.audit`:
+The `setup` subcommand is an interactive wizard that generates Stellar keypairs, optionally deploys the contract, initializes it, authorizes the attester, and writes `.env.audit`. Run it in Docker (recommended — no Rust toolchain required) from the project root, so the project directory is mounted and the generated `./attester.key` + `.env.audit` land where the audit stack reads them:
 
 ```bash
-cd src-tauri
+docker compose -f docker-compose.audit.yml run --build --rm setup
+```
+
+<details>
+<summary>From source (requires the Rust toolchain)</summary>
+
+```bash
+# Run from the project root so ./attester.key and .env.audit land there.
 cargo run --bin nosqlbuddy-audit -- setup
 ```
+</details>
 
 The wizard walks you through:
 1. Choosing a network (testnet or mainnet)
@@ -256,7 +298,9 @@ The wizard walks you through:
 7. Entering Pinata IPFS credentials (optional)
 8. Writing `.env.audit` with all values
 
-> **Contract deployment** requires the `stellar` CLI installed (one-time only). The `initialize` and `authorize_attester` calls use native signing — no CLI needed for those.
+> **Contract deployment** (deploying a brand-new contract) requires the `stellar` CLI and is only available via the from-source wizard — the Docker image doesn't bundle the CLI. Dev Mode and the default flow use the bundled testnet contract, so the Docker wizard is all you need. The `initialize` and `authorize_attester` calls use native signing — no CLI required.
+>
+> **Setting up Dev Mode?** This is the recommended one-command path — see [Dev Mode](#dev-mode-full-stack-locally).
 
 ### Start the service
 
@@ -525,7 +569,7 @@ There is **one** assumption: at least one independent replica member computes an
 
 ```bash
 # Start the 3-member replica set
-docker compose up -d
+docker compose -f docker-compose.audit-db.yml up -d
 
 # Run the completeness demo
 ./scripts/oplog-completeness-demo.sh

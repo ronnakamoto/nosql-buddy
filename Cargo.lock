@@ -4301,6 +4301,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mongo-uri"
+version = "0.1.0"
+
+[[package]]
 name = "mongocrypt"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4482,6 +4486,7 @@ dependencies = [
  "hex",
  "keyring",
  "log",
+ "mongo-uri",
  "mongodb",
  "nosqlbuddy-audit-service",
  "regex",
@@ -4523,6 +4528,7 @@ dependencies = [
  "keyring",
  "libc",
  "log",
+ "mongo-uri",
  "mongodb",
  "rand 0.8.6",
  "reqwest 0.12.28",

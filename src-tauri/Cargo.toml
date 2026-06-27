@@ -44,6 +44,9 @@ boa_engine = "0.21"
 # Audit service (extracted standalone crate)
 audit-service = { package = "nosqlbuddy-audit-service", path = "../audit-service" }
 
+# Canonical MongoDB connection-string normalization (shared, single source of truth).
+mongo-uri = { path = "../mongo-uri" }
+
 # ZK audit log — used directly by audit/commands.rs for proof generation
 zk-audit = { path = "../zk-audit" }
 ark-ff = "0.5"

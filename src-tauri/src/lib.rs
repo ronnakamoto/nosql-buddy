@@ -217,6 +217,7 @@ pub fn run() {
             audit::commands::audit_close_epoch,
             audit::commands::audit_mark_epoch_committed,
             audit::commands::audit_verify_reader_mode,
+            audit::commands::audit_list_verification_history,
             audit::commands::audit_publish_epoch_to_ipfs,
             audit::commands::audit_get_ipfs_cid,
             audit::commands::audit_check_ipfs_daemon,
@@ -305,6 +306,23 @@ pub fn run() {
                         tracing::error!(
                             error = %e,
                             "failed to sync open epoch with audit log"
+                        );
+                    }
+
+                    // Wire verification-history persistence to the same audit
+                    // dir. Without this the reader-mode "tamper timeline"
+                    // lived only in the frontend's React state and was lost on
+                    // every app restart.
+                    let verify_file =
+                        dir.join("audit").join("verification_history.json");
+                    if let Err(e) = app_state
+                        .verification_store
+                        .enable_persistence(&verify_file)
+                    {
+                        tracing::error!(
+                            error = %e,
+                            verify_file = %verify_file.display(),
+                            "failed to initialize verification history persistence; verification timeline will reset on restart"
                         );
                     }
 

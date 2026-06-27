@@ -10,6 +10,7 @@ import commands, {
   type AuditModeConfig,
   type OplogIntegrityReport,
   type ProofResult,
+  type VerificationRecord,
   formatError,
 } from "../ipc/commands";
 import { Alert } from "./AuditUi";
@@ -17,7 +18,7 @@ import { AuditHeader, type HealthState } from "./AuditHeader";
 import { AuditStatusSection } from "./AuditStatusSection";
 import { AuditChangeFeed } from "./AuditChangeFeed";
 import { AuditBatchHistory } from "./AuditBatchHistory";
-import { AuditInvestigation, type VerificationRecord } from "./AuditInvestigation";
+import { AuditInvestigation } from "./AuditInvestigation";
 
 /**
  * AuditSurface — the unified, adaptive audit interface.
@@ -66,6 +67,23 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
 
   // ─── Verification history (tamper timeline) ───────────────────────────
   const [verificationHistory, setVerificationHistory] = useState<VerificationRecord[]>([]);
+
+  // Load persisted verification history once on mount so the tamper timeline
+  // survives app restarts (the backend persists every reader-mode run).
+  const refreshVerificationHistory = useCallback(async () => {
+    try {
+      const history = await commands.auditListVerificationHistory();
+      setVerificationHistory(history);
+      const latest = history[history.length - 1];
+      if (latest) setVerifyReport(latest.report);
+    } catch {
+      // Non-fatal: history is auxiliary. Leave the timeline empty on failure.
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshVerificationHistory();
+  }, [refreshVerificationHistory]);
 
   // ─── Oplog ────────────────────────────────────────────────────────────
   const [oplogReport, setOplogReport] = useState<OplogIntegrityReport | null>(null);
@@ -248,13 +266,13 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
     try {
       const report = await commands.auditVerifyReaderMode();
       setVerifyReport(report);
-      setVerificationHistory((prev) => [...prev, { runAt: Date.now(), report }]);
+      await refreshVerificationHistory();
     } catch (err) {
       setError(formatError(err));
     } finally {
       setVerifyLoading(false);
     }
-  }, []);
+  }, [refreshVerificationHistory]);
 
   const handleProof = useCallback(async (index: number) => {
     setProofIndex(index);

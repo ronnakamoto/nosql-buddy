@@ -61,6 +61,7 @@ pub mod stellar;
 pub mod stellar_native;
 pub mod stellar_rpc;
 pub mod dev_setup;
+pub mod verification_store;
 
 #[cfg(test)]
 mod e2e_test;

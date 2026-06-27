@@ -1,0 +1,93 @@
+# ─── 3-node MongoDB replica set for the AUDIT trust-anchor demo ───────────
+# Separate from docker-compose.yml (the single-node dev database) because the
+# audit feature needs an INDEPENDENT replica member (mongo3) that the attester
+# reads from to recompute the oplog hash on its own copy.
+#
+# Members advertise their internal Docker hostnames (mongo1/mongo2/mongo3, all
+# on port 27017), which resolve inside `mongo-net` where the audit services run
+# (see docker-compose.audit.yml). The host is not expected to do replica-set
+# discovery against this set; to inspect a specific member from the host, use
+# its published port with an explicit ?directConnection=true.
+#
+# Host port layout (deliberately non-overlapping with docker-compose.yml, which
+# owns 27017 for the single-node dev DB, so both stacks can run at once):
+#   mongo2 → localhost:27018   (operator secondary)
+#   mongo3 → localhost:27019   (independent member — the auditor's trust anchor)
+#   mongo1 has NO published host port: it is the operator primary, reached
+#   in-network by the audit services and the seeder. The dev DB keeps 27017.
+#   To inspect mongo1 from the host, use `docker exec` or connect to 27018/27019
+#   with directConnection=true (the set's primary is discoverable from either).
+#
+# Bring up order:
+#   docker compose -f docker-compose.audit-db.yml up -d   # this 3-node set
+#   docker compose -f docker-compose.audit.yml up -d      # the audit services
+name: nosqlbuddy-audit-db
+
+services:
+  mongo1:
+    image: mongo:7
+    # No `ports:`: mongo1 is internal-only so it does not collide with the
+    # single-node dev DB on localhost:27017. The audit services and seeder
+    # reach it at mongo1:27017 inside mongo-net.
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    volumes:
+      - audit-mongo-data-1:/data/db
+    networks:
+      - default
+      - mongo-net
+
+  mongo2:
+    image: mongo:7
+    ports:
+      - "27018:27017"
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    volumes:
+      - audit-mongo-data-2:/data/db
+    networks:
+      - default
+      - mongo-net
+
+  # Independent member — the trust anchor for oplog completeness verification.
+  mongo3:
+    image: mongo:7
+    ports:
+      - "27019:27017"
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    volumes:
+      - audit-mongo-data-3:/data/db
+    networks:
+      - default
+      - mongo-net
+
+  rs-init:
+    image: mongo:7
+    depends_on:
+      - mongo1
+      - mongo2
+      - mongo3
+    volumes:
+      - ./scripts/rs-init-audit.js:/scripts/rs-init-audit.js:ro
+    entrypoint: ["mongosh", "--nodb", "/scripts/rs-init-audit.js"]
+    restart: "no"
+
+  seeder:
+    image: mongo:7
+    depends_on:
+      rs-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./scripts/seed.js:/scripts/seed.js:ro
+    entrypoint:
+      - "mongosh"
+      - "mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0"
+      - "/scripts/seed.js"
+    restart: "no"
+
+volumes:
+  audit-mongo-data-1:
+  audit-mongo-data-2:
+  audit-mongo-data-3:
+
+networks:
+  mongo-net:
+    name: mongo-net

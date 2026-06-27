@@ -1,0 +1,27 @@
+#!/bin/sh
+# NoSQLBuddy pre-push gate.
+#
+# Enable once per clone:
+#     git config core.hooksPath .githooks
+#
+# Goal: stop a push that breaks something that currently works. The test suite
+# is the hard gate (it is green today). `fmt` and `clippy` are advisory for now
+# because the existing tree has pre-existing lint/format debt; flip them to hard
+# gates (drop the `|| ...` guards) once that debt is paid down.
+
+set -e
+
+echo "[pre-push] cargo test --workspace"
+cargo test --workspace
+
+echo "[pre-push] frontend build (tsc + vite)"
+npm run build --silent
+
+echo "[pre-push] cargo fmt --check (advisory)"
+cargo fmt --all --check || echo "[pre-push] WARN: rustfmt diffs present (not blocking)"
+
+echo "[pre-push] cargo clippy (advisory)"
+cargo clippy --workspace --all-targets -- -D warnings \
+  || echo "[pre-push] WARN: clippy findings present (not blocking)"
+
+echo "[pre-push] OK"

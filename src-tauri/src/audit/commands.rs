@@ -465,7 +465,19 @@ pub async fn audit_verify_reader_mode(
     )
     .await?;
 
+    // Persist this verification run so the tamper timeline survives restarts.
+    let run_at = chrono::Utc::now().timestamp_millis();
+    state.verification_store.record(run_at, result.clone())?;
+
     Ok(result)
+}
+
+/// List all persisted verification runs (the tamper timeline), oldest first.
+#[tauri::command]
+pub async fn audit_list_verification_history(
+    state: State<'_, AppState>,
+) -> AppResult<Vec<crate::audit::verification_store::VerificationRecord>> {
+    Ok(state.verification_store.list())
 }
 
 // ─── IPFS batch publishing commands ───────────────────────────────────
