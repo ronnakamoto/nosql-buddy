@@ -9,10 +9,9 @@
 
 // Re-export all core audit submodules from the audit_service crate.
 pub use audit_service::audit::{
-    attestation, change_stream, dev_proxy, dev_setup, epoch, interceptor, ipfs, oplog,
-    oplog_canon, pinata, reader, sled_store, stellar, stellar_native, stellar_rpc,
-    verification_store,
-    AuditEvent, AuditLog, leaf_from_payload,
+    attestation, change_stream, dev_proxy, dev_setup, epoch, interceptor, ipfs, leaf_from_payload,
+    oplog, oplog_canon, pinata, reader, sled_store, stellar, stellar_native, stellar_rpc,
+    verification_store, AuditEvent, AuditLog,
 };
 
 // Tauri-specific submodules that depend on tauri::AppHandle / tauri::State.

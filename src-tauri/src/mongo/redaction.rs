@@ -34,24 +34,24 @@ impl Redactor {
     fn uri_re(&self) -> &Regex {
         self.uri_userinfo.get_or_init(|| {
             // mongodb://user:password@host, mongodb+srv://user:password@host
-            Regex::new(r"(?i)(mongodb(?:\+srv)?://)[^:\s/@]+:[^@\s/]+@")
-                .expect("valid regex")
+            Regex::new(r"(?i)(mongodb(?:\+srv)?://)[^:\s/@]+:[^@\s/]+@").expect("valid regex")
         })
     }
 
     fn password_kv_re(&self) -> &Regex {
         self.password_kv.get_or_init(|| {
             // password=foo ; PASSWORD="foo" ; "password":"foo"
-            Regex::new(r#"(?i)(password\s*[:=]\s*)("?)[^";,\s]+("?)"#)
-                .expect("valid regex")
+            Regex::new(r#"(?i)(password\s*[:=]\s*)("?)[^";,\s]+("?)"#).expect("valid regex")
         })
     }
 
     fn connection_string_kv_re(&self) -> &Regex {
         self.connection_string.get_or_init(|| {
             // uri=... or connectionString=...
-            Regex::new(r#"(?i)((?:uri|connection\s*string|connectionString)\s*[:=]\s*)("?)[^";,\s]+("?)"#)
-                .expect("valid regex")
+            Regex::new(
+                r#"(?i)((?:uri|connection\s*string|connectionString)\s*[:=]\s*)("?)[^";,\s]+("?)"#,
+            )
+            .expect("valid regex")
         })
     }
 

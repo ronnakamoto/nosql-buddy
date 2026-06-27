@@ -241,7 +241,10 @@ pub async fn aggregate_documents(
     if !pipeline.iter().any(|s| s.get("$limit").is_some()) {
         pipeline.push(bson::doc! { "$limit": limit as i64 });
     }
-    let coll = entry.client.database(&request.database).collection::<Document>(&request.collection);
+    let coll = entry
+        .client
+        .database(&request.database)
+        .collection::<Document>(&request.collection);
     let started = Instant::now();
     let cursor = coll.aggregate(pipeline).await?;
     let docs: Vec<Document> = cursor.try_collect().await?;
@@ -271,13 +274,13 @@ pub struct CountRequest {
 }
 
 #[tauri::command]
-pub async fn count_documents(
-    request: CountRequest,
-    state: State<'_, AppState>,
-) -> AppResult<u64> {
+pub async fn count_documents(request: CountRequest, state: State<'_, AppState>) -> AppResult<u64> {
     let entry = state.clients.get(&request.connection_id).await?;
     let filter = parse_optional_doc(request.filter_json.as_deref())?.unwrap_or_default();
-    let coll = entry.client.database(&request.database).collection::<Document>(&request.collection);
+    let coll = entry
+        .client
+        .database(&request.database)
+        .collection::<Document>(&request.collection);
     Ok(coll.count_documents(filter).await.unwrap_or(0))
 }
 
@@ -289,7 +292,10 @@ pub async fn list_indexes(
     state: State<'_, AppState>,
 ) -> AppResult<Vec<IndexInfo>> {
     let entry = state.clients.get(&connection_id).await?;
-    let coll = entry.client.database(&database).collection::<Document>(&collection);
+    let coll = entry
+        .client
+        .database(&database)
+        .collection::<Document>(&collection);
     let mut out = Vec::new();
     let mut cursor = coll.list_indexes().await?;
     while cursor.advance().await? {
@@ -390,7 +396,10 @@ pub async fn create_index(
 ) -> AppResult<String> {
     let entry = state.clients.get(&request.connection_id).await?;
     let key: Document = serde_json::from_str(&request.key_json)?;
-    let coll = entry.client.database(&request.database).collection::<Document>(&request.collection);
+    let coll = entry
+        .client
+        .database(&request.database)
+        .collection::<Document>(&request.collection);
     let mut options = mongodb::options::IndexOptions::builder()
         .name(Some(request.name.clone()))
         .unique(request.unique)
@@ -447,7 +456,10 @@ pub async fn drop_index(
     state: State<'_, AppState>,
 ) -> AppResult<()> {
     let entry = state.clients.get(&connection_id).await?;
-    let coll = entry.client.database(&database).collection::<Document>(&collection);
+    let coll = entry
+        .client
+        .database(&database)
+        .collection::<Document>(&collection);
     coll.drop_index(&name).await?;
     let _ = crate::audit::interceptor::record_drop_index(
         &state.audit_log,
@@ -606,8 +618,15 @@ pub async fn sample_schema(
     state: State<'_, AppState>,
 ) -> AppResult<crate::mongo::schema::SchemaReport> {
     let entry = state.clients.get(&connection_id).await?;
-    let coll = entry.client.database(&database).collection::<Document>(&collection);
-    let cursor = coll.aggregate(vec![bson::doc! { "$sample": { "size": DEFAULT_SAMPLE as i64 } }]).await?;
+    let coll = entry
+        .client
+        .database(&database)
+        .collection::<Document>(&collection);
+    let cursor = coll
+        .aggregate(vec![
+            bson::doc! { "$sample": { "size": DEFAULT_SAMPLE as i64 } },
+        ])
+        .await?;
     let docs: Vec<Document> = cursor.try_collect().await?;
     Ok(crate::mongo::schema::compute_schema_report(&docs))
 }
@@ -628,13 +647,20 @@ pub async fn insert_document(
 ) -> AppResult<String> {
     let entry = state.clients.get(&request.connection_id).await?;
     let doc: Document = serde_json::from_str(&request.document_json)?;
-    let coll = entry.client.database(&request.database).collection::<Document>(&request.collection);
+    let coll = entry
+        .client
+        .database(&request.database)
+        .collection::<Document>(&request.collection);
     let result = coll.insert_one(doc.clone()).await?;
     let id = result
         .inserted_id
         .as_object_id()
         .map(|o| o.to_hex())
-        .unwrap_or_else(|| doc.get_object_id("_id").map(|o| o.to_hex()).unwrap_or_default());
+        .unwrap_or_else(|| {
+            doc.get_object_id("_id")
+                .map(|o| o.to_hex())
+                .unwrap_or_default()
+        });
 
     // Record audit event.
     let _ = crate::audit::interceptor::record_insert(
@@ -665,10 +691,12 @@ pub async fn update_documents(
 ) -> AppResult<UpdateResult> {
     let entry = state.clients.get(&request.connection_id).await?;
     let filter = parse_optional_doc(Some(&request.filter_json))?.unwrap_or_default();
-    let update = parse_optional_doc(Some(&request.update_json))?.ok_or_else(|| {
-        AppError::InvalidBson("update document must be a JSON object".into())
-    })?;
-    let coll = entry.client.database(&request.database).collection::<Document>(&request.collection);
+    let update = parse_optional_doc(Some(&request.update_json))?
+        .ok_or_else(|| AppError::InvalidBson("update document must be a JSON object".into()))?;
+    let coll = entry
+        .client
+        .database(&request.database)
+        .collection::<Document>(&request.collection);
     let res = if request.multi {
         coll.update_many(filter, update).await?
     } else {
@@ -711,7 +739,10 @@ pub async fn delete_documents(
 ) -> AppResult<u64> {
     let entry = state.clients.get(&connection_id).await?;
     let filter = parse_optional_doc(Some(&filter_json))?.unwrap_or_default();
-    let coll = entry.client.database(&database).collection::<Document>(&collection);
+    let coll = entry
+        .client
+        .database(&database)
+        .collection::<Document>(&collection);
     let res = coll.delete_many(filter).await?;
 
     // Record audit event.
@@ -735,21 +766,18 @@ pub struct PreviewRequest {
 }
 
 #[tauri::command]
-pub async fn preview_delete(
-    request: PreviewRequest,
-    state: State<'_, AppState>,
-) -> AppResult<u64> {
+pub async fn preview_delete(request: PreviewRequest, state: State<'_, AppState>) -> AppResult<u64> {
     let entry = state.clients.get(&request.connection_id).await?;
     let filter = parse_optional_doc(request.filter_json.as_deref())?.unwrap_or_default();
-    let coll = entry.client.database(&request.database).collection::<Document>(&request.collection);
+    let coll = entry
+        .client
+        .database(&request.database)
+        .collection::<Document>(&request.collection);
     Ok(coll.count_documents(filter).await.unwrap_or(0))
 }
 
 #[tauri::command]
-pub async fn preview_update(
-    request: PreviewRequest,
-    state: State<'_, AppState>,
-) -> AppResult<u64> {
+pub async fn preview_update(request: PreviewRequest, state: State<'_, AppState>) -> AppResult<u64> {
     preview_delete(request, state).await
 }
 
@@ -791,13 +819,7 @@ mod tests {
 
     #[test]
     fn collation_strength_maps_to_named_levels() {
-        for (raw, expected) in [
-            (1i32, 1u32),
-            (2, 2),
-            (3, 3),
-            (4, 4),
-            (5, 5),
-        ] {
+        for (raw, expected) in [(1i32, 1u32), (2, 2), (3, 3), (4, 4), (5, 5)] {
             let dto = CollationDto {
                 locale: "en".to_string(),
                 strength: Some(raw),

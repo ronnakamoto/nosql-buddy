@@ -6,6 +6,7 @@
 pub mod bson_json;
 pub mod client_registry;
 pub mod credentials;
+pub mod import_export;
 pub mod profiles;
 pub mod query_code;
 pub mod redaction;

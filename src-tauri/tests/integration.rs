@@ -32,7 +32,10 @@ fn in_memory_secret_store_round_trip() {
 #[test]
 fn mask_uri_removes_userinfo() {
     let masked = mask_uri("mongodb://bob:pw@127.0.0.1:27017/db?retryWrites=true");
-    assert_eq!(masked, "mongodb://***:***@127.0.0.1:27017/db?retryWrites=true");
+    assert_eq!(
+        masked,
+        "mongodb://***:***@127.0.0.1:27017/db?retryWrites=true"
+    );
 }
 
 #[test]

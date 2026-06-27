@@ -45,6 +45,27 @@ pub fn emit_audit_setup_progress(app: &AppHandle, line: &str) {
     );
 }
 
+/// Payload for the `import-export-progress` event: a periodic snapshot of a
+/// running import or export job. Emitted at most a few times per second
+/// (throttled in the pipeline) so a million-row job never floods the IPC
+/// channel. `total` is `None` when the source size is not cheaply known.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportExportProgressPayload {
+    pub job_id: String,
+    /// One of: "reading", "writing", "copying", "done", "error".
+    pub phase: String,
+    pub processed: u64,
+    pub total: Option<u64>,
+    pub message: String,
+}
+
+/// Emit a single import/export progress snapshot. Best-effort: emission
+/// failures are ignored so they never abort the job.
+pub fn emit_import_export_progress(app: &AppHandle, payload: ImportExportProgressPayload) {
+    let _ = app.emit("import-export-progress", payload);
+}
+
 pub fn emit_connection_opened(
     app: &AppHandle,
     connection_id: &str,

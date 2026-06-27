@@ -36,6 +36,8 @@ bson = { version = "2", features = ["chrono-0_4", "uuid-1"] }
 futures-util = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+csv = "1"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "vendored"] }
 dirs = "5"
 regex = "1"

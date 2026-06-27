@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { EditableCell } from "./EditableCell";
 import { detectKind, displayValue, getByPath, kindClassName } from "./resultsDisplay";
 
@@ -19,6 +19,14 @@ export interface ResultsTableProps {
   onCellError?: (rowIdx: number, fieldPath: string, message: string) => void;
   /** Called when the user clicks the row delete button. */
   onDeleteRow?: (rowIdx: number, doc: Record<string, unknown>) => void;
+  /** When true, render a checkbox column for selecting rows. Default false. */
+  selectable?: boolean;
+  /** The set of currently selected row ids (from `getRowId`). */
+  selectedRowIds?: Set<string>;
+  /** Called with the next selection set when the user toggles rows. */
+  onSelectionChange?: (next: Set<string>) => void;
+  /** Stable identity for a row; defaults to the row index as a string. */
+  getRowId?: (row: Record<string, unknown>, index: number) => string;
 }
 
 export function ResultsTable({
@@ -32,8 +40,47 @@ export function ResultsTable({
   onCellSaved,
   onCellError,
   onDeleteRow,
+  selectable = false,
+  selectedRowIds,
+  onSelectionChange,
+  getRowId,
 }: ResultsTableProps) {
   const rows = useMemo(() => documents.slice(0, pageSize), [documents, pageSize]);
+  const rowId = useCallback(
+    (row: Record<string, unknown>, index: number) =>
+      getRowId ? getRowId(row, index) : String(index),
+    [getRowId],
+  );
+
+  const selectionActive = selectable && !!selectedRowIds && !!onSelectionChange;
+
+  const toggleRow = useCallback(
+    (row: Record<string, unknown>, index: number) => {
+      if (!selectedRowIds || !onSelectionChange) return;
+      const id = rowId(row, index);
+      const next = new Set(selectedRowIds);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      onSelectionChange(next);
+    },
+    [selectedRowIds, onSelectionChange, rowId],
+  );
+
+  const allSelected =
+    selectionActive && rows.length > 0
+      ? rows.every((row, i) => selectedRowIds!.has(rowId(row, i)))
+      : false;
+
+  const toggleAll = useCallback(() => {
+    if (!selectedRowIds || !onSelectionChange) return;
+    const next = new Set(selectedRowIds);
+    if (rows.every((row, i) => next.has(rowId(row, i)))) {
+      rows.forEach((row, i) => next.delete(rowId(row, i)));
+    } else {
+      rows.forEach((row, i) => next.add(rowId(row, i)));
+    }
+    onSelectionChange(next);
+  }, [rows, selectedRowIds, onSelectionChange, rowId]);
 
   if (rows.length === 0) {
     return (
@@ -58,6 +105,14 @@ export function ResultsTable({
         {rows.map((row, i) => (
           <div key={i} className="results-tree__doc">
             <div className="results-tree__doc-header">
+              {selectionActive && (
+                <input
+                  type="checkbox"
+                  aria-label={`Select doc ${i}`}
+                  checked={selectedRowIds!.has(rowId(row, i))}
+                  onChange={() => toggleRow(row, i)}
+                />
+              )}
               <span className="results-tree__doc-label">doc {i}</span>
               {onDeleteRow && (
                 <button
@@ -86,6 +141,12 @@ export function ResultsTable({
       onCellSaved={onCellSaved}
       onCellError={onCellError}
       onDeleteRow={onDeleteRow}
+      selectionActive={selectionActive}
+      selectedRowIds={selectedRowIds}
+      rowId={rowId}
+      toggleRow={toggleRow}
+      toggleAll={toggleAll}
+      allSelected={allSelected}
     />
   );
 }
@@ -99,6 +160,12 @@ function TableView({
   onCellSaved,
   onCellError,
   onDeleteRow,
+  selectionActive,
+  selectedRowIds,
+  rowId,
+  toggleRow,
+  toggleAll,
+  allSelected,
 }: {
   rows: Array<Record<string, unknown>>;
   connectionId: string;
@@ -108,6 +175,12 @@ function TableView({
   onCellSaved?: (rowIdx: number, fieldPath: string, newValue: unknown) => void;
   onCellError?: (rowIdx: number, fieldPath: string, message: string) => void;
   onDeleteRow?: (rowIdx: number, doc: Record<string, unknown>) => void;
+  selectionActive: boolean;
+  selectedRowIds?: Set<string>;
+  rowId: (row: Record<string, unknown>, index: number) => string;
+  toggleRow: (row: Record<string, unknown>, index: number) => void;
+  toggleAll: () => void;
+  allSelected: boolean;
 }) {
   const columns = useMemo(() => {
     const seen = new Set<string>();
@@ -131,6 +204,16 @@ function TableView({
     <table className="results-grid" role="grid" aria-label="Query results">
       <thead>
         <tr>
+          {selectionActive && (
+            <th className="results-grid__select" scope="col">
+              <input
+                type="checkbox"
+                aria-label="Select all rows"
+                checked={allSelected}
+                onChange={toggleAll}
+              />
+            </th>
+          )}
           {columns.map((c) => (
             <th key={c} scope="col">
               {c}
@@ -144,6 +227,16 @@ function TableView({
       <tbody>
         {rows.map((row, i) => (
           <tr key={i}>
+            {selectionActive && (
+              <td className="results-grid__select">
+                <input
+                  type="checkbox"
+                  aria-label={`Select row ${i}`}
+                  checked={selectedRowIds!.has(rowId(row, i))}
+                  onChange={() => toggleRow(row, i)}
+                />
+              </td>
+            )}
             {columns.map((c) => {
               const value = getByPath(row, c);
               if (editable && onCellSaved && onCellError) {

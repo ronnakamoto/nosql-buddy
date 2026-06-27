@@ -62,10 +62,7 @@ fn stack_ctx(app: &AppHandle) -> AppResult<StackCtx> {
     // Source checkout: the project root (one level up from src-tauri) holds
     // the Compose files. Build the image locally.
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let project_root = manifest_dir
-        .parent()
-        .unwrap_or(&manifest_dir)
-        .to_path_buf();
+    let project_root = manifest_dir.parent().unwrap_or(&manifest_dir).to_path_buf();
     if project_root.join(AUDIT_COMPOSE_FILE).exists() {
         return Ok(StackCtx {
             dir: project_root,
@@ -374,7 +371,11 @@ fn extract_app_error(stderr: &str) -> Option<String> {
         .filter(|l| l.starts_with("Error:"))
         .next_back()?;
 
-    let mut msg = line.trim_start_matches("Error:").trim().trim_matches('"').trim();
+    let mut msg = line
+        .trim_start_matches("Error:")
+        .trim()
+        .trim_matches('"')
+        .trim();
 
     // Drop a leading "<context>: validation error: " noise prefix if present,
     // keeping just the human-readable reason + action.
@@ -678,7 +679,8 @@ pub struct DevSetupResult {
 fn is_stellar_secret(s: &str) -> bool {
     s.len() == 56
         && s.starts_with('S')
-        && s.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        && s.bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
 }
 
 /// Redact Stellar secret keys (and `KEY=SECRET` env lines) from wizard output

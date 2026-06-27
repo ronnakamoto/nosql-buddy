@@ -71,7 +71,10 @@ pub fn to_filter(node: &VqbNode) -> AppResult<serde_json::Value> {
 
 fn build_filter(node: &VqbNode) -> AppResult<serde_json::Value> {
     match node {
-        VqbNode::Group { combinator, children } => {
+        VqbNode::Group {
+            combinator,
+            children,
+        } => {
             let parts: Vec<_> = children
                 .iter()
                 .filter_map(|child| match build_filter(child) {
@@ -89,8 +92,13 @@ fn build_filter(node: &VqbNode) -> AppResult<serde_json::Value> {
                 return Ok(serde_json::json!({}));
             }
             // Check for any propagated error.
-            if let Some(err) = parts.iter().find_map(|v| v.as_str().filter(|s| s.starts_with("__error:"))) {
-                return Err(AppError::Internal(err.strip_prefix("__error:").unwrap_or(err).into()));
+            if let Some(err) = parts
+                .iter()
+                .find_map(|v| v.as_str().filter(|s| s.starts_with("__error:")))
+            {
+                return Err(AppError::Internal(
+                    err.strip_prefix("__error:").unwrap_or(err).into(),
+                ));
             }
             Ok(serde_json::json!({
                 combinator.as_mongo_op(): parts
@@ -162,7 +170,9 @@ fn mongo_operator(operator: &str) -> AppResult<&'static str> {
         "json_schema" => Ok("$jsonSchema"),
         "is_null" => Ok("$is_null"),
         "is_not_null" => Ok("$is_not_null"),
-        _ => Err(AppError::SqlParse(format!("unknown VQB operator: {operator}"))),
+        _ => Err(AppError::SqlParse(format!(
+            "unknown VQB operator: {operator}"
+        ))),
     }
 }
 
@@ -252,7 +262,11 @@ fn parse_array_value(raw: serde_json::Value) -> AppResult<serde_json::Value> {
                 }
             } else {
                 // Comma-separated list.
-                for part in trimmed.split(',').map(|p| p.trim()).filter(|p| !p.is_empty()) {
+                for part in trimmed
+                    .split(',')
+                    .map(|p| p.trim())
+                    .filter(|p| !p.is_empty())
+                {
                     items.push(parse_scalar_string(part));
                 }
             }
@@ -282,9 +296,8 @@ fn parse_json_object_value(raw: serde_json::Value, operator: &str) -> AppResult<
                     "{operator} requires a JSON object value"
                 )));
             }
-            let parsed: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| {
-                AppError::SqlParse(format!("invalid JSON for {operator}: {e}"))
-            })?;
+            let parsed: serde_json::Value = serde_json::from_str(trimmed)
+                .map_err(|e| AppError::SqlParse(format!("invalid JSON for {operator}: {e}")))?;
             if !parsed.is_object() {
                 return Err(AppError::SqlParse(format!(
                     "{operator} value must be a JSON object, got {}",
@@ -385,7 +398,11 @@ fn from_filter_value(value: &serde_json::Value) -> Option<VqbNode> {
     }
 
     // Check for top-level group operators.
-    for (op, arr) in [("$and", VqbCombinator::And), ("$or", VqbCombinator::Or), ("$nor", VqbCombinator::Nor)] {
+    for (op, arr) in [
+        ("$and", VqbCombinator::And),
+        ("$or", VqbCombinator::Or),
+        ("$nor", VqbCombinator::Nor),
+    ] {
         if let Some(children) = obj.get(op).and_then(|v| v.as_array()) {
             let nodes: Vec<_> = children.iter().filter_map(from_filter_value).collect();
             if nodes.is_empty() {

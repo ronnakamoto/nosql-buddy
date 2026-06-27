@@ -13,6 +13,7 @@ use crate::audit::verification_store::VerificationStore;
 use crate::audit::AuditLog;
 use crate::mongo::client_registry::ClientRegistry;
 use crate::mongo::credentials::{InMemorySecretStore, KeyringSecretStore, SecretStore};
+use crate::mongo::import_export::JobRegistry;
 use crate::mongo::profiles::ProfileRepository;
 use crate::mongo::shell::ShellRegistry;
 
@@ -21,6 +22,7 @@ pub struct AppState {
     pub secrets: Arc<dyn SecretStore>,
     pub clients: ClientRegistry,
     pub shell_registry: ShellRegistry,
+    pub import_export_jobs: JobRegistry,
     pub audit_log: Arc<AuditLog>,
     pub change_streams: ChangeStreamRegistry,
     pub epoch_manager: EpochManager,
@@ -48,6 +50,7 @@ impl AppState {
             secrets,
             clients: ClientRegistry::new(),
             shell_registry: ShellRegistry::new(),
+            import_export_jobs: JobRegistry::new(),
             audit_log: Arc::new(AuditLog::new().expect("failed to create audit log")),
             change_streams: ChangeStreamRegistry::new(),
             epoch_manager: EpochManager::default(),

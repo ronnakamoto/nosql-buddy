@@ -487,6 +487,12 @@ export default function App() {
     onMenuAction((action) => {
       if (action === "new_connection") setConnectionFormOpen(true);
       else if (action === "command_palette") setPaletteOpen((o) => !o);
+      else if (action === "export_results") {
+        window.dispatchEvent(new CustomEvent("nosqlbuddy:export-results"));
+      }
+      else if (action === "import_data") {
+        window.dispatchEvent(new CustomEvent("nosqlbuddy:import-data"));
+      }
       else if (action === "new_tab") {
         if (active) {
           const db = active.databases[0]?.name ?? "admin";

@@ -11,12 +11,8 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::events::{emit_connection_closed, emit_connection_opened};
-use crate::mongo::client_registry::{
-    build_client, describe_connection, ClientEntry,
-};
-use crate::mongo::types::{
-    ConnectionHandle, ConnectionProfile, ProfileSummary,
-};
+use crate::mongo::client_registry::{build_client, describe_connection, ClientEntry};
+use crate::mongo::types::{ConnectionHandle, ConnectionProfile, ProfileSummary};
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,10 +47,14 @@ pub async fn save_profile(
 ) -> AppResult<ProfileSummary> {
     let id = request.id.unwrap_or_default();
     if request.name.trim().is_empty() {
-        return Err(AppError::Validation("profile name must not be empty".into()));
+        return Err(AppError::Validation(
+            "profile name must not be empty".into(),
+        ));
     }
     if request.uri.trim().is_empty() {
-        return Err(AppError::Validation("connection URI must not be empty".into()));
+        return Err(AppError::Validation(
+            "connection URI must not be empty".into(),
+        ));
     }
     let profile = ConnectionProfile {
         id,
@@ -132,11 +132,8 @@ pub async fn test_profile(
     let database = client.database("admin");
     let cmd = bson::doc! { "ping": 1 };
     let started = std::time::Instant::now();
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(8),
-        database.run_command(cmd),
-    )
-    .await;
+    let result =
+        tokio::time::timeout(std::time::Duration::from_secs(8), database.run_command(cmd)).await;
     let latency_ms = Some(started.elapsed().as_millis() as u64);
     match result {
         Ok(Ok(_)) => Ok(TestResult {
@@ -182,7 +179,9 @@ pub async fn open_connection(
     // Confirm we can actually reach the server before publishing the handle.
     tokio::time::timeout(
         std::time::Duration::from_secs(8),
-        client.database("admin").run_command(bson::doc! { "ping": 1 }),
+        client
+            .database("admin")
+            .run_command(bson::doc! { "ping": 1 }),
     )
     .await
     .map_err(|_| AppError::Timeout("ping".into()))??;
@@ -199,7 +198,11 @@ pub async fn open_connection(
     // (from shell, IPC, external clients) are captured in the audit log.
     state
         .change_streams
-        .start_for(connection_id.clone(), (*client).clone(), state.audit_log.clone())
+        .start_for(
+            connection_id.clone(),
+            (*client).clone(),
+            state.audit_log.clone(),
+        )
         .await;
     let handle = describe_connection(&client, &connection_id, &profile.id, &profile.name).await?;
     // Drop the secret from local memory now that the client is up. The

@@ -38,9 +38,7 @@ pub struct GeneratePipelineCodeRequest {
 
 /// Generate driver code for a previously-run aggregation pipeline.
 #[tauri::command]
-pub async fn generate_pipeline_code(
-    request: GeneratePipelineCodeRequest,
-) -> AppResult<String> {
+pub async fn generate_pipeline_code(request: GeneratePipelineCodeRequest) -> AppResult<String> {
     let conn = ConnectionInfo {
         uri: request.uri,
         database: request.database.clone(),

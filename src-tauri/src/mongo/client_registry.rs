@@ -13,7 +13,9 @@ use serde::Serialize;
 use tokio::sync::RwLock;
 
 use crate::error::{AppError, AppResult};
-use crate::mongo::types::{CollectionKind, CollectionSummary, ConnectionHandle, DatabaseSummary, ServerInfo};
+use crate::mongo::types::{
+    CollectionKind, CollectionSummary, ConnectionHandle, DatabaseSummary, ServerInfo,
+};
 
 /// A pooled client plus the metadata that callers need to scope subsequent
 /// requests without re-fetching the profile.
@@ -93,12 +95,11 @@ impl ClientEntry {
 /// Build a `mongodb::Client` from a profile + secret. Honors the SSH tunnel
 /// and SOCKS5 configuration, sets timeouts, and applies a stable
 /// application name so it shows up in `db.currentOp()` on the server.
-pub async fn build_client(
-    uri: &str,
-    app_name: &str,
-) -> AppResult<Arc<Client>> {
+pub async fn build_client(uri: &str, app_name: &str) -> AppResult<Arc<Client>> {
     if uri.trim().is_empty() {
-        return Err(AppError::Validation("connection URI must not be empty".into()));
+        return Err(AppError::Validation(
+            "connection URI must not be empty".into(),
+        ));
     }
     // Pass the URI through untouched. We deliberately do NOT inject
     // `directConnection=true`: forcing it pins the driver to a single seed host
@@ -142,7 +143,10 @@ async fn hello(client: &Client) -> AppResult<ServerInfo> {
         .database("admin")
         .run_command(bson::doc! { "hello": 1 })
         .await?;
-    let version = doc.get_str("maxWireVersion").ok().map(|_| "unknown".to_string());
+    let version = doc
+        .get_str("maxWireVersion")
+        .ok()
+        .map(|_| "unknown".to_string());
     let host = doc.get_str("me").ok().map(|s| s.to_string());
     let is_master = doc.get_bool("isWritablePrimary").unwrap_or(false);
     let topology = if doc.contains_key("setName") {
@@ -185,10 +189,7 @@ pub async fn list_databases(client: &Client) -> AppResult<Vec<DatabaseSummary>> 
     Ok(out)
 }
 
-pub async fn list_collections(
-    client: &Client,
-    db: &str,
-) -> AppResult<Vec<CollectionSummary>> {
+pub async fn list_collections(client: &Client, db: &str) -> AppResult<Vec<CollectionSummary>> {
     let names = client.database(db).list_collection_names().await?;
     let mut out = Vec::with_capacity(names.len());
     for name in names {
@@ -198,7 +199,12 @@ pub async fn list_collections(
             .run_command(bson::doc! { "count": &name })
             .await
             .ok()
-            .and_then(|d| d.get_i32("n").ok().map(|v| v as u64).or_else(|| d.get_i64("n").ok().map(|v| v as u64)));
+            .and_then(|d| {
+                d.get_i32("n")
+                    .ok()
+                    .map(|v| v as u64)
+                    .or_else(|| d.get_i64("n").ok().map(|v| v as u64))
+            });
         let stats = client
             .database(db)
             .run_command(bson::doc! { "collStats": &name })

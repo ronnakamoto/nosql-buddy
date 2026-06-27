@@ -45,31 +45,42 @@ fn build_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Men
         .build()?;
 
     let file_submenu = SubmenuBuilder::new(app, "File")
-        .item(
-            &MenuItem::with_id(app, "new_tab", "New Query Tab", true, Some("CmdOrCtrl+T"))?,
-        )
-        .item(
-            &MenuItem::with_id(app, "close_tab", "Close Tab", true, Some("CmdOrCtrl+W"))?,
-        )
+        .item(&MenuItem::with_id(
+            app,
+            "new_tab",
+            "New Query Tab",
+            true,
+            Some("CmdOrCtrl+T"),
+        )?)
+        .item(&MenuItem::with_id(
+            app,
+            "close_tab",
+            "Close Tab",
+            true,
+            Some("CmdOrCtrl+W"),
+        )?)
         .separator()
-        .item(
-            &MenuItem::with_id(
-                app,
-                "new_connection",
-                "New Connection…",
-                true,
-                Some("CmdOrCtrl+N"),
-            )?,
-        )
-        .item(
-            &MenuItem::with_id(
-                app,
-                "export_results",
-                "Export Results…",
-                true,
-                Some("CmdOrCtrl+E"),
-            )?,
-        )
+        .item(&MenuItem::with_id(
+            app,
+            "new_connection",
+            "New Connection…",
+            true,
+            Some("CmdOrCtrl+N"),
+        )?)
+        .item(&MenuItem::with_id(
+            app,
+            "export_results",
+            "Export Results…",
+            true,
+            Some("CmdOrCtrl+E"),
+        )?)
+        .item(&MenuItem::with_id(
+            app,
+            "import_data",
+            "Import Data…",
+            true,
+            Some("CmdOrCtrl+I"),
+        )?)
         .separator()
         .quit()
         .build()?;
@@ -85,41 +96,39 @@ fn build_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Men
         .build()?;
 
     let view_submenu = SubmenuBuilder::new(app, "View")
-        .item(
-            &MenuItem::with_id(
-                app,
-                "command_palette",
-                "Command Palette",
-                true,
-                Some("CmdOrCtrl+K"),
-            )?,
-        )
-        .item(
-            &MenuItem::with_id(
-                app,
-                "toggle_tree",
-                "Toggle Connection Tree",
-                true,
-                Some("CmdOrCtrl+B"),
-            )?,
-        )
+        .item(&MenuItem::with_id(
+            app,
+            "command_palette",
+            "Command Palette",
+            true,
+            Some("CmdOrCtrl+K"),
+        )?)
+        .item(&MenuItem::with_id(
+            app,
+            "toggle_tree",
+            "Toggle Connection Tree",
+            true,
+            Some("CmdOrCtrl+B"),
+        )?)
         .separator()
         .fullscreen()
         .build()?;
 
     let help_submenu = SubmenuBuilder::new(app, "Help")
-        .item(
-            &MenuItem::with_id(app, "docs", "Documentation", true, None::<&str>)?,
-        )
-        .item(
-            &MenuItem::with_id(
-                app,
-                "shortcuts",
-                "Keyboard Shortcuts",
-                true,
-                Some("CmdOrCtrl+/"),
-            )?,
-        )
+        .item(&MenuItem::with_id(
+            app,
+            "docs",
+            "Documentation",
+            true,
+            None::<&str>,
+        )?)
+        .item(&MenuItem::with_id(
+            app,
+            "shortcuts",
+            "Keyboard Shortcuts",
+            true,
+            Some("CmdOrCtrl+/"),
+        )?)
         .build()?;
 
     let menu = MenuBuilder::new(app)
@@ -202,6 +211,11 @@ pub fn run() {
             commands::mongo::translate_vqb,
             commands::sql::translate_sql,
             commands::driver_code::generate_pipeline_code,
+            commands::export::export_documents,
+            commands::export::cancel_import_export,
+            commands::export::copy_documents,
+            commands::import::preview_import,
+            commands::import::run_import,
             commands::shell::eval_shell,
             commands::shell::shell_autocomplete,
             audit::commands::audit_get_status,

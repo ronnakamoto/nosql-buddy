@@ -30,10 +30,9 @@ fn chain_config(app: &tauri::AppHandle) -> AppResult<ChainConfig> {
     let mode = load_mode_config(app)?;
     Ok(match mode.network {
         AuditNetwork::Testnet => ChainConfig::testnet(),
-        AuditNetwork::Mainnet => ChainConfig::mainnet(
-            mode.mainnet_rpc_url,
-            mode.mainnet_contract_id,
-        ),
+        AuditNetwork::Mainnet => {
+            ChainConfig::mainnet(mode.mainnet_rpc_url, mode.mainnet_contract_id)
+        }
     })
 }
 
@@ -130,10 +129,7 @@ pub async fn audit_generate_proof(
         .epoch_manager
         .list_epochs()
         .into_iter()
-        .find(|e| {
-            e.start_index <= index
-                && e.end_index.map_or(false, |end| end >= index)
-        })
+        .find(|e| e.start_index <= index && e.end_index.map_or(false, |end| end >= index))
         .and_then(|e| e.tx_hash)
         .unwrap_or_default();
 
@@ -220,7 +216,10 @@ fn resolve_circuit_paths(
         _ => {
             let resource = app
                 .path()
-                .resolve("resources/circuits/merkle_inclusion.r1cs", tauri::path::BaseDirectory::Resource)
+                .resolve(
+                    "resources/circuits/merkle_inclusion.r1cs",
+                    tauri::path::BaseDirectory::Resource,
+                )
                 .map_err(|e| AppError::Validation(format!("resolve r1cs resource: {e}")))?;
             resource.to_string_lossy().to_string()
         }
@@ -230,7 +229,10 @@ fn resolve_circuit_paths(
         _ => {
             let resource = app
                 .path()
-                .resolve("resources/circuits/merkle_inclusion.wasm", tauri::path::BaseDirectory::Resource)
+                .resolve(
+                    "resources/circuits/merkle_inclusion.wasm",
+                    tauri::path::BaseDirectory::Resource,
+                )
                 .map_err(|e| AppError::Validation(format!("resolve wasm resource: {e}")))?;
             resource.to_string_lossy().to_string()
         }
@@ -330,12 +332,9 @@ pub async fn audit_commit_root(
     // RootAlreadyCommitted errors.
     let root_hex_check = root_hex.clone();
     let probe_kp = stellar_native::generate_keypair();
-    let onchain = stellar_native::get_current_root_native(
-        &probe_kp,
-        &chain.rpc_url,
-        &chain.contract_id,
-    )
-    .await?;
+    let onchain =
+        stellar_native::get_current_root_native(&probe_kp, &chain.rpc_url, &chain.contract_id)
+            .await?;
     if let Some(ref entry) = onchain {
         if entry.root_hex == root_hex_check {
             return Err(AppError::Validation(format!(
@@ -355,12 +354,9 @@ pub async fn audit_commit_root(
     });
 
     // Load keypair from keychain.
-    let kp = crate::audit::dev_setup::load_keypair_from_keychain()?
-        .ok_or_else(|| {
-            AppError::Validation(
-                "no Stellar keypair found — run onboarding first".to_string(),
-            )
-        })?;
+    let kp = crate::audit::dev_setup::load_keypair_from_keychain()?.ok_or_else(|| {
+        AppError::Validation("no Stellar keypair found — run onboarding first".to_string())
+    })?;
 
     // Commit via native signing.
     let result = stellar_native::commit_root_native(
@@ -389,19 +385,25 @@ pub async fn audit_get_onchain_root(app: tauri::AppHandle) -> AppResult<Option<O
 
 /// List all epochs (open and closed).
 #[tauri::command]
-pub async fn audit_list_epochs(state: State<'_, AppState>) -> AppResult<Vec<crate::audit::epoch::Epoch>> {
+pub async fn audit_list_epochs(
+    state: State<'_, AppState>,
+) -> AppResult<Vec<crate::audit::epoch::Epoch>> {
     Ok(state.epoch_manager.list_epochs())
 }
 
 /// Get the current (open) epoch.
 #[tauri::command]
-pub async fn audit_current_epoch(state: State<'_, AppState>) -> AppResult<crate::audit::epoch::Epoch> {
+pub async fn audit_current_epoch(
+    state: State<'_, AppState>,
+) -> AppResult<crate::audit::epoch::Epoch> {
     Ok(state.epoch_manager.current_epoch())
 }
 
 /// Manually close the current epoch and freeze its root.
 #[tauri::command]
-pub async fn audit_close_epoch(state: State<'_, AppState>) -> AppResult<crate::audit::epoch::Epoch> {
+pub async fn audit_close_epoch(
+    state: State<'_, AppState>,
+) -> AppResult<crate::audit::epoch::Epoch> {
     Ok(state.epoch_manager.close_current_epoch(&state.audit_log)?)
 }
 
@@ -467,9 +469,10 @@ pub async fn audit_verify_reader_mode(
     let config = load_mode_config(&app)?;
     let chain = match config.network {
         crate::audit::audit_mode::AuditNetwork::Testnet => ChainConfig::testnet(),
-        crate::audit::audit_mode::AuditNetwork::Mainnet => {
-            ChainConfig::mainnet(config.mainnet_rpc_url.clone(), config.mainnet_contract_id.clone())
-        }
+        crate::audit::audit_mode::AuditNetwork::Mainnet => ChainConfig::mainnet(
+            config.mainnet_rpc_url.clone(),
+            config.mainnet_contract_id.clone(),
+        ),
     };
 
     let result = crate::audit::reader::verify_against_onchain(
@@ -555,8 +558,8 @@ pub async fn audit_publish_epoch_to_ipfs(
     };
 
     // Publish to IPFS.
-    let result = crate::audit::ipfs::publish_epoch_batch(&config, epoch_number, &batch_content)
-        .await?;
+    let result =
+        crate::audit::ipfs::publish_epoch_batch(&config, epoch_number, &batch_content).await?;
 
     // Save the CID to sled.
     state.audit_log.save_ipfs_cid(epoch_number, &result.cid)?;
@@ -575,9 +578,7 @@ pub async fn audit_get_ipfs_cid(
 
 /// Check if an IPFS daemon is reachable.
 #[tauri::command]
-pub async fn audit_check_ipfs_daemon(
-    api_url: Option<String>,
-) -> AppResult<bool> {
+pub async fn audit_check_ipfs_daemon(api_url: Option<String>) -> AppResult<bool> {
     let config = crate::audit::ipfs::IpfsConfig {
         api_url: api_url.unwrap_or_else(|| "http://127.0.0.1:5001".to_string()),
         cid_version: 1,
@@ -604,9 +605,10 @@ pub async fn audit_get_onchain_root_rpc(
     let config = load_mode_config(&app)?;
     let chain = match config.network {
         crate::audit::audit_mode::AuditNetwork::Testnet => ChainConfig::testnet(),
-        crate::audit::audit_mode::AuditNetwork::Mainnet => {
-            ChainConfig::mainnet(config.mainnet_rpc_url.clone(), config.mainnet_contract_id.clone())
-        }
+        crate::audit::audit_mode::AuditNetwork::Mainnet => ChainConfig::mainnet(
+            config.mainnet_rpc_url.clone(),
+            config.mainnet_contract_id.clone(),
+        ),
     };
 
     let url = rpc_url.unwrap_or_else(|| chain.rpc_url.clone());
@@ -625,10 +627,7 @@ pub async fn audit_check_onboarding() -> AppResult<crate::audit::dev_setup::Onbo
 
 /// Save Pinata API credentials to the OS keychain and test the connection.
 #[tauri::command]
-pub async fn audit_save_pinata_config(
-    api_key: String,
-    api_secret: String,
-) -> AppResult<bool> {
+pub async fn audit_save_pinata_config(api_key: String, api_secret: String) -> AppResult<bool> {
     let config = crate::audit::pinata::PinataConfig {
         api_key,
         api_secret,
@@ -649,10 +648,7 @@ pub async fn audit_save_pinata_config(
 
 /// Test a Pinata connection without saving credentials.
 #[tauri::command]
-pub async fn audit_test_pinata_connection(
-    api_key: String,
-    api_secret: String,
-) -> AppResult<bool> {
+pub async fn audit_test_pinata_connection(api_key: String, api_secret: String) -> AppResult<bool> {
     let config = crate::audit::pinata::PinataConfig {
         api_key,
         api_secret,
@@ -760,7 +756,8 @@ async fn commit_latest_epoch_root(
             let start_ts = state.epoch_manager.next_oplog_start_ts();
             let majority_ts = get_majority_commit_ts(&client).await?;
             let range =
-                compute_oplog_range_hash(&client, epoch.epoch_number, start_ts, majority_ts).await?;
+                compute_oplog_range_hash(&client, epoch.epoch_number, start_ts, majority_ts)
+                    .await?;
             state.epoch_manager.attach_oplog_hash(
                 epoch.epoch_number,
                 range.start_ts,
@@ -775,7 +772,9 @@ async fn commit_latest_epoch_root(
             .oplog_merkle_root_hex
             .clone()
             .expect("oplog root attached above");
-        let oplog_start = epoch_with_oplog.oplog_start_ts.map_or(0, |ts| ts.pack_u64());
+        let oplog_start = epoch_with_oplog
+            .oplog_start_ts
+            .map_or(0, |ts| ts.pack_u64());
         let oplog_end = epoch_with_oplog.oplog_end_ts.map_or(0, |ts| ts.pack_u64());
         let oplog_count = epoch_with_oplog.oplog_entry_count.unwrap_or(0);
 
@@ -836,12 +835,9 @@ pub async fn audit_commit_root_native(
     let chain = chain_config(&app)?;
 
     // Load keypair from keychain.
-    let kp = crate::audit::dev_setup::load_keypair_from_keychain()?
-        .ok_or_else(|| {
-            AppError::Validation(
-                "no Stellar keypair found — run onboarding first".to_string(),
-            )
-        })?;
+    let kp = crate::audit::dev_setup::load_keypair_from_keychain()?.ok_or_else(|| {
+        AppError::Validation("no Stellar keypair found — run onboarding first".to_string())
+    })?;
 
     // Commit the sealed epoch root (with oplog completeness when a MongoDB
     // connection is available) via native signing.
@@ -877,7 +873,10 @@ pub async fn audit_commit_root_production(
                     "mainnet contract ID is not configured — set it in Audit Settings".to_string(),
                 ));
             }
-            ChainConfig::mainnet(config.mainnet_rpc_url.clone(), config.mainnet_contract_id.clone())
+            ChainConfig::mainnet(
+                config.mainnet_rpc_url.clone(),
+                config.mainnet_contract_id.clone(),
+            )
         }
     };
 
@@ -906,12 +905,9 @@ pub async fn audit_publish_epoch_to_pinata(
     use tauri::Manager;
 
     // Load Pinata config from keychain.
-    let pinata_config = crate::audit::dev_setup::load_pinata_from_keychain()?
-        .ok_or_else(|| {
-            AppError::Validation(
-                "no Pinata config found — run onboarding first".to_string(),
-            )
-        })?;
+    let pinata_config = crate::audit::dev_setup::load_pinata_from_keychain()?.ok_or_else(|| {
+        AppError::Validation("no Pinata config found — run onboarding first".to_string())
+    })?;
 
     // Find the epoch and get its event range.
     let epochs = state.epoch_manager.list_epochs();
@@ -1000,9 +996,7 @@ pub async fn audit_set_attestation_threshold(
 
 /// Get the current threshold K.
 #[tauri::command]
-pub async fn audit_get_attestation_threshold(
-    state: State<'_, AppState>,
-) -> AppResult<usize> {
+pub async fn audit_get_attestation_threshold(state: State<'_, AppState>) -> AppResult<usize> {
     Ok(state.attestation_manager.threshold())
 }
 
@@ -1048,7 +1042,9 @@ pub async fn audit_get_attestation_status(
     epoch_number: u64,
     root_hex: String,
 ) -> AppResult<crate::audit::attestation::AttestationStatus> {
-    Ok(state.attestation_manager.get_status(epoch_number, &root_hex)?)
+    Ok(state
+        .attestation_manager
+        .get_status(epoch_number, &root_hex)?)
 }
 
 // ─── Oplog completeness verification commands ─────────────────────────
@@ -1294,7 +1290,13 @@ pub async fn audit_get_oplog_commitment(
 ) -> AppResult<Option<crate::audit::stellar::OnChainOplogCommitment>> {
     let chain = chain_config(&app)?;
     let kp = stellar_native::generate_keypair();
-    Ok(stellar_native::get_oplog_commitment_native(sequence, &kp, &chain.rpc_url, &chain.contract_id).await?)
+    Ok(stellar_native::get_oplog_commitment_native(
+        sequence,
+        &kp,
+        &chain.rpc_url,
+        &chain.contract_id,
+    )
+    .await?)
 }
 
 /// Extract the JSONL lines for events in the given index range
@@ -1332,10 +1334,22 @@ mod tests {
             tree_height: 20,
         };
         let json = serde_json::to_string(&status).unwrap();
-        assert!(json.contains("\"rootHex\":\"abc\""), "rootHex must be camelCase: {json}");
-        assert!(json.contains("\"leafCount\":1"), "leafCount must be camelCase: {json}");
-        assert!(json.contains("\"eventCount\":2"), "eventCount must be camelCase: {json}");
-        assert!(json.contains("\"treeHeight\":20"), "treeHeight must be camelCase: {json}");
+        assert!(
+            json.contains("\"rootHex\":\"abc\""),
+            "rootHex must be camelCase: {json}"
+        );
+        assert!(
+            json.contains("\"leafCount\":1"),
+            "leafCount must be camelCase: {json}"
+        );
+        assert!(
+            json.contains("\"eventCount\":2"),
+            "eventCount must be camelCase: {json}"
+        );
+        assert!(
+            json.contains("\"treeHeight\":20"),
+            "treeHeight must be camelCase: {json}"
+        );
     }
 
     #[test]
@@ -1361,12 +1375,30 @@ mod tests {
             tx_hash: "txabc".to_string(),
         };
         let json = serde_json::to_string(&result).unwrap();
-        assert!(json.contains("\"rootHex\":\"root\""), "rootHex must be camelCase: {json}");
-        assert!(json.contains("\"leafIndex\":42"), "leafIndex must be camelCase: {json}");
-        assert!(json.contains("\"pubSignals\":[\"sig\"]"), "pubSignals must be camelCase: {json}");
-        assert!(json.contains("\"network\":\"testnet\""), "network must be camelCase: {json}");
-        assert!(json.contains("\"contractId\":\"C123\""), "contractId must be camelCase: {json}");
-        assert!(json.contains("\"txHash\":\"txabc\""), "txHash must be camelCase: {json}");
+        assert!(
+            json.contains("\"rootHex\":\"root\""),
+            "rootHex must be camelCase: {json}"
+        );
+        assert!(
+            json.contains("\"leafIndex\":42"),
+            "leafIndex must be camelCase: {json}"
+        );
+        assert!(
+            json.contains("\"pubSignals\":[\"sig\"]"),
+            "pubSignals must be camelCase: {json}"
+        );
+        assert!(
+            json.contains("\"network\":\"testnet\""),
+            "network must be camelCase: {json}"
+        );
+        assert!(
+            json.contains("\"contractId\":\"C123\""),
+            "contractId must be camelCase: {json}"
+        );
+        assert!(
+            json.contains("\"txHash\":\"txabc\""),
+            "txHash must be camelCase: {json}"
+        );
     }
 
     #[test]
@@ -1386,16 +1418,28 @@ mod tests {
     fn resolve_circuit_paths_pure_falls_back_to_resource_dir() {
         let dir = std::path::Path::new("/tmp/fake-app");
         let (r1cs, wasm) = resolve_circuit_paths_pure(None, None, dir).unwrap();
-        assert_eq!(r1cs, "/tmp/fake-app/resources/circuits/merkle_inclusion.r1cs");
-        assert_eq!(wasm, "/tmp/fake-app/resources/circuits/merkle_inclusion.wasm");
+        assert_eq!(
+            r1cs,
+            "/tmp/fake-app/resources/circuits/merkle_inclusion.r1cs"
+        );
+        assert_eq!(
+            wasm,
+            "/tmp/fake-app/resources/circuits/merkle_inclusion.wasm"
+        );
     }
 
     #[test]
     fn resolve_circuit_paths_pure_ignores_empty_strings() {
         let dir = std::path::Path::new("/tmp/fake-app");
         let (r1cs, wasm) = resolve_circuit_paths_pure(Some(""), Some(""), dir).unwrap();
-        assert_eq!(r1cs, "/tmp/fake-app/resources/circuits/merkle_inclusion.r1cs");
-        assert_eq!(wasm, "/tmp/fake-app/resources/circuits/merkle_inclusion.wasm");
+        assert_eq!(
+            r1cs,
+            "/tmp/fake-app/resources/circuits/merkle_inclusion.r1cs"
+        );
+        assert_eq!(
+            wasm,
+            "/tmp/fake-app/resources/circuits/merkle_inclusion.wasm"
+        );
     }
 
     #[test]
@@ -1404,17 +1448,20 @@ mod tests {
         let (r1cs, wasm) =
             resolve_circuit_paths_pure(Some("/explicit/circuit.r1cs"), None, dir).unwrap();
         assert_eq!(r1cs, "/explicit/circuit.r1cs");
-        assert_eq!(wasm, "/tmp/fake-app/resources/circuits/merkle_inclusion.wasm");
+        assert_eq!(
+            wasm,
+            "/tmp/fake-app/resources/circuits/merkle_inclusion.wasm"
+        );
     }
 
     #[test]
     fn bundled_circuit_artifacts_exist_on_disk() {
         // Verify the artifacts were actually copied to the resources dir.
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let r1cs = std::path::Path::new(manifest_dir)
-            .join("resources/circuits/merkle_inclusion.r1cs");
-        let wasm = std::path::Path::new(manifest_dir)
-            .join("resources/circuits/merkle_inclusion.wasm");
+        let r1cs =
+            std::path::Path::new(manifest_dir).join("resources/circuits/merkle_inclusion.r1cs");
+        let wasm =
+            std::path::Path::new(manifest_dir).join("resources/circuits/merkle_inclusion.wasm");
         assert!(r1cs.exists(), "R1CS artifact missing at {}", r1cs.display());
         assert!(wasm.exists(), "WASM artifact missing at {}", wasm.display());
     }

@@ -7,6 +7,9 @@ import { QueryHistoryPanel } from "../components/QueryHistoryPanel";
 import { AggregationEditor } from "./AggregationEditor";
 import { VisualQueryBuilder } from "./VisualQueryBuilder";
 import { pushHistory, type QueryMode, fileExtension, fileFilter } from "./queryHistory";
+import { ExportWizard } from "./importExport/ExportWizard";
+import { ImportWizard } from "./importExport/ImportWizard";
+import type { ExportSourceDto } from "../ipc/commands";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import Prism from "prismjs";
@@ -256,8 +259,12 @@ export function QueryTab({
   const [notice, setNotice] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [insertOpen, setInsertOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [exportSource, setExportSource] = useState<ExportSourceDto | null>(null);
   const [pendingDelete, setPendingDelete] = useState<{ idx: number; docId: unknown } | null>(null);
   const [viewMode, setViewMode] = useState<ResultsViewMode>("table");
+  const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(() => new Set());
 
   const valid = useMemo(() => {
     try {
@@ -342,6 +349,14 @@ export function QueryTab({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const importHandlerRef = useRef(() => setImportOpen(true));
+  importHandlerRef.current = () => setImportOpen(true);
+  useEffect(() => {
+    const fn = () => importHandlerRef.current();
+    window.addEventListener("nosqlbuddy:import-data", fn);
+    return () => window.removeEventListener("nosqlbuddy:import-data", fn);
+  }, []);
+
   useEffect(() => {
     if (onResult) onResult(page);
   }, [page, onResult]);
@@ -411,6 +426,117 @@ export function QueryTab({
     }
     setSqlText(text);
   }
+
+  function makeEntireQuerySource(): ExportSourceDto | null {
+    if (mode === "find") {
+      return {
+        mode: "find",
+        filterJson: filterText,
+        projectionJson: projectionText || null,
+        sortJson: sortText || null,
+        pipelineJson: null,
+        documentsJson: null,
+      };
+    }
+    if (mode === "aggregate") {
+      return {
+        mode: "aggregate",
+        filterJson: null,
+        projectionJson: null,
+        sortJson: null,
+        pipelineJson: pipelineText,
+        documentsJson: null,
+      };
+    }
+    if (!sqlResult) {
+      setError("Run the SQL query first to translate it before exporting.");
+      return null;
+    }
+    return {
+      mode: "aggregate",
+      filterJson: null,
+      projectionJson: null,
+      sortJson: null,
+      pipelineJson: JSON.stringify(sqlResult.pipeline),
+      documentsJson: null,
+    };
+  }
+
+  function makeDocumentsSource(docs: Array<Record<string, unknown>>): ExportSourceDto {
+    return {
+      mode: "documents",
+      filterJson: null,
+      projectionJson: null,
+      sortJson: null,
+      pipelineJson: null,
+      documentsJson: JSON.stringify(docs.map(restoreDisplayBson)),
+    };
+  }
+
+  function handleExportQuery() {
+    const source = makeEntireQuerySource();
+    if (!source) return;
+    setExportSource(source);
+    setExportOpen(true);
+  }
+
+  const getRowId = useCallback((row: Record<string, unknown>, index: number) => {
+    const id = toFilterId(row);
+    if (id !== undefined) return `id:${JSON.stringify(id)}`;
+    return `idx:${index}`;
+  }, []);
+
+  const selectedDocuments = useMemo(() => {
+    const docs = (page?.documents ?? []) as Array<Record<string, unknown>>;
+    return docs.filter((doc, index) => selectedRowIds.has(getRowId(doc, index)));
+  }, [page, selectedRowIds, getRowId]);
+
+  const selectedSource = useMemo(
+    () => (selectedDocuments.length > 0 ? makeDocumentsSource(selectedDocuments) : null),
+    [selectedDocuments],
+  );
+
+  async function handleCopySelected() {
+    if (!selectedSource || selectedDocuments.length === 0) {
+      setNotice("Select one or more visible rows first.");
+      return;
+    }
+    try {
+      const result = await commands.exportDocuments({
+        connectionId,
+        database,
+        collection,
+        jobId: crypto.randomUUID(),
+        source: selectedSource,
+        format: "json",
+        destination: { kind: "clipboard", path: null },
+        options: {
+          jsonShape: "array",
+          canonical: false,
+          csvDelimiter: null,
+          csvHeaders: true,
+          csvColumns: null,
+        },
+      });
+      if (result.clipboardText != null) {
+        await navigator.clipboard.writeText(result.clipboardText);
+      }
+      setNotice(`Copied ${result.processed} selected document(s).`);
+    } catch (e) {
+      setError(`Copy selected failed: ${describeError(e)}`);
+    }
+  }
+
+  // Respond to the native File > Export Results… menu action, dispatched
+  // by App.tsx as a window event. Only the active tab is mounted, so only
+  // one handler ever fires. A ref keeps the latest query context in scope.
+  const exportHandlerRef = useRef(handleExportQuery);
+  exportHandlerRef.current = handleExportQuery;
+  useEffect(() => {
+    const fn = () => exportHandlerRef.current();
+    window.addEventListener("nosqlbuddy:export-results", fn);
+    return () => window.removeEventListener("nosqlbuddy:export-results", fn);
+  }, []);
 
   async function handleSaveToFile() {
     const ext = fileExtension(mode as QueryMode);
@@ -622,6 +748,21 @@ export function QueryTab({
             title="Insert a new document into this collection"
           >
             Insert
+          </button>
+          <button
+            className="btn btn--sm"
+            onClick={() => setImportOpen(true)}
+            title="Import JSON or CSV documents into this collection"
+          >
+            Import…
+          </button>
+          <button
+            className="btn btn--sm"
+            onClick={handleExportQuery}
+            disabled={!page}
+            title="Export this query's results to a file or the clipboard"
+          >
+            Export…
           </button>
           <PaneActionsMenu
             items={[
@@ -866,6 +1007,24 @@ export function QueryTab({
                     {m[0].toUpperCase() + m.slice(1)}
                   </button>
                 ))}
+                <span style={{ fontSize: 12, color: "var(--ink-muted)", marginLeft: "auto" }}>
+                  {selectedDocuments.length} selected
+                </span>
+                <button
+                  className="btn btn--sm"
+                  disabled={selectedDocuments.length === 0}
+                  onClick={() => void handleCopySelected()}
+                  title="Copy selected documents as JSON"
+                >
+                  Copy selected
+                </button>
+                <button
+                  className="btn btn--sm"
+                  disabled={selectedDocuments.length === 0}
+                  onClick={() => setSelectedRowIds(new Set())}
+                >
+                  Clear
+                </button>
               </div>
               <ResultsTable
                 documents={page.documents as Array<Record<string, unknown>>}
@@ -877,6 +1036,10 @@ export function QueryTab({
                 onCellSaved={handleCellSaved}
                 onCellError={handleCellError}
                 onDeleteRow={handleDeleteRow}
+                selectable
+                selectedRowIds={selectedRowIds}
+                onSelectionChange={setSelectedRowIds}
+                getRowId={getRowId}
               />
             </>
           ) : (
@@ -896,6 +1059,27 @@ export function QueryTab({
         onInserted={handleInserted}
         onError={handleInsertError}
       />
+      {exportOpen && exportSource && (
+        <ExportWizard
+          connectionId={connectionId}
+          database={database}
+          collection={collection}
+          profileName={profile?.name}
+          source={exportSource}
+          selectedSource={selectedSource}
+          selectedCount={selectedDocuments.length}
+          onClose={() => setExportOpen(false)}
+        />
+      )}
+      {importOpen && (
+        <ImportWizard
+          connectionId={connectionId}
+          database={database}
+          collection={collection}
+          onClose={() => setImportOpen(false)}
+          onImported={() => void run()}
+        />
+      )}
       {pendingDelete && (
         <div className="modal-backdrop" role="dialog" aria-modal="true">
           <div className="modal" style={{ width: "min(420px, 92vw)" }}>
@@ -915,6 +1099,30 @@ export function QueryTab({
         </div>
       )}
     </div>
+  );
+}
+
+function restoreDisplayBson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(restoreDisplayBson);
+  if (value === null || typeof value !== "object") return value;
+
+  const obj = value as Record<string, unknown>;
+  if (typeof obj._idDisplay === "string") return { $oid: obj._idDisplay };
+  if (typeof obj._dateDisplay === "string") {
+    const raw = obj._dateDisplay;
+    return /^\d+$/.test(raw)
+      ? { $date: { $numberLong: raw } }
+      : { $date: raw };
+  }
+  if (obj._decimalDisplay !== undefined) {
+    return { $numberDecimal: String(obj._decimalDisplay) };
+  }
+  if (typeof obj._binaryDisplay === "string") {
+    return { $binary: { base64: obj._binaryDisplay, subType: "00" } };
+  }
+
+  return Object.fromEntries(
+    Object.entries(obj).map(([key, child]) => [key, restoreDisplayBson(child)]),
   );
 }
 

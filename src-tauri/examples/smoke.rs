@@ -50,20 +50,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. list_collections
     let collections = list_collections(&built, "nosqlbuddy").await?;
-    println!(
-        "collections: {} -> {:?}",
-        collections.len(),
-        collections
-    );
+    println!("collections: {} -> {:?}", collections.len(), collections);
 
     // Insert and re-fetch to prove the registry round-trips.
     registry
-        .insert("smoke".into(), app_lib::mongo::client_registry::ClientEntry {
-            profile_id: "smoke".into(),
-            name: "smoke".into(),
-            client: built.clone(),
-            opened_at: chrono::Utc::now(),
-        })
+        .insert(
+            "smoke".into(),
+            app_lib::mongo::client_registry::ClientEntry {
+                profile_id: "smoke".into(),
+                name: "smoke".into(),
+                client: built.clone(),
+                opened_at: chrono::Utc::now(),
+            },
+        )
         .await;
     let active = registry.list().await;
     println!("active connections: {}", active.len());
@@ -141,7 +140,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     println!(
         "sql-select: pipeline_bytes={} warnings={}",
-        serde_json::to_string(&tx.pipeline).map(|s| s.len()).unwrap_or_default(),
+        serde_json::to_string(&tx.pipeline)
+            .map(|s| s.len())
+            .unwrap_or_default(),
         tx.warnings.len()
     );
     let tx = translate(
@@ -185,8 +186,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("profile-mask:  {}", summary.masked_uri);
 
     // 10. error message redaction
-    let redacted = Redactor::new()
-        .redact("connection to mongodb://admin:hunter2@host failed");
+    let redacted = Redactor::new().redact("connection to mongodb://admin:hunter2@host failed");
     println!("err-redacted:  {}", redacted);
 
     println!("json: {}", json!({"status": "ok", "tests_passed": 10}));

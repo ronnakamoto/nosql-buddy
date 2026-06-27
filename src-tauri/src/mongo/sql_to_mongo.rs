@@ -154,7 +154,10 @@ fn generate_code_variants(
             .ok()
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_default();
-        map.insert(key, query_code::generate(lang, database, collection, pipeline));
+        map.insert(
+            key,
+            query_code::generate(lang, database, collection, pipeline),
+        );
     }
     map
 }
@@ -823,14 +826,30 @@ fn expr_to_value(expr: &Expr, warnings: &mut Vec<String>) -> AppResult<serde_jso
                 serde_json::Value::String(format!("#{tag}"))
             }
         }
-        Expr::Eq(l, r) => serde_json::json!({ "$eq": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] }),
-        Expr::Ne(l, r) => serde_json::json!({ "$ne": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] }),
-        Expr::Lt(l, r) => serde_json::json!({ "$lt": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] }),
-        Expr::Le(l, r) => serde_json::json!({ "$lte": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] }),
-        Expr::Gt(l, r) => serde_json::json!({ "$gt": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] }),
-        Expr::Ge(l, r) => serde_json::json!({ "$gte": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] }),
-        Expr::And(l, r) => serde_json::json!({ "$and": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] }),
-        Expr::Or(l, r) => serde_json::json!({ "$or": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] }),
+        Expr::Eq(l, r) => {
+            serde_json::json!({ "$eq": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] })
+        }
+        Expr::Ne(l, r) => {
+            serde_json::json!({ "$ne": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] })
+        }
+        Expr::Lt(l, r) => {
+            serde_json::json!({ "$lt": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] })
+        }
+        Expr::Le(l, r) => {
+            serde_json::json!({ "$lte": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] })
+        }
+        Expr::Gt(l, r) => {
+            serde_json::json!({ "$gt": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] })
+        }
+        Expr::Ge(l, r) => {
+            serde_json::json!({ "$gte": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] })
+        }
+        Expr::And(l, r) => {
+            serde_json::json!({ "$and": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] })
+        }
+        Expr::Or(l, r) => {
+            serde_json::json!({ "$or": [expr_to_value(l, warnings)?, expr_to_value(r, warnings)?] })
+        }
         Expr::In(l, values) => {
             let arr: Vec<_> = values
                 .iter()
@@ -838,8 +857,12 @@ fn expr_to_value(expr: &Expr, warnings: &mut Vec<String>) -> AppResult<serde_jso
                 .collect::<AppResult<Vec<_>>>()?;
             serde_json::json!({ "$in": [expr_to_value(l, warnings)?, serde_json::Value::Array(arr)] })
         }
-        Expr::IsNull(inner) => serde_json::json!({ "$eq": [expr_to_value(inner, warnings)?, serde_json::Value::Null] }),
-        Expr::IsNotNull(inner) => serde_json::json!({ "$ne": [expr_to_value(inner, warnings)?, serde_json::Value::Null] }),
+        Expr::IsNull(inner) => {
+            serde_json::json!({ "$eq": [expr_to_value(inner, warnings)?, serde_json::Value::Null] })
+        }
+        Expr::IsNotNull(inner) => {
+            serde_json::json!({ "$ne": [expr_to_value(inner, warnings)?, serde_json::Value::Null] })
+        }
         Expr::Func { name, args } => {
             let upper = name.to_uppercase();
             match upper.as_str() {
@@ -848,9 +871,9 @@ fn expr_to_value(expr: &Expr, warnings: &mut Vec<String>) -> AppResult<serde_jso
                     serde_json::json!({ "$sum": 1 })
                 }
                 "SUM" | "AVG" | "MIN" | "MAX" => {
-                    let inner = args
-                        .first()
-                        .ok_or_else(|| AppError::SqlParse(format!("{upper}() needs an argument")))?;
+                    let inner = args.first().ok_or_else(|| {
+                        AppError::SqlParse(format!("{upper}() needs an argument"))
+                    })?;
                     let op = match upper.as_str() {
                         "SUM" => "$sum",
                         "AVG" => "$avg",
@@ -1049,7 +1072,8 @@ fn build_group_stage(
 }
 
 fn is_grouping_key(expr: &Expr, keys: &[Expr]) -> bool {
-    keys.iter().any(|k| matches!((k, expr), (Expr::Field(name), Expr::Field(other)) if other == name))
+    keys.iter()
+        .any(|k| matches!((k, expr), (Expr::Field(name), Expr::Field(other)) if other == name))
 }
 
 fn build_sort_stage(order: &[OrderItem]) -> serde_json::Value {
@@ -1083,8 +1107,11 @@ mod tests {
 
     #[test]
     fn translates_simple_select() {
-        let t = translate("shop", "SELECT name FROM products WHERE price > 10 ORDER BY price DESC LIMIT 5")
-            .expect("translate");
+        let t = translate(
+            "shop",
+            "SELECT name FROM products WHERE price > 10 ORDER BY price DESC LIMIT 5",
+        )
+        .expect("translate");
         assert_eq!(t.collection, "products");
         let stages = t.pipeline.as_array().expect("array");
         assert!(stages.iter().any(|s| s.get("$match").is_some()));
@@ -1127,8 +1154,7 @@ mod tests {
 
     #[test]
     fn translation_includes_code_variants() {
-        let t = translate("shop", "SELECT name FROM products WHERE price > 10")
-            .expect("translate");
+        let t = translate("shop", "SELECT name FROM products WHERE price > 10").expect("translate");
         // All six languages present.
         assert!(t.code.contains_key("node-js"));
         assert!(t.code.contains_key("python"));
@@ -1161,18 +1187,20 @@ mod tests {
             .iter()
             .filter(|s| s.get("$match").is_some())
             .collect();
-        assert!(!post_group_matches.is_empty(), "no post-group $match for HAVING");
+        assert!(
+            !post_group_matches.is_empty(),
+            "no post-group $match for HAVING"
+        );
     }
 
     #[test]
     fn translates_distinct_with_group_then_replace_root() {
-        let t = translate(
-            "shop",
-            "SELECT DISTINCT category FROM products",
-        )
-        .expect("translate");
+        let t = translate("shop", "SELECT DISTINCT category FROM products").expect("translate");
         let stages = t.pipeline.as_array().expect("array");
-        let group = stages.iter().find(|s| s.get("$group").is_some()).expect("group");
+        let group = stages
+            .iter()
+            .find(|s| s.get("$group").is_some())
+            .expect("group");
         let key = &group["$group"]["_id"];
         assert_eq!(key["category"], "$category");
         assert!(stages.iter().any(|s| s.get("$replaceRoot").is_some()));
@@ -1193,7 +1221,10 @@ mod tests {
         )
         .expect("translate");
         let stages = t.pipeline.as_array().expect("array");
-        let m = stages.iter().find(|s| s.get("$match").is_some()).expect("match");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
         assert_eq!(m["$match"]["$regexMatch"]["regex"], "^foo");
         assert!(m["$match"]["$regexMatch"]["input"].as_str().is_some());
         // options key absent when not supplied
@@ -1208,20 +1239,22 @@ mod tests {
         )
         .expect("translate");
         let stages = t.pipeline.as_array().expect("array");
-        let m = stages.iter().find(|s| s.get("$match").is_some()).expect("match");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
         assert_eq!(m["$match"]["$regexMatch"]["regex"], "^FOO");
         assert_eq!(m["$match"]["$regexMatch"]["options"], "i");
     }
 
     #[test]
     fn field_comparison_in_where_wraps_in_expr() {
-        let t = translate(
-            "shop",
-            "SELECT * FROM products WHERE total = max",
-        )
-        .expect("translate");
+        let t = translate("shop", "SELECT * FROM products WHERE total = max").expect("translate");
         let stages = t.pipeline.as_array().expect("array");
-        let m = stages.iter().find(|s| s.get("$match").is_some()).expect("match");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
         // The match document must be wrapped in $expr because both
         // sides of `=` are bare fields.
         assert_eq!(m["$match"]["$expr"]["$eq"][0], "$total");
@@ -1230,13 +1263,12 @@ mod tests {
 
     #[test]
     fn literal_comparison_in_where_stays_unwrapped() {
-        let t = translate(
-            "shop",
-            "SELECT * FROM products WHERE total = 5",
-        )
-        .expect("translate");
+        let t = translate("shop", "SELECT * FROM products WHERE total = 5").expect("translate");
         let stages = t.pipeline.as_array().expect("array");
-        let m = stages.iter().find(|s| s.get("$match").is_some()).expect("match");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
         // The match document must NOT be wrapped in $expr because one
         // side is a literal.
         assert!(m["$match"].get("$expr").is_none());
@@ -1249,13 +1281,13 @@ mod tests {
         // Mixed: literal comparison + field comparison. Each branch is
         // processed independently, so the field-vs-field branch gets
         // wrapped in $expr while the literal branch stays as-is.
-        let t = translate(
-            "shop",
-            "SELECT * FROM products WHERE total > 5 AND x = y",
-        )
-        .expect("translate");
+        let t = translate("shop", "SELECT * FROM products WHERE total > 5 AND x = y")
+            .expect("translate");
         let stages = t.pipeline.as_array().expect("array");
-        let m = stages.iter().find(|s| s.get("$match").is_some()).expect("match");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
         let and = m["$match"]["$and"].as_array().expect("and array");
         // Find the literal branch and the field branch.
         let literal_branch = and
@@ -1276,13 +1308,13 @@ mod tests {
 
     #[test]
     fn translates_date_tag_today_to_bson_date() {
-        let t = translate(
-            "shop",
-            "SELECT * FROM events WHERE createdAt >= #today",
-        )
-        .expect("translate");
+        let t =
+            translate("shop", "SELECT * FROM events WHERE createdAt >= #today").expect("translate");
         let stages = t.pipeline.as_array().expect("array");
-        let m = stages.iter().find(|s| s.get("$match").is_some()).expect("match");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
         let date = &m["$match"]["$gte"][1];
         assert!(date.get("$date").is_some());
     }
@@ -1295,18 +1327,20 @@ mod tests {
         )
         .expect("translate");
         let stages = t.pipeline.as_array().expect("array");
-        let m = stages.iter().find(|s| s.get("$match").is_some()).expect("match");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
         let and = m["$match"]["$and"].as_array().expect("and");
-        assert!(and.iter().all(|b| b["$gte"][1].get("$date").is_some() || b["$lt"][1].get("$date").is_some()));
+        assert!(and
+            .iter()
+            .all(|b| b["$gte"][1].get("$date").is_some() || b["$lt"][1].get("$date").is_some()));
     }
 
     #[test]
     fn warns_on_unknown_date_tag() {
-        let t = translate(
-            "shop",
-            "SELECT * FROM events WHERE createdAt = #nope",
-        )
-        .expect("translate");
+        let t =
+            translate("shop", "SELECT * FROM events WHERE createdAt = #nope").expect("translate");
         assert!(t.warnings.iter().any(|w| w.contains("unknown date tag")));
     }
 }

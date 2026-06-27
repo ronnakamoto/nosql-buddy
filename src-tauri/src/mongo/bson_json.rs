@@ -126,7 +126,9 @@ fn simplify_for_display(value: &mut serde_json::Value) {
                 map.insert("_idDisplay".to_string(), serde_json::Value::String(oid));
             }
             if let Some(serde_json::Value::Object(inner)) = map.get("$date") {
-                if let Some(serde_json::Value::String(iso)) = inner.get("$numberLong").or_else(|| inner.get("$numberInt")) {
+                if let Some(serde_json::Value::String(iso)) =
+                    inner.get("$numberLong").or_else(|| inner.get("$numberInt"))
+                {
                     let iso = iso.clone();
                     map.remove("$date");
                     map.insert(
@@ -143,10 +145,7 @@ fn simplify_for_display(value: &mut serde_json::Value) {
                 if let Some(serde_json::Value::String(s)) = inner.get("$numberString") {
                     let s = s.clone();
                     map.remove("$numberDecimal");
-                    map.insert(
-                        "_decimalDisplay".to_string(),
-                        serde_json::Value::String(s),
-                    );
+                    map.insert("_decimalDisplay".to_string(), serde_json::Value::String(s));
                 }
             }
             if let Some(serde_json::Value::String(b64)) = map.get("$binary") {
@@ -231,7 +230,8 @@ mod tests {
 
     #[test]
     fn expands_tags_inside_arrays() {
-        let doc = parse_filter(r##"{"createdAt": {"$in": ["#today", "#yesterday"]}}"##).expect("parse");
+        let doc =
+            parse_filter(r##"{"createdAt": {"$in": ["#today", "#yesterday"]}}"##).expect("parse");
         let arr = doc
             .get_document("createdAt")
             .expect("object")

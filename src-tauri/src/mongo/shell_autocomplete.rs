@@ -134,14 +134,7 @@ pub const UPDATE_OPERATORS: &[&str] = &[
 /// registers via `install_host`. Kept in sync with
 /// `shell::install_host`. Used for global-name completions when
 /// the user is typing a bare identifier at statement start.
-pub const GLOBAL_FUNCTIONS: &[&str] = &[
-    "print",
-    "printjson",
-    "ObjectId",
-    "ISODate",
-    "help",
-    "db",
-];
+pub const GLOBAL_FUNCTIONS: &[&str] = &["print", "printjson", "ObjectId", "ISODate", "help", "db"];
 
 /// Parse the text before the cursor and determine what kind of
 /// completions to offer. This is the pure, testable core; the
@@ -250,9 +243,7 @@ fn detect_db_context(text: &str) -> Option<CompletionKind> {
     // Find the first `(` after the method name.
     if let Some(paren_pos) = after_dot.find('(') {
         // The method name is everything before the `(`.
-        let method_name = after_dot[..paren_pos]
-            .trim()
-            .trim_end_matches('.');
+        let method_name = after_dot[..paren_pos].trim().trim_end_matches('.');
         // If the method name is empty, we're still completing it.
         if method_name.is_empty() {
             return Some(CompletionKind::Methods {
@@ -328,11 +319,7 @@ fn detect_globals_context(text: &str) -> Option<CompletionKind> {
     // the cursor to see if we're at a position where a global
     // name would be valid. If there's a partial, it must look
     // like an identifier prefix.
-    if !partial.is_empty()
-        && !partial
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_')
-    {
+    if !partial.is_empty() && !partial.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return None;
     }
 
@@ -359,7 +346,29 @@ fn detect_globals_context(text: &str) -> Option<CompletionKind> {
         // (would be inside another identifier).
         let ok_boundary = matches!(
             last_char,
-            ';' | '{' | '}' | '(' | ',' | '=' | ' ' | '\t' | '\n' | '\r' | '+' | '-' | '*' | '/' | '%' | '&' | '|' | '!' | '<' | '>' | '?' | ':' | '~' | '^'
+            ';' | '{'
+                | '}'
+                | '('
+                | ','
+                | '='
+                | ' '
+                | '\t'
+                | '\n'
+                | '\r'
+                | '+'
+                | '-'
+                | '*'
+                | '/'
+                | '%'
+                | '&'
+                | '|'
+                | '!'
+                | '<'
+                | '>'
+                | '?'
+                | ':'
+                | '~'
+                | '^'
         );
         if !ok_boundary {
             return None;
@@ -517,18 +526,12 @@ mod tests {
 
     #[test]
     fn context_after_db_dot_is_collections() {
-        assert_eq!(
-            autocomplete_context("db."),
-            CompletionKind::Collections
-        );
+        assert_eq!(autocomplete_context("db."), CompletionKind::Collections);
     }
 
     #[test]
     fn context_after_db_partial_collection_is_collections() {
-        assert_eq!(
-            autocomplete_context("db.us"),
-            CompletionKind::Collections
-        );
+        assert_eq!(autocomplete_context("db.us"), CompletionKind::Collections);
     }
 
     #[test]
@@ -596,10 +599,7 @@ mod tests {
 
     #[test]
     fn context_use_directive_is_databases() {
-        assert_eq!(
-            autocomplete_context("use ad"),
-            CompletionKind::Databases
-        );
+        assert_eq!(autocomplete_context("use ad"), CompletionKind::Databases);
     }
 
     #[test]
@@ -615,20 +615,14 @@ mod tests {
         // After `use admin;` the statement is complete. The
         // cursor is at a statement boundary — globals are valid
         // for the next statement.
-        assert_eq!(
-            autocomplete_context("use admin;"),
-            CompletionKind::Globals
-        );
+        assert_eq!(autocomplete_context("use admin;"), CompletionKind::Globals);
     }
 
     #[test]
     fn context_plain_text_is_globals() {
         // `var x = 1;` — statement complete, cursor at boundary.
         // Globals are valid for the next statement.
-        assert_eq!(
-            autocomplete_context("var x = 1;"),
-            CompletionKind::Globals
-        );
+        assert_eq!(autocomplete_context("var x = 1;"), CompletionKind::Globals);
     }
 
     #[test]
@@ -697,27 +691,18 @@ mod tests {
 
     #[test]
     fn context_bare_print_is_globals() {
-        assert_eq!(
-            autocomplete_context("print"),
-            CompletionKind::Globals
-        );
+        assert_eq!(autocomplete_context("print"), CompletionKind::Globals);
     }
 
     #[test]
     fn context_bare_printjson_partial_is_globals() {
-        assert_eq!(
-            autocomplete_context("printj"),
-            CompletionKind::Globals
-        );
+        assert_eq!(autocomplete_context("printj"), CompletionKind::Globals);
     }
 
     #[test]
     fn context_empty_at_start_is_globals() {
         // Empty text — at statement start, globals are valid.
-        assert_eq!(
-            autocomplete_context(""),
-            CompletionKind::Globals
-        );
+        assert_eq!(autocomplete_context(""), CompletionKind::Globals);
     }
 
     #[test]
@@ -762,10 +747,7 @@ mod tests {
         // `foo.print` — the `.` before `print` means property
         // access, not a global. Neither detect_db_context nor
         // detect_globals_context should return Globals.
-        assert_ne!(
-            autocomplete_context("foo.print"),
-            CompletionKind::Globals
-        );
+        assert_ne!(autocomplete_context("foo.print"), CompletionKind::Globals);
     }
 
     #[test]

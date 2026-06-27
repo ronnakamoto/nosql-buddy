@@ -51,9 +51,9 @@ pub async fn get_settings(app: AppHandle) -> AppResult<AppSettings> {
         Some(v) => serde_json::from_value(v).unwrap_or(Theme::System),
         None => Theme::System,
     };
-    let last_connection_id = store.get(LAST_CONNECTION_KEY).and_then(|v| {
-        v.as_str().map(|s| s.to_string())
-    });
+    let last_connection_id = store
+        .get(LAST_CONNECTION_KEY)
+        .and_then(|v| v.as_str().map(|s| s.to_string()));
     Ok(AppSettings {
         theme,
         last_connection_id,

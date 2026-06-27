@@ -95,11 +95,7 @@ impl ProfileRepository {
         }
     }
 
-    fn save_all(
-        &self,
-        app: &tauri::AppHandle,
-        profiles: &[StoredProfile],
-    ) -> AppResult<()> {
+    fn save_all(&self, app: &tauri::AppHandle, profiles: &[StoredProfile]) -> AppResult<()> {
         let store = app
             .store(STORE_FILE)
             .map_err(|e| AppError::Internal(format!("profile store open: {e}")))?;
@@ -111,10 +107,7 @@ impl ProfileRepository {
         Ok(())
     }
 
-    pub fn list_summaries(
-        &self,
-        app: &tauri::AppHandle,
-    ) -> AppResult<Vec<ProfileSummary>> {
+    pub fn list_summaries(&self, app: &tauri::AppHandle) -> AppResult<Vec<ProfileSummary>> {
         let stored = self.load_all(app)?;
         let summaries: Vec<ProfileSummary> = stored
             .iter()
@@ -134,7 +127,9 @@ impl ProfileRepository {
         let mut profiles = self.load_all(app)?;
         if let Some(existing) = profiles.iter().find(|p| p.id == profile.id).cloned() {
             if existing.name != profile.name
-                && profiles.iter().any(|p| p.id != profile.id && p.name == profile.name)
+                && profiles
+                    .iter()
+                    .any(|p| p.id != profile.id && p.name == profile.name)
             {
                 return Err(AppError::ProfileExists(profile.name));
             }
@@ -156,11 +151,7 @@ impl ProfileRepository {
         Ok(profile)
     }
 
-    pub fn get(
-        &self,
-        app: &tauri::AppHandle,
-        id: &str,
-    ) -> AppResult<ConnectionProfile> {
+    pub fn get(&self, app: &tauri::AppHandle, id: &str) -> AppResult<ConnectionProfile> {
         let stored = self
             .load_all(app)?
             .into_iter()

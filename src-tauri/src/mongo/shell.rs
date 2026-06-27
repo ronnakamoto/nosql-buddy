@@ -53,12 +53,8 @@ use serde_json::Value as JsonValue;
 use tauri::async_runtime::Mutex as AsyncMutex;
 
 use boa_engine::{
-    context::Context,
-    js_string,
-    native_function::NativeFunction,
-    object::builtins::JsArray,
-    property::Attribute,
-    JsArgs, JsError, JsNativeError, JsResult, JsValue, Source,
+    context::Context, js_string, native_function::NativeFunction, object::builtins::JsArray,
+    property::Attribute, JsArgs, JsError, JsNativeError, JsResult, JsValue, Source,
 };
 
 use crate::audit::interceptor;
@@ -169,8 +165,6 @@ where
         }
     });
 }
-
-
 
 fn with_entry<F, R>(f: F) -> R
 where
@@ -333,9 +327,8 @@ fn run_shell_thread(rx: Receiver<ShellMessage>, initial_db: String) {
                 // implementation is a small AST transform; for
                 // now we just return undefined and rely on
                 // printjson for output.
-                let wrapped = format!(
-                    "(function() {{\ntry {{\n{body}\n}} catch (e) {{\nthrow e;\n}}\n}})()"
-                );
+                let wrapped =
+                    format!("(function() {{\ntry {{\n{body}\n}} catch (e) {{\nthrow e;\n}}\n}})()");
                 let result = context.eval(Source::from_bytes(wrapped.as_bytes()));
                 let mut outputs = take_outputs();
                 let execution_ms = started.elapsed().as_millis() as u64;
@@ -352,22 +345,27 @@ fn run_shell_thread(rx: Receiver<ShellMessage>, initial_db: String) {
                                 // otherwise as a JSON line.
                                 if let JsonValue::Array(items) = &json {
                                     if items.iter().all(|v| v.is_object()) {
-                                        let columns: Vec<String> = if let Some(first) = items.first() {
-                                            if let Some(obj) = first.as_object() {
-                                                obj.keys().cloned().collect()
+                                        let columns: Vec<String> =
+                                            if let Some(first) = items.first() {
+                                                if let Some(obj) = first.as_object() {
+                                                    obj.keys().cloned().collect()
+                                                } else {
+                                                    Vec::new()
+                                                }
                                             } else {
                                                 Vec::new()
-                                            }
-                                        } else {
-                                            Vec::new()
-                                        };
+                                            };
                                         let rows: Vec<Vec<JsonValue>> = items
                                             .iter()
                                             .map(|item| {
                                                 if let Some(obj) = item.as_object() {
                                                     columns
                                                         .iter()
-                                                        .map(|c| obj.get(c).cloned().unwrap_or(JsonValue::Null))
+                                                        .map(|c| {
+                                                            obj.get(c)
+                                                                .cloned()
+                                                                .unwrap_or(JsonValue::Null)
+                                                        })
                                                         .collect()
                                                 } else {
                                                     vec![JsonValue::Null]
@@ -459,8 +457,9 @@ fn install_host(ctx: &mut Context) {
         let oid = if s.is_empty() || s == "undefined" {
             ObjectId::new()
         } else {
-            ObjectId::parse_str(&s)
-                .map_err(|e| JsError::from_native(JsNativeError::typ().with_message(e.to_string())))?
+            ObjectId::parse_str(&s).map_err(|e| {
+                JsError::from_native(JsNativeError::typ().with_message(e.to_string()))
+            })?
         };
         Ok(JsValue::from(js_string!(oid.to_hex())))
     });
@@ -476,12 +475,13 @@ fn install_host(ctx: &mut Context) {
         let dt = if s.is_empty() || s == "undefined" {
             BsonDateTime::now()
         } else {
-            BsonDateTime::parse_rfc3339_str(&s)
-                .map_err(|e| JsError::from_native(JsNativeError::typ().with_message(e.to_string())))?
+            BsonDateTime::parse_rfc3339_str(&s).map_err(|e| {
+                JsError::from_native(JsNativeError::typ().with_message(e.to_string()))
+            })?
         };
-        Ok(JsValue::from(
-            js_string!(dt.try_to_rfc3339_string().unwrap_or_default()),
-        ))
+        Ok(JsValue::from(js_string!(dt
+            .try_to_rfc3339_string()
+            .unwrap_or_default())))
     });
     ctx.register_global_builtin_callable(js_string!("ISODate"), 1, iso_date)
         .expect("register ISODate");
@@ -508,14 +508,7 @@ fn install_host(ctx: &mut Context) {
         }
         let active_db = SHELL_ACTIVE_DB.with(|c| c.borrow().clone());
         let result = with_entry(|entry| {
-            dispatch_sync(
-                entry,
-                &active_db,
-                &collection,
-                &method,
-                bson_args,
-                ctx,
-            )
+            dispatch_sync(entry, &active_db, &collection, &method, bson_args, ctx)
         });
         match result {
             Ok(value) => Ok(value),
@@ -682,7 +675,9 @@ fn preprocess_use(script: &str) -> (Option<String>, String) {
             .or_else(|| db.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
             .unwrap_or(db);
         if !db.is_empty()
-            && db.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+            && db
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
         {
             return (Some(db.to_string()), rest.to_string());
         }
@@ -715,14 +710,12 @@ static RUN_COMMAND_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::
 
 fn call_db_re() -> &'static regex::Regex {
     CALL_DB_RE.get_or_init(|| {
-        regex::Regex::new(r"\bdb\.([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*\(")
-            .unwrap()
+        regex::Regex::new(r"\bdb\.([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*\(").unwrap()
     })
 }
 
 fn run_command_re() -> &'static regex::Regex {
-    RUN_COMMAND_RE
-        .get_or_init(|| regex::Regex::new(r"\bdb\.runCommand\s*\(").unwrap())
+    RUN_COMMAND_RE.get_or_init(|| regex::Regex::new(r"\bdb\.runCommand\s*\(").unwrap())
 }
 
 fn transform_source(src: &str) -> String {
@@ -792,11 +785,7 @@ fn transform_source(src: &str) -> String {
         }
         // Try to match a `db.` call pattern here. Only when `db` is a
         // standalone word (preceded by a non-identifier char / start).
-        if c == 'd'
-            && k + 1 < n
-            && chars[k + 1].1 == 'b'
-            && is_word_boundary_before(&chars, k)
-        {
+        if c == 'd' && k + 1 < n && chars[k + 1].1 == 'b' && is_word_boundary_before(&chars, k) {
             let rest = &src[i..];
             if let Some((consumed_chars, replacement)) = try_match_db_pattern(rest) {
                 out.push_str(&replacement);
@@ -875,10 +864,13 @@ fn dispatch_sync(
 ) -> JsResult<JsValue> {
     let result = match method {
         "find" => {
-            let filter = args.first().and_then(|b| match b {
-                bson::Bson::Document(d) => Some(d.clone()),
-                _ => None,
-            }).unwrap_or_default();
+            let filter = args
+                .first()
+                .and_then(|b| match b {
+                    bson::Bson::Document(d) => Some(d.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
             let docs: Vec<Document> = runtime_block_on(async move {
                 let cursor = entry
                     .client
@@ -888,7 +880,10 @@ fn dispatch_sync(
                     .limit(50)
                     .await
                     .map_err(|e| AppError::Mongo(e.to_string()))?;
-                cursor.try_collect().await.map_err(|e| AppError::Mongo(e.to_string()))
+                cursor
+                    .try_collect()
+                    .await
+                    .map_err(|e| AppError::Mongo(e.to_string()))
             })
             .map_err(|e| js_err(e.to_string()))?;
             SHELL_LAST_COLLECTION.with(|c| *c.borrow_mut() = Some(coll.to_string()));
@@ -901,10 +896,13 @@ fn dispatch_sync(
             Ok(arr.into())
         }
         "findOne" => {
-            let filter = args.first().and_then(|b| match b {
-                bson::Bson::Document(d) => Some(d.clone()),
-                _ => None,
-            }).unwrap_or_default();
+            let filter = args
+                .first()
+                .and_then(|b| match b {
+                    bson::Bson::Document(d) => Some(d.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
             let result = runtime_block_on(async move {
                 entry
                     .client
@@ -922,10 +920,13 @@ fn dispatch_sync(
             }
         }
         "countDocuments" | "count" => {
-            let filter = args.first().and_then(|b| match b {
-                bson::Bson::Document(d) => Some(d.clone()),
-                _ => None,
-            }).unwrap_or_default();
+            let filter = args
+                .first()
+                .and_then(|b| match b {
+                    bson::Bson::Document(d) => Some(d.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
             let n = runtime_block_on(async move {
                 entry
                     .client
@@ -940,7 +941,10 @@ fn dispatch_sync(
         }
         "aggregate" => {
             // First arg must be an array of stage docs.
-            let pipeline_bson = args.first().cloned().unwrap_or(bson::Bson::Array(Vec::new()));
+            let pipeline_bson = args
+                .first()
+                .cloned()
+                .unwrap_or(bson::Bson::Array(Vec::new()));
             let mut pipeline = match pipeline_bson {
                 bson::Bson::Array(v) => v
                     .into_iter()
@@ -971,7 +975,10 @@ fn dispatch_sync(
             })
             .map_err(|e| js_err(e.to_string()))?;
             let docs: Vec<Document> = runtime_block_on(async move {
-                cursor.try_collect().await.map_err(|e| AppError::Mongo(e.to_string()))
+                cursor
+                    .try_collect()
+                    .await
+                    .map_err(|e| AppError::Mongo(e.to_string()))
             })
             .map_err(|e| js_err(e.to_string()))?;
             let arr = JsArray::new(ctx);
@@ -989,11 +996,16 @@ fn dispatch_sync(
                     bson::Bson::String(s) => Some(s.clone()),
                     _ => None,
                 })
-                .ok_or_else(|| js_err("distinct(field, filter?) requires a field name".to_string()))?;
-            let filter = args.get(1).and_then(|b| match b {
-                bson::Bson::Document(d) => Some(d.clone()),
-                _ => None,
-            }).unwrap_or_default();
+                .ok_or_else(|| {
+                    js_err("distinct(field, filter?) requires a field name".to_string())
+                })?;
+            let filter = args
+                .get(1)
+                .and_then(|b| match b {
+                    bson::Bson::Document(d) => Some(d.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
             let values = runtime_block_on(async move {
                 entry
                     .client
@@ -1012,10 +1024,13 @@ fn dispatch_sync(
             Ok(arr.into())
         }
         "insertOne" => {
-            let doc_arg = args.first().and_then(|b| match b {
-                bson::Bson::Document(d) => Some(d.clone()),
-                _ => None,
-            }).ok_or_else(|| js_err("insertOne requires a document".to_string()))?;
+            let doc_arg = args
+                .first()
+                .and_then(|b| match b {
+                    bson::Bson::Document(d) => Some(d.clone()),
+                    _ => None,
+                })
+                .ok_or_else(|| js_err("insertOne requires a document".to_string()))?;
             let doc_for_audit = doc_arg.clone();
             let res = runtime_block_on(async move {
                 entry
@@ -1056,7 +1071,9 @@ fn dispatch_sync(
                 _ => Vec::new(),
             };
             if docs.is_empty() {
-                return Err(js_err("insertMany requires a non-empty array of documents".to_string()));
+                return Err(js_err(
+                    "insertMany requires a non-empty array of documents".to_string(),
+                ));
             }
             let docs_for_audit = docs.clone();
             let res = runtime_block_on(async move {
@@ -1087,24 +1104,29 @@ fn dispatch_sync(
         }
         "updateOne" | "updateMany" => {
             // Args: filter, update, (options).
-            let filter = args.first().and_then(|b| match b {
-                bson::Bson::Document(d) => Some(d.clone()),
-                _ => None,
-            }).unwrap_or_default();
-            let update = args.get(1).and_then(|b| match b {
-                bson::Bson::Document(d) => Some(d.clone()),
-                _ => None,
-            }).ok_or_else(|| js_err(format!(
-                "db.{coll}.{method}(filter, update) requires an update document"
-            )))?;
+            let filter = args
+                .first()
+                .and_then(|b| match b {
+                    bson::Bson::Document(d) => Some(d.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let update = args
+                .get(1)
+                .and_then(|b| match b {
+                    bson::Bson::Document(d) => Some(d.clone()),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    js_err(format!(
+                        "db.{coll}.{method}(filter, update) requires an update document"
+                    ))
+                })?;
             let multi = method == "updateMany";
             let filter_for_audit = filter.clone();
             let update_for_audit = update.clone();
             let res = runtime_block_on(async move {
-                let coll_handle = entry
-                    .client
-                    .database(db)
-                    .collection::<Document>(coll);
+                let coll_handle = entry.client.database(db).collection::<Document>(coll);
                 if multi {
                     coll_handle.update_many(filter, update).await
                 } else {
@@ -1136,14 +1158,22 @@ fn dispatch_sync(
         }
         "replaceOne" => {
             // Args: filter, replacement, (options).
-            let filter = args.first().and_then(|b| match b {
-                bson::Bson::Document(d) => Some(d.clone()),
-                _ => None,
-            }).unwrap_or_default();
-            let replacement = args.get(1).and_then(|b| match b {
-                bson::Bson::Document(d) => Some(d.clone()),
-                _ => None,
-            }).ok_or_else(|| js_err("replaceOne(filter, doc) requires a replacement document".to_string()))?;
+            let filter = args
+                .first()
+                .and_then(|b| match b {
+                    bson::Bson::Document(d) => Some(d.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let replacement = args
+                .get(1)
+                .and_then(|b| match b {
+                    bson::Bson::Document(d) => Some(d.clone()),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    js_err("replaceOne(filter, doc) requires a replacement document".to_string())
+                })?;
             let filter_for_audit = filter.clone();
             let repl_for_audit = replacement.clone();
             let res = runtime_block_on(async move {
@@ -1178,17 +1208,17 @@ fn dispatch_sync(
             Ok(JsValue::undefined())
         }
         "deleteOne" | "deleteMany" => {
-            let filter = args.first().and_then(|b| match b {
-                bson::Bson::Document(d) => Some(d.clone()),
-                _ => None,
-            }).unwrap_or_default();
+            let filter = args
+                .first()
+                .and_then(|b| match b {
+                    bson::Bson::Document(d) => Some(d.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
             let multi = method == "deleteMany";
             let filter_for_audit = filter.clone();
             let res = runtime_block_on(async move {
-                let coll_handle = entry
-                    .client
-                    .database(db)
-                    .collection::<Document>(coll);
+                let coll_handle = entry.client.database(db).collection::<Document>(coll);
                 if multi {
                     coll_handle.delete_many(filter).await
                 } else {
@@ -1203,7 +1233,11 @@ fn dispatch_sync(
                 }
             });
             push_output(ShellOutput::Text {
-                value: format!("Deleted {} document{}", res.deleted_count, if res.deleted_count == 1 { "" } else { "s" }),
+                value: format!(
+                    "Deleted {} document{}",
+                    res.deleted_count,
+                    if res.deleted_count == 1 { "" } else { "s" }
+                ),
             });
             Ok(JsValue::undefined())
         }
@@ -1294,7 +1328,11 @@ fn dispatch_sync(
             // form; keysDoc would require a lookup.
             let name = match args.first() {
                 Some(bson::Bson::String(s)) => s.clone(),
-                _ => return Err(js_err("dropIndex(name) requires the index name as a string".to_string())),
+                _ => {
+                    return Err(js_err(
+                        "dropIndex(name) requires the index name as a string".to_string(),
+                    ))
+                }
             };
             let name_for_output = name.clone();
             runtime_block_on(async move {
@@ -1322,7 +1360,11 @@ fn dispatch_sync(
             //   { renameCollection: "db.old", to: "db.new" }
             let new_name = match args.first() {
                 Some(bson::Bson::String(s)) => s.clone(),
-                _ => return Err(js_err("rename(newName) requires the new collection name as a string".to_string())),
+                _ => {
+                    return Err(js_err(
+                        "rename(newName) requires the new collection name as a string".to_string(),
+                    ))
+                }
             };
             let new_name_for_output = new_name.clone();
             let new_name_for_audit = new_name.clone();
@@ -1376,7 +1418,10 @@ fn dispatch_sync(
             // after when returnNewDocument: true / returnDocument: "after").
             let filter = doc_arg(&args, 0).unwrap_or_default();
             let update = args.get(1).ok_or_else(|| {
-                js_err("findOneAndUpdate(filter, update, options?) requires an update document".to_string())
+                js_err(
+                    "findOneAndUpdate(filter, update, options?) requires an update document"
+                        .to_string(),
+                )
             })?;
             let update_mods = bson_to_update_mods(update)?;
             let opts = doc_arg(&args, 2);
@@ -1424,7 +1469,11 @@ fn dispatch_sync(
             push_output(ShellOutput::Text {
                 value: format!(
                     "findOneAndUpdate: {}",
-                    if result.is_some() { "matched 1" } else { "matched 0" }
+                    if result.is_some() {
+                        "matched 1"
+                    } else {
+                        "matched 0"
+                    }
                 ),
             });
             match result {
@@ -1461,7 +1510,11 @@ fn dispatch_sync(
             push_output(ShellOutput::Text {
                 value: format!(
                     "findOneAndDelete: {}",
-                    if result.is_some() { "deleted 1" } else { "matched 0" }
+                    if result.is_some() {
+                        "deleted 1"
+                    } else {
+                        "matched 0"
+                    }
                 ),
             });
             match result {
@@ -1511,7 +1564,11 @@ fn dispatch_sync(
             push_output(ShellOutput::Text {
                 value: format!(
                     "findOneAndReplace: {}",
-                    if result.is_some() { "matched 1" } else { "matched 0" }
+                    if result.is_some() {
+                        "matched 1"
+                    } else {
+                        "matched 0"
+                    }
                 ),
             });
             match result {
@@ -1527,7 +1584,11 @@ fn dispatch_sync(
             // per-method logic. Ordered by default: stop on first error.
             let ops = match args.first() {
                 Some(bson::Bson::Array(v)) => v.clone(),
-                _ => return Err(js_err("bulkWrite requires an array of operation documents".to_string())),
+                _ => {
+                    return Err(js_err(
+                        "bulkWrite requires an array of operation documents".to_string(),
+                    ))
+                }
             };
             let mut inserted = 0u64;
             let mut matched = 0u64;
@@ -1547,7 +1608,11 @@ fn dispatch_sync(
                 };
                 let payload_doc = match payload {
                     bson::Bson::Document(d) => d,
-                    _ => return Err(js_err(format!("bulkWrite: {kind} payload must be a document"))),
+                    _ => {
+                        return Err(js_err(format!(
+                            "bulkWrite: {kind} payload must be a document"
+                        )))
+                    }
                 };
                 match kind {
                     "insertOne" => {
@@ -1574,11 +1639,13 @@ fn dispatch_sync(
                         inserted += 1;
                     }
                     "updateOne" | "updateMany" => {
-                        let filter = payload_doc.get_document("filter").cloned().unwrap_or_default();
-                        let update = payload_doc
-                            .get("update")
+                        let filter = payload_doc
+                            .get_document("filter")
                             .cloned()
-                            .ok_or_else(|| js_err("bulkWrite update: missing update".to_string()))?;
+                            .unwrap_or_default();
+                        let update = payload_doc.get("update").cloned().ok_or_else(|| {
+                            js_err("bulkWrite update: missing update".to_string())
+                        })?;
                         let update_mods = bson_to_update_mods(&update)?;
                         let multi = kind == "updateMany";
                         let upsert = payload_doc.get_bool("upsert").unwrap_or(false);
@@ -1611,7 +1678,10 @@ fn dispatch_sync(
                         }
                     }
                     "replaceOne" => {
-                        let filter = payload_doc.get_document("filter").cloned().unwrap_or_default();
+                        let filter = payload_doc
+                            .get_document("filter")
+                            .cloned()
+                            .unwrap_or_default();
                         let replacement = payload_doc
                             .get_document("replacement")
                             .cloned()
@@ -1645,7 +1715,10 @@ fn dispatch_sync(
                         }
                     }
                     "deleteOne" | "deleteMany" => {
-                        let filter = payload_doc.get_document("filter").cloned().unwrap_or_default();
+                        let filter = payload_doc
+                            .get_document("filter")
+                            .cloned()
+                            .unwrap_or_default();
                         let multi = kind == "deleteMany";
                         let filter_for_audit = filter.clone();
                         let res = runtime_block_on(async move {
@@ -1665,7 +1738,11 @@ fn dispatch_sync(
                         });
                         deleted += res.deleted_count;
                     }
-                    other => return Err(js_err(format!("bulkWrite: unsupported operation '{other}'"))),
+                    other => {
+                        return Err(js_err(format!(
+                            "bulkWrite: unsupported operation '{other}'"
+                        )))
+                    }
                 }
             }
             push_output(ShellOutput::Text {
@@ -1891,9 +1968,9 @@ fn bson_to_js(bson: bson::Bson, ctx: &mut Context) -> JsResult<JsValue> {
         bson::Bson::Int32(i) => Ok(JsValue::from(i as f64)),
         bson::Bson::Int64(i) => Ok(JsValue::from(i as f64)),
         bson::Bson::ObjectId(oid) => Ok(JsValue::from(js_string!(oid.to_hex()))),
-        bson::Bson::DateTime(dt) => Ok(JsValue::from(
-            js_string!(dt.try_to_rfc3339_string().unwrap_or_default()),
-        )),
+        bson::Bson::DateTime(dt) => Ok(JsValue::from(js_string!(dt
+            .try_to_rfc3339_string()
+            .unwrap_or_default()))),
         bson::Bson::Array(arr) => {
             let js_arr = JsArray::new(ctx);
             for (i, v) in arr.into_iter().enumerate() {
@@ -1997,8 +2074,7 @@ mod tests {
     #[test]
     fn boa_engine_persistent_variables() {
         let mut ctx = Context::default();
-        ctx.eval(Source::from_bytes(b"var x = 42;"))
-            .unwrap();
+        ctx.eval(Source::from_bytes(b"var x = 42;")).unwrap();
         let r = ctx.eval(Source::from_bytes(b"x + 1")).unwrap();
         let n = r.as_number().unwrap();
         assert_eq!(n, 43.0);
@@ -2255,7 +2331,11 @@ mod tests {
         let mut ctx = Context::default();
         install_host(&mut ctx);
         let result = ctx.eval(Source::from_bytes(b"db.help()"));
-        assert!(result.is_ok(), "db.help() should not throw: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "db.help() should not throw: {:?}",
+            result.err()
+        );
         let outputs = take_outputs();
         let text: String = outputs
             .iter()
@@ -2287,7 +2367,11 @@ mod tests {
         ctx.register_global_property(js_string!("arr"), arr.clone(), Attribute::all())
             .unwrap();
         let result = ctx.eval(Source::from_bytes(b"arr.toArray().length"));
-        assert!(result.is_ok(), "arr.toArray() should not throw: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "arr.toArray() should not throw: {:?}",
+            result.err()
+        );
         let len = result.unwrap().as_number().unwrap();
         assert_eq!(len as i64, 2, "toArray() should return the 2-element array");
         // Confirm the elements round-trip.
@@ -2303,9 +2387,7 @@ mod tests {
     #[test]
     fn jsvalue_to_bson_converts_array_of_objects() {
         let mut ctx = Context::default();
-        let js = ctx
-            .eval(Source::from_bytes(b"[{a: 1}, {a: 2}]"))
-            .unwrap();
+        let js = ctx.eval(Source::from_bytes(b"[{a: 1}, {a: 2}]")).unwrap();
         let bson = jsvalue_to_bson(&js, &mut ctx).unwrap();
         match bson {
             bson::Bson::Array(arr) => {
@@ -2324,9 +2406,7 @@ mod tests {
     #[test]
     fn jsvalue_to_bson_converts_update_document() {
         let mut ctx = Context::default();
-        let js = ctx
-            .eval(Source::from_bytes(b"({$set: {a: 1}})"))
-            .unwrap();
+        let js = ctx.eval(Source::from_bytes(b"({$set: {a: 1}})")).unwrap();
         let bson = jsvalue_to_bson(&js, &mut ctx).unwrap();
         match bson {
             bson::Bson::Document(d) => {
@@ -2344,7 +2424,9 @@ mod tests {
     fn jsvalue_to_bson_converts_index_options() {
         let mut ctx = Context::default();
         let js = ctx
-            .eval(Source::from_bytes(b"({unique: true, sparse: true, name: \"idx_a\"})"))
+            .eval(Source::from_bytes(
+                b"({unique: true, sparse: true, name: \"idx_a\"})",
+            ))
             .unwrap();
         let bson = jsvalue_to_bson(&js, &mut ctx).unwrap();
         match bson {
@@ -2414,7 +2496,9 @@ mod tests {
     fn bson_to_update_mods_converts_pipeline() {
         let mut ctx = Context::default();
         let js = ctx
-            .eval(Source::from_bytes(b"[{$addFields: {a: 1}}, {$project: {a: 1}}]"))
+            .eval(Source::from_bytes(
+                b"[{$addFields: {a: 1}}, {$project: {a: 1}}]",
+            ))
             .unwrap();
         let mods = bson_to_update_mods(&jsvalue_to_bson(&js, &mut ctx).unwrap()).unwrap();
         match mods {
@@ -2431,9 +2515,7 @@ mod tests {
     #[test]
     fn bson_to_update_mods_converts_document() {
         let mut ctx = Context::default();
-        let js = ctx
-            .eval(Source::from_bytes(b"({$set: {a: 1}})"))
-            .unwrap();
+        let js = ctx.eval(Source::from_bytes(b"({$set: {a: 1}})")).unwrap();
         let mods = bson_to_update_mods(&jsvalue_to_bson(&js, &mut ctx).unwrap()).unwrap();
         match mods {
             mongodb::options::UpdateModifications::Document(d) => {

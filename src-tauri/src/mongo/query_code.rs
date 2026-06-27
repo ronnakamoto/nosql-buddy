@@ -104,7 +104,9 @@ fn json_literal(v: &serde_json::Value) -> String {
 /// Quote a string in the target language's string-literal syntax.
 fn str_in(lang: Language, s: &str) -> String {
     match lang {
-        Language::NodeJs | Language::Shell => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+        Language::NodeJs | Language::Shell => {
+            format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+        }
         Language::Python => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
         Language::Java => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
         Language::CSharp => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
@@ -342,8 +344,19 @@ db.{coll}.aggregate({pipeline}).forEach(printjson);\n",
 
 /// Top-level: render code for the requested language. Falls back to
 /// `shell` if the language is unrecognised.
-pub fn generate(lang: Language, database: &str, collection: &str, pipeline: &[serde_json::Value]) -> String {
-    generate_with(lang, database, collection, pipeline, &ConnectionInfo::default())
+pub fn generate(
+    lang: Language,
+    database: &str,
+    collection: &str,
+    pipeline: &[serde_json::Value],
+) -> String {
+    generate_with(
+        lang,
+        database,
+        collection,
+        pipeline,
+        &ConnectionInfo::default(),
+    )
 }
 
 pub fn generate_with(

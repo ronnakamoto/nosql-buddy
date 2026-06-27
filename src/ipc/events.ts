@@ -47,3 +47,20 @@ export async function onAuditSetupProgress(
     handler(event.payload.line),
   );
 }
+
+export interface ImportExportProgressPayload {
+  jobId: string;
+  phase: string;
+  processed: number;
+  total: number | null;
+  message: string;
+}
+
+/** Subscribe to live import/export job progress (throttled in the backend). */
+export async function onImportExportProgress(
+  handler: (payload: ImportExportProgressPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<ImportExportProgressPayload>("import-export-progress", (event) =>
+    handler(event.payload),
+  );
+}

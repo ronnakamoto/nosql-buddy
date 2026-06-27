@@ -237,7 +237,9 @@ fn decode_secret_key(s: &str) -> AppResult<[u8; 32]> {
     let expected = stellar_native::crc16_xmodem(payload);
     let expected_le = [(expected & 0xff) as u8, (expected >> 8) as u8];
     if checksum != expected_le {
-        return Err(AppError::Validation("secret key checksum mismatch".to_string()));
+        return Err(AppError::Validation(
+            "secret key checksum mismatch".to_string(),
+        ));
     }
 
     let mut result = [0u8; 32];
@@ -255,10 +257,7 @@ pub async fn audit_get_mode_config(app: AppHandle) -> AppResult<AuditModeConfig>
 
 /// Set the audit mode (dev or production).
 #[tauri::command]
-pub async fn audit_set_audit_mode(
-    mode: AuditMode,
-    app: AppHandle,
-) -> AppResult<()> {
+pub async fn audit_set_audit_mode(mode: AuditMode, app: AppHandle) -> AppResult<()> {
     save_mode(&app, mode)
 }
 
@@ -276,9 +275,7 @@ pub async fn audit_set_production_network(
 /// Import a production mainnet keypair from an S... secret key string.
 /// Returns the derived account ID (G...).
 #[tauri::command]
-pub async fn audit_import_production_keypair(
-    secret_key: String,
-) -> AppResult<String> {
+pub async fn audit_import_production_keypair(secret_key: String) -> AppResult<String> {
     save_production_keypair(&secret_key)
 }
 

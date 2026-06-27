@@ -144,7 +144,8 @@ pub fn compute_schema_report(docs: &[Document]) -> SchemaReport {
                 .get(&name)
                 .filter(|m| m.len() <= TOP_VALUES_CARDINALITY_THRESHOLD)
                 .map(|m| {
-                    let mut entries: Vec<(String, u64)> = m.iter().map(|(v, c)| (v.clone(), *c)).collect();
+                    let mut entries: Vec<(String, u64)> =
+                        m.iter().map(|(v, c)| (v.clone(), *c)).collect();
                     entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
                     entries
                         .into_iter()
@@ -154,14 +155,22 @@ pub fn compute_schema_report(docs: &[Document]) -> SchemaReport {
                 });
 
             let numeric_stats = numeric_values.get(&name).map(|vals| {
-                let (min, max, sum) = vals
-                    .iter()
-                    .fold((f64::INFINITY, f64::NEG_INFINITY, 0.0f64), |(mn, mx, s), &v| {
-                        (mn.min(v), mx.max(v), s + v)
-                    });
-                let mean = if vals.is_empty() { 0.0 } else { sum / vals.len() as f64 };
+                let (min, max, sum) = vals.iter().fold(
+                    (f64::INFINITY, f64::NEG_INFINITY, 0.0f64),
+                    |(mn, mx, s), &v| (mn.min(v), mx.max(v), s + v),
+                );
+                let mean = if vals.is_empty() {
+                    0.0
+                } else {
+                    sum / vals.len() as f64
+                };
                 let buckets = histogram(vals, min, max);
-                SchemaNumericStats { min, max, mean, buckets }
+                SchemaNumericStats {
+                    min,
+                    max,
+                    mean,
+                    buckets,
+                }
             });
 
             let date_stats = date_values.get(&name).map(|vals| {
@@ -169,7 +178,11 @@ pub fn compute_schema_report(docs: &[Document]) -> SchemaReport {
                     .iter()
                     .fold((i64::MAX, i64::MIN), |(mn, mx), &v| (mn.min(v), mx.max(v)));
                 let buckets = date_histogram(vals, min_ms, max_ms);
-                SchemaDateStats { min_ms, max_ms, buckets }
+                SchemaDateStats {
+                    min_ms,
+                    max_ms,
+                    buckets,
+                }
             });
 
             SchemaField {
@@ -199,7 +212,11 @@ fn histogram(vals: &[f64], min: f64, max: f64) -> Vec<SchemaBucket> {
         return Vec::new();
     }
     if (max - min).abs() < f64::EPSILON {
-        return vec![SchemaBucket { lo: min, hi: max, count: vals.len() as u64 }];
+        return vec![SchemaBucket {
+            lo: min,
+            hi: max,
+            count: vals.len() as u64,
+        }];
     }
     let width = (max - min) / NUM_BUCKETS as f64;
     let mut counts = [0u64; NUM_BUCKETS];
@@ -226,7 +243,11 @@ fn date_histogram(vals: &[i64], min_ms: i64, max_ms: i64) -> Vec<SchemaDateBucke
         return Vec::new();
     }
     if min_ms == max_ms {
-        return vec![SchemaDateBucket { lo_ms: min_ms, hi_ms: max_ms, count: vals.len() as u64 }];
+        return vec![SchemaDateBucket {
+            lo_ms: min_ms,
+            hi_ms: max_ms,
+            count: vals.len() as u64,
+        }];
     }
     let span = (max_ms - min_ms) as f64 / NUM_BUCKETS as f64;
     let mut counts = [0u64; NUM_BUCKETS];
@@ -260,7 +281,11 @@ fn top_value_label(value: &Bson) -> Option<String> {
             };
             Some(truncated)
         }
-        Bson::Boolean(b) => Some(if *b { "true".to_string() } else { "false".to_string() }),
+        Bson::Boolean(b) => Some(if *b {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        }),
         _ => None,
     }
 }
@@ -363,7 +388,10 @@ mod tests {
         ];
         let report = compute_schema_report(&docs);
         let color = report.fields.iter().find(|f| f.name == "color").unwrap();
-        let top = color.top_values.as_ref().expect("top_values should be present");
+        let top = color
+            .top_values
+            .as_ref()
+            .expect("top_values should be present");
         assert_eq!(top.len(), 3);
         // Sorted by count desc then value asc: blue=2, red=2, green=1
         assert_eq!(top[0].value, "blue");
@@ -377,12 +405,13 @@ mod tests {
     #[test]
     fn top_values_none_for_high_cardinality() {
         // 31 distinct values -> above threshold -> top_values is None.
-        let docs: Vec<Document> = (0..31)
-            .map(|i| doc! { "id": format!("v{i}") })
-            .collect();
+        let docs: Vec<Document> = (0..31).map(|i| doc! { "id": format!("v{i}") }).collect();
         let report = compute_schema_report(&docs);
         let id_field = report.fields.iter().find(|f| f.name == "id").unwrap();
-        assert!(id_field.top_values.is_none(), "top_values should be None for high cardinality");
+        assert!(
+            id_field.top_values.is_none(),
+            "top_values should be None for high cardinality"
+        );
     }
 
     #[test]
@@ -446,11 +475,7 @@ mod tests {
 
     #[test]
     fn mixed_numeric_types_aggregate_into_one_stats() {
-        let docs = vec![
-            doc! { "n": 1i32 },
-            doc! { "n": 2i64 },
-            doc! { "n": 3.5f64 },
-        ];
+        let docs = vec![doc! { "n": 1i32 }, doc! { "n": 2i64 }, doc! { "n": 3.5f64 }];
         let report = compute_schema_report(&docs);
         let n = report.fields.iter().find(|f| f.name == "n").unwrap();
         // Three distinct BSON types recorded.

@@ -243,6 +243,177 @@ export type SqlLanguage =
   | "ruby"
   | "shell";
 
+// ─── Import / Export ────────────────────────────────────────────────
+
+export type ExportSourceMode = "find" | "aggregate" | "documents";
+export type ExportFormat = "json" | "csv";
+export type ExportDestinationKind = "file" | "clipboard";
+export type JsonShape = "array" | "ndjson";
+
+export interface ExportSourceDto {
+  mode: ExportSourceMode;
+  filterJson?: string | null;
+  projectionJson?: string | null;
+  sortJson?: string | null;
+  pipelineJson?: string | null;
+  documentsJson?: string | null;
+}
+
+export interface ExportDestinationDto {
+  kind: ExportDestinationKind;
+  path?: string | null;
+}
+
+export interface ExportOptions {
+  jsonShape: JsonShape;
+  canonical: boolean;
+  csvDelimiter?: string | null;
+  csvHeaders: boolean;
+  csvColumns?: string[] | null;
+  /**
+   * Optional field-mapping table applied as a transform before the sink. When
+   * present and non-empty, the mapping is the complete output schema:
+   * undeclared fields are dropped. For CSV, the sink columns are derived from
+   * the non-skipped `target` names in declared order, overriding `csvColumns`
+   * and the schema sample.
+   */
+  fieldMapping?: FieldMappingEntry[] | null;
+}
+
+export interface ExportRequest {
+  connectionId: string;
+  database: string;
+  collection: string;
+  jobId: string;
+  source: ExportSourceDto;
+  format: ExportFormat;
+  destination: ExportDestinationDto;
+  options: ExportOptions;
+}
+
+export interface ExportResult {
+  jobId: string;
+  processed: number;
+  errors: number;
+  cancelled: boolean;
+  path: string | null;
+  clipboardText: string | null;
+}
+
+export type ImportFormat = "json" | "csv";
+export type ImportSourceKind = "file" | "clipboard";
+export type JsonImportShape = "object" | "array" | "ndjson";
+
+/**
+ * One row in the field-mapping table. `source` is a dotted path into the
+ * incoming document (e.g. `address.city`); `target` is the output field name.
+ * `skip` drops the field; `typeOverride` coerces the BSON value to the declared
+ * type. Matches `FieldMappingEntry` / `TypeOverride` in
+ * `src-tauri/src/mongo/import_export/mapping.rs`.
+ */
+export type TypeOverride =
+  | "string"
+  | "int32"
+  | "int64"
+  | "double"
+  | "boolean"
+  | "date"
+  | "objectId";
+
+export interface FieldMappingEntry {
+  source: string;
+  target: string;
+  skip: boolean;
+  typeOverride?: TypeOverride | null;
+}
+
+/** The set of tokens supported in export destination path placeholders.
+ * Matches `placeholders.rs`. Unknown `${...}` tokens are left intact. */
+export const PLACEHOLDER_TOKENS = [
+  "${date}",
+  "${time}",
+  "${db}",
+  "${collection}",
+  "${profile}",
+] as const;
+export type PlaceholderToken = (typeof PLACEHOLDER_TOKENS)[number];
+
+export interface ImportSourceDto {
+  kind: ImportSourceKind;
+  path?: string | null;
+  clipboardText?: string | null;
+}
+
+export interface ImportOptions {
+  jsonShape: JsonImportShape;
+  csvDelimiter?: string | null;
+  csvHeaders: boolean;
+  batchSize?: number | null;
+  previewRows?: number | null;
+  /** Optional field-mapping table applied before the collection sink. */
+  fieldMapping?: FieldMappingEntry[] | null;
+}
+
+export interface ImportRequest {
+  connectionId: string;
+  database: string;
+  collection: string;
+  jobId: string;
+  source: ImportSourceDto;
+  format: ImportFormat;
+  options: ImportOptions;
+}
+
+export interface ImportRowError {
+  row: number | null;
+  message: string;
+}
+
+export interface FieldInference {
+  name: string;
+  bsonType: string;
+  nullable: boolean;
+  samples: string[];
+}
+
+export interface PreviewImportResult {
+  rows: unknown[];
+  fields: FieldInference[];
+  errors: ImportRowError[];
+}
+
+export interface ImportResult {
+  jobId: string;
+  processed: number;
+  inserted: number;
+  errors: number;
+  cancelled: boolean;
+  rowErrors: ImportRowError[];
+}
+
+export interface CopyTargetDto {
+  database: string;
+  collection: string;
+}
+
+export interface CopyRequest {
+  connectionId: string;
+  database: string;
+  collection: string;
+  jobId: string;
+  source: ExportSourceDto;
+  target: CopyTargetDto;
+  batchSize?: number | null;
+}
+
+export interface CopyResult {
+  jobId: string;
+  processed: number;
+  inserted: number;
+  errors: number;
+  cancelled: boolean;
+}
+
 export interface AppInfo {
   platform: string;
   arch: string;
@@ -871,6 +1042,16 @@ const commands = {
     activeDatabase?: string;
     fallbackDatabase?: string;
   }) => invoke<ShellResponse>("eval_shell", { request }),
+  exportDocuments: (request: ExportRequest) =>
+    invoke<ExportResult>("export_documents", { request }),
+  cancelImportExport: (jobId: string) =>
+    invoke<boolean>("cancel_import_export", { jobId }),
+  copyDocuments: (request: CopyRequest) =>
+    invoke<CopyResult>("copy_documents", { request }),
+  previewImport: (request: ImportRequest) =>
+    invoke<PreviewImportResult>("preview_import", { request }),
+  runImport: (request: ImportRequest) =>
+    invoke<ImportResult>("run_import", { request }),
   shellAutocomplete: (request: {
     connectionId: string;
     textBeforeCursor: string;
