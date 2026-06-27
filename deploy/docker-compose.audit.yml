@@ -1,0 +1,150 @@
+# ─── NoSQLBuddy audit service — server / production deployment ───────────
+# Runs the audit daemon (publisher + attester + reader) from the PUBLISHED
+# image — no source checkout and no `--build` needed. Point it at your own
+# MongoDB replica set and your Stellar keys via .env.audit.
+#
+# Quick start on a server:
+#   1. Copy this file + audit-stack.env.example into a directory, e.g.
+#        sudo mkdir -p /opt/nosqlbuddy-audit && cd /opt/nosqlbuddy-audit
+#   2. cp audit-stack.env.example .env.audit
+#   3. Generate keys + authorize the attester (writes ./attester.key + fills .env.audit):
+#        docker compose --env-file .env.audit run --rm setup
+#   4. Review .env.audit (set PUBLISHER_MONGO_URI / ATTESTER_MONGO_URI to your
+#      replica set) and start the stack:
+#        docker compose --env-file .env.audit up -d
+#
+# IMPORTANT: run EVERY command with `--env-file .env.audit` so the ${VAR}
+# placeholders below are interpolated from that file. Secrets are passed into
+# the containers via `environment:` — they are never baked into the image.
+#
+# MongoDB is YOUR responsibility (managed replica set, Atlas, or self-hosted).
+# This compose does not start a database. If MongoDB runs on the same host,
+# reach it with host.docker.internal (already mapped below), e.g.
+#   PUBLISHER_MONGO_URI=mongodb://host.docker.internal:27017/?replicaSet=rs0
+
+name: nosqlbuddy-audit
+
+x-image: &image ${AUDIT_IMAGE:-ghcr.io/ronnakamoto/nosqlbuddy-audit}:${AUDIT_IMAGE_TAG:-latest}
+
+x-secrets: &secrets
+  STELLAR_SECRET_KEY: ${STELLAR_SECRET_KEY:-}
+  ATTESTER_SECRET_KEY: ${ATTESTER_SECRET_KEY:-}
+  CONTRACT_ID: ${CONTRACT_ID:-}
+  PINATA_API_KEY: ${PINATA_API_KEY:-}
+  PINATA_API_SECRET: ${PINATA_API_SECRET:-}
+  PINATA_GATEWAY_URL: ${PINATA_GATEWAY_URL:-https://gateway.pinata.cloud}
+
+services:
+  # ─── Publisher ────────────────────────────────────────────────────────
+  # Watches the change stream, builds the Merkle tree, manages epochs,
+  # publishes batches to IPFS (Pinata), and commits roots on-chain.
+  publisher:
+    image: *image
+    ports:
+      - "${PUBLISHER_PORT:-9173}:9173"
+    command:
+      - "start"
+      - "--mode"
+      - "publish"
+      - "--mongo-uri"
+      - "${PUBLISHER_MONGO_URI:-mongodb://host.docker.internal:27017/?replicaSet=rs0}"
+      - "--port"
+      - "9173"
+      - "--data-dir"
+      - "/data/publisher"
+      - "--network"
+      - "${STELLAR_NETWORK:-testnet}"
+      - "--rpc-url"
+      - "${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org:443}"
+      - "--ipfs-api"
+      - "${IPFS_API_URL:-http://host.docker.internal:5001}"
+      - "--circuit-dir"
+      - "/opt/circuits"
+      - "--proving-key"
+      - "/opt/circuits/merkle_inclusion.pkey"
+      - "--epoch-threshold"
+      - "${EPOCH_THRESHOLD:-100}"
+    environment: *secrets
+    volumes:
+      - audit-publisher-data:/data/publisher
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # ─── Independent attester ─────────────────────────────────────────────
+  # Connects to the INDEPENDENT replica member, independently computes the
+  # oplog hash, and submits ed25519 attestations on-chain. The ed25519 key
+  # is read from ./attester.key (produced + authorized by the setup wizard).
+  attester:
+    image: *image
+    ports:
+      - "${ATTESTER_PORT:-9174}:9174"
+    command:
+      - "start"
+      - "--mode"
+      - "attest"
+      - "--mongo-uri"
+      - "${ATTESTER_MONGO_URI:-mongodb://host.docker.internal:27019}"
+      - "--port"
+      - "9174"
+      - "--data-dir"
+      - "/data/attester"
+      - "--network"
+      - "${STELLAR_NETWORK:-testnet}"
+      - "--rpc-url"
+      - "${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org:443}"
+    environment: *secrets
+    volumes:
+      - audit-attester-data:/data/attester
+      - ${ATTESTER_KEY_FILE:-./attester.key}:/data/attester/audit/attester.key:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # ─── Reader ───────────────────────────────────────────────────────────
+  # Reads on-chain commitments, rebuilds locally, and verifies roots match.
+  reader:
+    image: *image
+    ports:
+      - "${READER_PORT:-9175}:9175"
+    command:
+      - "start"
+      - "--mode"
+      - "read"
+      - "--mongo-uri"
+      - "${ATTESTER_MONGO_URI:-mongodb://host.docker.internal:27019}"
+      - "--port"
+      - "9175"
+      - "--data-dir"
+      - "/data/reader"
+      - "--network"
+      - "${STELLAR_NETWORK:-testnet}"
+      - "--rpc-url"
+      - "${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org:443}"
+    environment: *secrets
+    volumes:
+      - audit-reader-data:/data/reader
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # ─── One-off setup wizard ─────────────────────────────────────────────
+  # Interactive: generates keypairs, funds testnet accounts, authorizes the
+  # attester, and writes ./attester.key + .env.audit into the current dir
+  # (mounted at /work). Gated behind the "setup" profile so it never starts
+  # with `up`. Run it with:
+  #   docker compose --env-file .env.audit run --rm setup
+  setup:
+    image: *image
+    profiles: ["setup"]
+    working_dir: /work
+    volumes:
+      - .:/work
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: ["setup"]
+
+volumes:
+  audit-publisher-data:
+  audit-attester-data:
+  audit-reader-data:

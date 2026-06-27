@@ -1,0 +1,12 @@
+# Keep the Docker build context small. The audit images only need Rust crate
+# manifests/sources and circuit/contract resources; everything below is either
+# a build output, dependency cache, or unrelated to the image.
+**/target
+node_modules
+dist
+.git
+.github
+*.log
+.env.audit
+.setup.env
+attester.key

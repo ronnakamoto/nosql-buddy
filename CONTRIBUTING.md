@@ -63,3 +63,22 @@ secondary member of any real multi-node replica set (resolvable hostnames):
 NOSQLBUDDY_TEST_RS_SECONDARY_URI="mongodb://<secondary-host>/?replicaSet=<name>" \
   cargo test -p nosql-buddy --test replica_set_write -- --nocapture
 ```
+
+## Releasing the audit service image
+
+The audit daemon ships as a Docker image so users and servers never need the
+Rust toolchain or a source checkout.
+
+- Pushing a `v*` tag (e.g. `v0.1.0`) triggers `.github/workflows/docker-publish.yml`,
+  which builds `audit-service/Dockerfile.audit` and pushes
+  `ghcr.io/ronnakamoto/nosqlbuddy-audit` tagged with the semver, `MAJOR.MINOR`,
+  and `latest`. It also attaches `deploy/docker-compose.audit.yml` and
+  `deploy/audit-stack.env.example` as release assets.
+- Keep the desktop app's crate version (`src-tauri/Cargo.toml`) in step with the
+  release tag: packaged Dev Mode pulls `ghcr.io/ronnakamoto/nosqlbuddy-audit:<crate-version>`
+  (see `published_image_ref` in `src-tauri/src/audit/dev_stack.rs`), so the tag
+  must exist in the registry for that version.
+- The source `docker-compose.audit.yml` builds locally by default
+  (`AUDIT_IMAGE` unset → `nosqlbuddy-audit:dev`); set `AUDIT_IMAGE` to run the
+  published image instead. The server-oriented `deploy/docker-compose.audit.yml`
+  always uses the published image.

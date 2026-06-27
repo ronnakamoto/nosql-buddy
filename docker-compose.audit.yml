@@ -34,7 +34,9 @@ services:
     build:
       context: .
       dockerfile: audit-service/Dockerfile.audit
-    image: nosqlbuddy-audit:dev
+    # Source dev builds use the locally-built `nosqlbuddy-audit:dev`. Packaged
+    # builds set AUDIT_IMAGE to the published image so `up` pulls (no --build).
+    image: ${AUDIT_IMAGE:-nosqlbuddy-audit:dev}
     ports:
       - "9173:9173"
     command:
@@ -74,7 +76,7 @@ services:
   # independently computes the oplog hash, and submits attestations to the
   # contract. This is the trust anchor for oplog completeness verification.
   attester:
-    image: nosqlbuddy-audit:dev
+    image: ${AUDIT_IMAGE:-nosqlbuddy-audit:dev}
     build:
       context: .
       dockerfile: audit-service/Dockerfile.audit
@@ -111,7 +113,7 @@ services:
   # Reads on-chain commitments from Stellar, fetches batches from IPFS,
   # rebuilds the Merkle tree in local sled, and verifies roots match.
   reader:
-    image: nosqlbuddy-audit:dev
+    image: ${AUDIT_IMAGE:-nosqlbuddy-audit:dev}
     build:
       context: .
       dockerfile: audit-service/Dockerfile.audit
@@ -153,7 +155,7 @@ services:
   # an interactive terminal with:
   #   docker compose -f docker-compose.audit.yml run --build --rm setup
   setup:
-    image: nosqlbuddy-audit:dev
+    image: ${AUDIT_IMAGE:-nosqlbuddy-audit:dev}
     build:
       context: .
       dockerfile: audit-service/Dockerfile.audit
@@ -161,6 +163,15 @@ services:
     working_dir: /work
     volumes:
       - .:/work
+    # The desktop "Set up" flow writes a temporary .setup.env (Stellar network,
+    # optional operator secret keys, Pinata creds) into the stack dir before
+    # running this service, then deletes it afterward. Loaded here so the keys
+    # reach the wizard as container env vars without relying on the
+    # `run --env-file` flag (unsupported on older Compose releases). Optional so
+    # normal `up` works when the file is absent.
+    env_file:
+      - path: .setup.env
+        required: false
     command: ["setup"]
 
 volumes:

@@ -25,15 +25,16 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use stellar_xdr::curr::{
     AccountId, ContractId, DecoratedSignature, Hash, HostFunction, InvokeContractArgs,
-    InvokeHostFunctionOp, Limits, Memo, MuxedAccount, Operation, OperationBody,
-    Preconditions, PublicKey, ReadXdr, ScAddress, ScBytes, ScMap, ScMapEntry, ScString,
-    ScSymbol, ScVal, ScVec, SequenceNumber, Signature, SignatureHint,
-    SorobanAuthorizationEntry, SorobanTransactionData, Transaction, TransactionEnvelope,
-    TransactionExt, TransactionSignaturePayload, TransactionSignaturePayloadTaggedTransaction,
-    TransactionV1Envelope, Uint256, VecM, WriteXdr,
+    InvokeHostFunctionOp, Limits, Memo, MuxedAccount, Operation, OperationBody, Preconditions,
+    PublicKey, ReadXdr, ScAddress, ScBytes, ScMap, ScMapEntry, ScString, ScSymbol, ScVal, ScVec,
+    SequenceNumber, Signature, SignatureHint, SorobanAuthorizationEntry, SorobanTransactionData,
+    Transaction, TransactionEnvelope, TransactionExt, TransactionSignaturePayload,
+    TransactionSignaturePayloadTaggedTransaction, TransactionV1Envelope, Uint256, VecM, WriteXdr,
 };
 
-use crate::audit::stellar::{CommitResult, OnChainOplogCommitment, OnChainRoot, VerifyInclusionResult};
+use crate::audit::stellar::{
+    CommitResult, OnChainOplogCommitment, OnChainRoot, VerifyInclusionResult,
+};
 use crate::error::{AuditError, AuditResult};
 
 /// The Stellar testnet network passphrase.
@@ -210,15 +211,9 @@ fn build_invoke_transaction(
     let contract_addr = ScAddress::Contract(ContractId(Hash(contract_arr)));
 
     // Build function name as ScSymbol.
-    let symbol = ScSymbol(
-        function_name
-            .as_bytes()
-            .to_vec()
-            .try_into()
-            .map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("invalid function name: {e}"))
-            })?,
-    );
+    let symbol = ScSymbol(function_name.as_bytes().to_vec().try_into().map_err(
+        |e: stellar_xdr::curr::Error| AuditError::Validation(format!("invalid function name: {e}")),
+    )?);
 
     // Build args VecM.
     let args_vecm: VecM<ScVal> = args.try_into().map_err(|e: stellar_xdr::curr::Error| {
@@ -242,9 +237,8 @@ fn build_invoke_transaction(
     };
 
     // Build operations VecM.
-    let operations: VecM<Operation, 100> = vec![op]
-        .try_into()
-        .map_err(|e: stellar_xdr::curr::Error| {
+    let operations: VecM<Operation, 100> =
+        vec![op].try_into().map_err(|e: stellar_xdr::curr::Error| {
             AuditError::Validation(format!("too many operations: {e}"))
         })?;
 
@@ -271,10 +265,7 @@ pub fn is_contract_function_not_found_error(error: &AuditError) -> bool {
 }
 
 /// Simulate a transaction via the Soroban RPC `simulateTransaction` method.
-async fn simulate_transaction(
-    rpc_url: &str,
-    tx: &Transaction,
-) -> AuditResult<SimulationResult> {
+async fn simulate_transaction(rpc_url: &str, tx: &Transaction) -> AuditResult<SimulationResult> {
     // Encode the transaction envelope to XDR, then base64.
     let envelope = TransactionEnvelope::Tx(TransactionV1Envelope {
         tx: tx.clone(),
@@ -315,11 +306,12 @@ async fn simulate_transaction(
         .await
         .map_err(|e| AuditError::Validation(format!("failed to read RPC response body: {e}")))?;
 
-    let result: JsonRpcResponse<SimulationResult> = serde_json::from_str(&body)
-        .map_err(|e| AuditError::Validation(format!(
+    let result: JsonRpcResponse<SimulationResult> = serde_json::from_str(&body).map_err(|e| {
+        AuditError::Validation(format!(
             "failed to parse RPC response: {e}\nResponse body: {}",
             &body[..body.len().min(2000)]
-        )))?;
+        ))
+    })?;
 
     if let Some(err) = result.error {
         return Err(AuditError::Validation(format!(
@@ -328,9 +320,9 @@ async fn simulate_transaction(
         )));
     }
 
-    let mut sim = result
-        .result
-        .ok_or_else(|| AuditError::Validation("simulateTransaction returned no result".to_string()))?;
+    let mut sim = result.result.ok_or_else(|| {
+        AuditError::Validation("simulateTransaction returned no result".to_string())
+    })?;
 
     // Check for simulation-level error (the RPC returns this inside `result`,
     // not as a top-level JSON-RPC error).
@@ -344,12 +336,10 @@ async fn simulate_transaction(
         } else if sim_err.contains("InvalidAction") || sim_err.contains("not authorized") {
             format!("Contract call not authorized: {sim_err}")
         } else {
-            // Include the raw error in debug builds only; in release, summarise.
-            if cfg!(debug_assertions) {
-                format!("Contract invocation failed: {sim_err}")
-            } else {
-                "Contract invocation failed. Check the RPC endpoint and contract ID in settings.".to_string()
-            }
+            // Surface the raw Soroban host error — it is not sensitive and is
+            // far more actionable than a generic message when setup or a commit
+            // fails (e.g. propagation timing, missing contract instance).
+            format!("Contract invocation failed: {sim_err}")
         };
         return Err(AuditError::Validation(msg));
     }
@@ -357,7 +347,8 @@ async fn simulate_transaction(
     if sim.transaction_data.is_none() {
         return Err(AuditError::Validation(
             "Contract call returned no data. The contract may not be deployed at the \
-             configured contract ID, or the RPC node may be unreachable.".to_string(),
+             configured contract ID, or the RPC node may be unreachable."
+                .to_string(),
         ));
     }
 
@@ -374,7 +365,11 @@ struct SimulationResult {
     /// Filled in by simulate_transaction after validation (callers use this).
     #[serde(skip)]
     transaction_data_owned: Option<String>,
-    #[serde(rename = "minResourceFee", default, deserialize_with = "deserialize_optional_sequence_string")]
+    #[serde(
+        rename = "minResourceFee",
+        default,
+        deserialize_with = "deserialize_optional_sequence_string"
+    )]
     min_resource_fee: Option<i64>,
     #[serde(default)]
     results: Vec<SimulationResultEntry>,
@@ -453,11 +448,12 @@ async fn send_transaction(rpc_url: &str, envelope: &TransactionEnvelope) -> Audi
         .await
         .map_err(|e| AuditError::Validation(format!("failed to read RPC response body: {e}")))?;
 
-    let result: JsonRpcResponse<SendResult> = serde_json::from_str(&body)
-        .map_err(|e| AuditError::Validation(format!(
+    let result: JsonRpcResponse<SendResult> = serde_json::from_str(&body).map_err(|e| {
+        AuditError::Validation(format!(
             "failed to parse RPC response: {e}\nResponse body: {}",
             &body[..body.len().min(2000)]
-        )))?;
+        ))
+    })?;
 
     if let Some(err) = result.error {
         return Err(AuditError::Validation(format!(
@@ -537,14 +533,11 @@ fn sign_transaction(
 
     Ok(DecoratedSignature {
         hint,
-        signature: Signature(
-            sig_bytes
-                .to_vec()
-                .try_into()
-                .map_err(|e: stellar_xdr::curr::Error| {
-                    AuditError::Validation(format!("invalid signature length: {e}"))
-                })?,
-        ),
+        signature: Signature(sig_bytes.to_vec().try_into().map_err(
+            |e: stellar_xdr::curr::Error| {
+                AuditError::Validation(format!("invalid signature length: {e}"))
+            },
+        )?),
     })
 }
 
@@ -581,24 +574,13 @@ pub async fn commit_root_native(
     let root_bytes = hex::decode(root_hex)
         .map_err(|e| AuditError::Validation(format!("invalid root hex: {e}")))?;
 
-    let root_scval = ScVal::Bytes(ScBytes(
-        root_bytes
-            .clone()
-            .try_into()
-            .map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("invalid root bytes: {e}"))
-            })?,
-    ));
+    let root_scval = ScVal::Bytes(ScBytes(root_bytes.clone().try_into().map_err(
+        |e: stellar_xdr::curr::Error| AuditError::Validation(format!("invalid root bytes: {e}")),
+    )?));
 
-    let metadata_scval = ScVal::String(ScString(
-        metadata
-            .as_bytes()
-            .to_vec()
-            .try_into()
-            .map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("invalid metadata: {e}"))
-            })?,
-    ));
+    let metadata_scval = ScVal::String(ScString(metadata.as_bytes().to_vec().try_into().map_err(
+        |e: stellar_xdr::curr::Error| AuditError::Validation(format!("invalid metadata: {e}")),
+    )?));
 
     let args = vec![root_scval, metadata_scval];
 
@@ -629,23 +611,26 @@ pub async fn commit_root_native(
 
     // 6. Attach auth entries if the simulation returned any.
     if !sim_result.results.is_empty() && !sim_result.results[0].auth.is_empty() {
-        let auth_entries: Result<Vec<SorobanAuthorizationEntry>, AuditError> = sim_result.results[0]
-            .auth
-            .iter()
-            .map(|auth_b64| {
-                let auth_xdr = base64::engine::general_purpose::STANDARD
-                    .decode(auth_b64)
-                    .map_err(|e| AuditError::Validation(format!("base64 decode auth: {e}")))?;
-                SorobanAuthorizationEntry::from_xdr(&auth_xdr, Limits::none())
-                    .map_err(|e| AuditError::Validation(format!("decode auth: {e}")))
-            })
-            .collect();
+        let auth_entries: Result<Vec<SorobanAuthorizationEntry>, AuditError> = sim_result.results
+            [0]
+        .auth
+        .iter()
+        .map(|auth_b64| {
+            let auth_xdr = base64::engine::general_purpose::STANDARD
+                .decode(auth_b64)
+                .map_err(|e| AuditError::Validation(format!("base64 decode auth: {e}")))?;
+            SorobanAuthorizationEntry::from_xdr(&auth_xdr, Limits::none())
+                .map_err(|e| AuditError::Validation(format!("decode auth: {e}")))
+        })
+        .collect();
 
         let auth_entries = auth_entries?;
         let auth_vecm: VecM<SorobanAuthorizationEntry> =
-            auth_entries.try_into().map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("too many auth entries: {e}"))
-            })?;
+            auth_entries
+                .try_into()
+                .map_err(|e: stellar_xdr::curr::Error| {
+                    AuditError::Validation(format!("too many auth entries: {e}"))
+                })?;
 
         // Rebuild the operations with auth attached. VecM doesn't impl DerefMut,
         // so we reconstruct the operation list.
@@ -653,16 +638,13 @@ pub async fn commit_root_native(
         if let OperationBody::InvokeHostFunction(ref mut invoke_op) = ops[0].body {
             invoke_op.auth = auth_vecm;
         }
-        signed_tx.operations = ops
-            .try_into()
-            .map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("too many operations: {e}"))
-            })?;
+        signed_tx.operations = ops.try_into().map_err(|e: stellar_xdr::curr::Error| {
+            AuditError::Validation(format!("too many operations: {e}"))
+        })?;
     }
 
     // 7. Sign the transaction.
-    let decorated_sig =
-        sign_transaction(&signed_tx, &keypair.signing_key, network_passphrase)?;
+    let decorated_sig = sign_transaction(&signed_tx, &keypair.signing_key, network_passphrase)?;
 
     // 8. Build the signed envelope.
     let signatures: VecM<DecoratedSignature, 20> =
@@ -729,34 +711,21 @@ pub async fn commit_root_with_oplog_native(
 
     let root_bytes = hex::decode(root_hex)
         .map_err(|e| AuditError::Validation(format!("invalid root hex: {e}")))?;
-    let root_scval = ScVal::Bytes(ScBytes(
-        root_bytes
-            .clone()
-            .try_into()
-            .map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("invalid root bytes: {e}"))
-            })?,
-    ));
+    let root_scval = ScVal::Bytes(ScBytes(root_bytes.clone().try_into().map_err(
+        |e: stellar_xdr::curr::Error| AuditError::Validation(format!("invalid root bytes: {e}")),
+    )?));
 
     let oplog_root_bytes = hex::decode(oplog_root_hex)
         .map_err(|e| AuditError::Validation(format!("invalid oplog root hex: {e}")))?;
-    let oplog_root_scval = ScVal::Bytes(ScBytes(
-        oplog_root_bytes
-            .try_into()
-            .map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("invalid oplog root bytes: {e}"))
-            })?,
-    ));
+    let oplog_root_scval = ScVal::Bytes(ScBytes(oplog_root_bytes.try_into().map_err(
+        |e: stellar_xdr::curr::Error| {
+            AuditError::Validation(format!("invalid oplog root bytes: {e}"))
+        },
+    )?));
 
-    let metadata_scval = ScVal::String(ScString(
-        metadata
-            .as_bytes()
-            .to_vec()
-            .try_into()
-            .map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("invalid metadata: {e}"))
-            })?,
-    ));
+    let metadata_scval = ScVal::String(ScString(metadata.as_bytes().to_vec().try_into().map_err(
+        |e: stellar_xdr::curr::Error| AuditError::Validation(format!("invalid metadata: {e}")),
+    )?));
 
     let args = vec![
         root_scval,
@@ -789,37 +758,37 @@ pub async fn commit_root_with_oplog_native(
     signed_tx.fee = sim_result.max_fee_stroops();
 
     if !sim_result.results.is_empty() && !sim_result.results[0].auth.is_empty() {
-        let auth_entries: Result<Vec<SorobanAuthorizationEntry>, AuditError> = sim_result.results[0]
-            .auth
-            .iter()
-            .map(|auth_b64| {
-                let auth_xdr = base64::engine::general_purpose::STANDARD
-                    .decode(auth_b64)
-                    .map_err(|e| AuditError::Validation(format!("base64 decode auth: {e}")))?;
-                SorobanAuthorizationEntry::from_xdr(&auth_xdr, Limits::none())
-                    .map_err(|e| AuditError::Validation(format!("decode auth: {e}")))
-            })
-            .collect();
+        let auth_entries: Result<Vec<SorobanAuthorizationEntry>, AuditError> = sim_result.results
+            [0]
+        .auth
+        .iter()
+        .map(|auth_b64| {
+            let auth_xdr = base64::engine::general_purpose::STANDARD
+                .decode(auth_b64)
+                .map_err(|e| AuditError::Validation(format!("base64 decode auth: {e}")))?;
+            SorobanAuthorizationEntry::from_xdr(&auth_xdr, Limits::none())
+                .map_err(|e| AuditError::Validation(format!("decode auth: {e}")))
+        })
+        .collect();
 
         let auth_entries = auth_entries?;
         let auth_vecm: VecM<SorobanAuthorizationEntry> =
-            auth_entries.try_into().map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("too many auth entries: {e}"))
-            })?;
+            auth_entries
+                .try_into()
+                .map_err(|e: stellar_xdr::curr::Error| {
+                    AuditError::Validation(format!("too many auth entries: {e}"))
+                })?;
 
         let mut ops = signed_tx.operations.to_vec();
         if let OperationBody::InvokeHostFunction(ref mut invoke_op) = ops[0].body {
             invoke_op.auth = auth_vecm;
         }
-        signed_tx.operations = ops
-            .try_into()
-            .map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("too many operations: {e}"))
-            })?;
+        signed_tx.operations = ops.try_into().map_err(|e: stellar_xdr::curr::Error| {
+            AuditError::Validation(format!("too many operations: {e}"))
+        })?;
     }
 
-    let decorated_sig =
-        sign_transaction(&signed_tx, &keypair.signing_key, network_passphrase)?;
+    let decorated_sig = sign_transaction(&signed_tx, &keypair.signing_key, network_passphrase)?;
 
     let signatures: VecM<DecoratedSignature, 20> =
         vec![decorated_sig]
@@ -885,13 +854,11 @@ pub async fn attest_oplog_native(
 
     let signature_bytes = hex::decode(signature_hex)
         .map_err(|e| AuditError::Validation(format!("invalid signature hex: {e}")))?;
-    let signature_scval = ScVal::Bytes(ScBytes(
-        signature_bytes
-            .try_into()
-            .map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("invalid signature bytes: {e}"))
-            })?,
-    ));
+    let signature_scval = ScVal::Bytes(ScBytes(signature_bytes.try_into().map_err(
+        |e: stellar_xdr::curr::Error| {
+            AuditError::Validation(format!("invalid signature bytes: {e}"))
+        },
+    )?));
 
     let args = vec![
         attester_address_scval,
@@ -921,37 +888,41 @@ pub async fn attest_oplog_native(
     signed_tx.fee = sim_result.max_fee_stroops();
 
     if !sim_result.results.is_empty() && !sim_result.results[0].auth.is_empty() {
-        let auth_entries: Result<Vec<SorobanAuthorizationEntry>, AuditError> = sim_result.results[0]
-            .auth
-            .iter()
-            .map(|auth_b64| {
-                let auth_xdr = base64::engine::general_purpose::STANDARD
-                    .decode(auth_b64)
-                    .map_err(|e| AuditError::Validation(format!("base64 decode auth: {e}")))?;
-                SorobanAuthorizationEntry::from_xdr(&auth_xdr, Limits::none())
-                    .map_err(|e| AuditError::Validation(format!("decode auth: {e}")))
-            })
-            .collect();
+        let auth_entries: Result<Vec<SorobanAuthorizationEntry>, AuditError> = sim_result.results
+            [0]
+        .auth
+        .iter()
+        .map(|auth_b64| {
+            let auth_xdr = base64::engine::general_purpose::STANDARD
+                .decode(auth_b64)
+                .map_err(|e| AuditError::Validation(format!("base64 decode auth: {e}")))?;
+            SorobanAuthorizationEntry::from_xdr(&auth_xdr, Limits::none())
+                .map_err(|e| AuditError::Validation(format!("decode auth: {e}")))
+        })
+        .collect();
 
         let auth_entries = auth_entries?;
         let auth_vecm: VecM<SorobanAuthorizationEntry> =
-            auth_entries.try_into().map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("too many auth entries: {e}"))
-            })?;
+            auth_entries
+                .try_into()
+                .map_err(|e: stellar_xdr::curr::Error| {
+                    AuditError::Validation(format!("too many auth entries: {e}"))
+                })?;
 
         let mut ops = signed_tx.operations.to_vec();
         if let OperationBody::InvokeHostFunction(ref mut invoke_op) = ops[0].body {
             invoke_op.auth = auth_vecm;
         }
-        signed_tx.operations = ops
-            .try_into()
-            .map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("too many operations: {e}"))
-            })?;
+        signed_tx.operations = ops.try_into().map_err(|e: stellar_xdr::curr::Error| {
+            AuditError::Validation(format!("too many operations: {e}"))
+        })?;
     }
 
-    let decorated_sig =
-        sign_transaction(&signed_tx, &attester_keypair.signing_key, network_passphrase)?;
+    let decorated_sig = sign_transaction(
+        &signed_tx,
+        &attester_keypair.signing_key,
+        network_passphrase,
+    )?;
 
     let signatures: VecM<DecoratedSignature, 20> =
         vec![decorated_sig]
@@ -998,14 +969,9 @@ pub async fn verify_inclusion_native(
     // 2. Build ScVal args: root (Bytes), proof (Map), vk (Map).
     let root_bytes = hex::decode(root_hex)
         .map_err(|e| AuditError::Validation(format!("invalid root hex: {e}")))?;
-    let root_scval = ScVal::Bytes(ScBytes(
-        root_bytes
-            .clone()
-            .try_into()
-            .map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("invalid root bytes: {e}"))
-            })?,
-    ));
+    let root_scval = ScVal::Bytes(ScBytes(root_bytes.clone().try_into().map_err(
+        |e: stellar_xdr::curr::Error| AuditError::Validation(format!("invalid root bytes: {e}")),
+    )?));
 
     let proof_scval = build_proof_scval(proof_a_hex, proof_b_hex, proof_c_hex)?;
     let vk_scval = build_verifying_key_scval(
@@ -1044,38 +1010,38 @@ pub async fn verify_inclusion_native(
 
     // 6. Attach auth entries if the simulation returned any.
     if !sim_result.results.is_empty() && !sim_result.results[0].auth.is_empty() {
-        let auth_entries: Result<Vec<SorobanAuthorizationEntry>, AuditError> = sim_result.results[0]
-            .auth
-            .iter()
-            .map(|auth_b64| {
-                let auth_xdr = base64::engine::general_purpose::STANDARD
-                    .decode(auth_b64)
-                    .map_err(|e| AuditError::Validation(format!("base64 decode auth: {e}")))?;
-                SorobanAuthorizationEntry::from_xdr(&auth_xdr, Limits::none())
-                    .map_err(|e| AuditError::Validation(format!("decode auth: {e}")))
-            })
-            .collect();
+        let auth_entries: Result<Vec<SorobanAuthorizationEntry>, AuditError> = sim_result.results
+            [0]
+        .auth
+        .iter()
+        .map(|auth_b64| {
+            let auth_xdr = base64::engine::general_purpose::STANDARD
+                .decode(auth_b64)
+                .map_err(|e| AuditError::Validation(format!("base64 decode auth: {e}")))?;
+            SorobanAuthorizationEntry::from_xdr(&auth_xdr, Limits::none())
+                .map_err(|e| AuditError::Validation(format!("decode auth: {e}")))
+        })
+        .collect();
 
         let auth_entries = auth_entries?;
         let auth_vecm: VecM<SorobanAuthorizationEntry> =
-            auth_entries.try_into().map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("too many auth entries: {e}"))
-            })?;
+            auth_entries
+                .try_into()
+                .map_err(|e: stellar_xdr::curr::Error| {
+                    AuditError::Validation(format!("too many auth entries: {e}"))
+                })?;
 
         let mut ops = signed_tx.operations.to_vec();
         if let OperationBody::InvokeHostFunction(ref mut invoke_op) = ops[0].body {
             invoke_op.auth = auth_vecm;
         }
-        signed_tx.operations = ops
-            .try_into()
-            .map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("too many operations: {e}"))
-            })?;
+        signed_tx.operations = ops.try_into().map_err(|e: stellar_xdr::curr::Error| {
+            AuditError::Validation(format!("too many operations: {e}"))
+        })?;
     }
 
     // 7. Sign the transaction.
-    let decorated_sig =
-        sign_transaction(&signed_tx, &keypair.signing_key, network_passphrase)?;
+    let decorated_sig = sign_transaction(&signed_tx, &keypair.signing_key, network_passphrase)?;
 
     let signatures: VecM<DecoratedSignature, 20> =
         vec![decorated_sig]
@@ -1116,9 +1082,12 @@ pub async fn verify_inclusion_native(
 /// Build a Soroban symbol ScVal from a string.
 fn sc_symbol(s: &str) -> AuditResult<ScVal> {
     Ok(ScVal::Symbol(ScSymbol(
-        s.as_bytes().to_vec().try_into().map_err(|e: stellar_xdr::curr::Error| {
-            AuditError::Validation(format!("invalid symbol '{s}': {e}"))
-        })?,
+        s.as_bytes()
+            .to_vec()
+            .try_into()
+            .map_err(|e: stellar_xdr::curr::Error| {
+                AuditError::Validation(format!("invalid symbol '{s}': {e}"))
+            })?,
     )))
 }
 
@@ -1167,9 +1136,18 @@ fn hex_to_scbytes(label: &str, hex_str: &str) -> AuditResult<ScBytes> {
 /// Build a Soroban `Proof` struct as `ScVal::Map` from hex-encoded point bytes.
 fn build_proof_scval(a_hex: &str, b_hex: &str, c_hex: &str) -> AuditResult<ScVal> {
     build_sorted_scmap(vec![
-        (sc_symbol("a")?, ScVal::Bytes(hex_to_scbytes("proof.a", a_hex)?)),
-        (sc_symbol("b")?, ScVal::Bytes(hex_to_scbytes("proof.b", b_hex)?)),
-        (sc_symbol("c")?, ScVal::Bytes(hex_to_scbytes("proof.c", c_hex)?)),
+        (
+            sc_symbol("a")?,
+            ScVal::Bytes(hex_to_scbytes("proof.a", a_hex)?),
+        ),
+        (
+            sc_symbol("b")?,
+            ScVal::Bytes(hex_to_scbytes("proof.b", b_hex)?),
+        ),
+        (
+            sc_symbol("c")?,
+            ScVal::Bytes(hex_to_scbytes("proof.c", c_hex)?),
+        ),
     ])
 }
 
@@ -1186,19 +1164,27 @@ fn build_verifying_key_scval(
         .map(|h| Ok(ScVal::Bytes(hex_to_scbytes("vk.ic", h)?)))
         .collect::<AuditResult<Vec<ScVal>>>()?;
 
-    let ic_vec = ScVec(
-        ic_vals
-            .try_into()
-            .map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("too many ic entries: {e}"))
-            })?,
-    );
+    let ic_vec = ScVec(ic_vals.try_into().map_err(|e: stellar_xdr::curr::Error| {
+        AuditError::Validation(format!("too many ic entries: {e}"))
+    })?);
 
     build_sorted_scmap(vec![
-        (sc_symbol("alpha")?, ScVal::Bytes(hex_to_scbytes("vk.alpha", alpha_hex)?)),
-        (sc_symbol("beta")?, ScVal::Bytes(hex_to_scbytes("vk.beta", beta_hex)?)),
-        (sc_symbol("gamma")?, ScVal::Bytes(hex_to_scbytes("vk.gamma", gamma_hex)?)),
-        (sc_symbol("delta")?, ScVal::Bytes(hex_to_scbytes("vk.delta", delta_hex)?)),
+        (
+            sc_symbol("alpha")?,
+            ScVal::Bytes(hex_to_scbytes("vk.alpha", alpha_hex)?),
+        ),
+        (
+            sc_symbol("beta")?,
+            ScVal::Bytes(hex_to_scbytes("vk.beta", beta_hex)?),
+        ),
+        (
+            sc_symbol("gamma")?,
+            ScVal::Bytes(hex_to_scbytes("vk.gamma", gamma_hex)?),
+        ),
+        (
+            sc_symbol("delta")?,
+            ScVal::Bytes(hex_to_scbytes("vk.delta", delta_hex)?),
+        ),
         (sc_symbol("ic")?, ScVal::Vec(Some(ic_vec))),
     ])
 }
@@ -1483,7 +1469,9 @@ pub async fn get_root_history_native(
             if let ScVal::Symbol(s) = &kv.key {
                 match String::from_utf8_lossy(s.0.as_slice()).as_ref() {
                     "sequence" => {
-                        if let ScVal::U64(v) = &kv.val { sequence = *v; }
+                        if let ScVal::U64(v) = &kv.val {
+                            sequence = *v;
+                        }
                     }
                     "root" => {
                         if let ScVal::Bytes(b) = &kv.val {
@@ -1491,7 +1479,9 @@ pub async fn get_root_history_native(
                         }
                     }
                     "timestamp" => {
-                        if let ScVal::U64(v) = &kv.val { timestamp = *v; }
+                        if let ScVal::U64(v) = &kv.val {
+                            timestamp = *v;
+                        }
                     }
                     "metadata" => {
                         if let ScVal::String(s) = &kv.val {
@@ -1503,7 +1493,12 @@ pub async fn get_root_history_native(
             }
         }
         if !root_hex.is_empty() {
-            result.push(OnChainRoot { sequence, root_hex, timestamp, metadata });
+            result.push(OnChainRoot {
+                sequence,
+                root_hex,
+                timestamp,
+                metadata,
+            });
         }
     }
     Ok(result)
@@ -1557,7 +1552,9 @@ pub async fn get_oplog_attestations_native(
                     // The easiest way is to re-encode it as Strkey.
                     if let ScVal::Address(ScAddress::Account(account_id)) = &kv.val {
                         // AccountId wraps PublicKey::PublicKeyTypeEd25519(Uint256).
-                        if let stellar_xdr::curr::PublicKey::PublicKeyTypeEd25519(key) = &account_id.0 {
+                        if let stellar_xdr::curr::PublicKey::PublicKeyTypeEd25519(key) =
+                            &account_id.0
+                        {
                             // Stellar G-address strkey version byte is 0x30 (48).
                             attesters.push(encode_strkey(0x30, &key.0));
                         }
@@ -1601,33 +1598,34 @@ fn attach_soroban_data_and_auth(
 
     // Attach auth entries if the simulation returned any.
     if !sim_result.results.is_empty() && !sim_result.results[0].auth.is_empty() {
-        let auth_entries: Result<Vec<SorobanAuthorizationEntry>, AuditError> = sim_result.results[0]
-            .auth
-            .iter()
-            .map(|auth_b64| {
-                let auth_xdr = base64::engine::general_purpose::STANDARD
-                    .decode(auth_b64)
-                    .map_err(|e| AuditError::Validation(format!("base64 decode auth: {e}")))?;
-                SorobanAuthorizationEntry::from_xdr(&auth_xdr, Limits::none())
-                    .map_err(|e| AuditError::Validation(format!("decode auth: {e}")))
-            })
-            .collect();
+        let auth_entries: Result<Vec<SorobanAuthorizationEntry>, AuditError> = sim_result.results
+            [0]
+        .auth
+        .iter()
+        .map(|auth_b64| {
+            let auth_xdr = base64::engine::general_purpose::STANDARD
+                .decode(auth_b64)
+                .map_err(|e| AuditError::Validation(format!("base64 decode auth: {e}")))?;
+            SorobanAuthorizationEntry::from_xdr(&auth_xdr, Limits::none())
+                .map_err(|e| AuditError::Validation(format!("decode auth: {e}")))
+        })
+        .collect();
 
         let auth_entries = auth_entries?;
         let auth_vecm: VecM<SorobanAuthorizationEntry> =
-            auth_entries.try_into().map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("too many auth entries: {e}"))
-            })?;
+            auth_entries
+                .try_into()
+                .map_err(|e: stellar_xdr::curr::Error| {
+                    AuditError::Validation(format!("too many auth entries: {e}"))
+                })?;
 
         let mut ops = signed_tx.operations.to_vec();
         if let OperationBody::InvokeHostFunction(ref mut invoke_op) = ops[0].body {
             invoke_op.auth = auth_vecm;
         }
-        signed_tx.operations = ops
-            .try_into()
-            .map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("too many operations: {e}"))
-            })?;
+        signed_tx.operations = ops.try_into().map_err(|e: stellar_xdr::curr::Error| {
+            AuditError::Validation(format!("too many operations: {e}"))
+        })?;
     }
 
     Ok(signed_tx)
@@ -1687,7 +1685,13 @@ pub async fn initialize_contract_native(
 
     let sim_result = simulate_transaction(rpc_url, &tx).await?;
     let signed_tx = attach_soroban_data_and_auth(&tx, &sim_result)?;
-    sign_and_send(&signed_tx, &admin_keypair.signing_key, network_passphrase, rpc_url).await?;
+    sign_and_send(
+        &signed_tx,
+        &admin_keypair.signing_key,
+        network_passphrase,
+        rpc_url,
+    )
+    .await?;
     Ok(())
 }
 
@@ -1712,12 +1716,11 @@ pub async fn authorize_attester_native(
     let sequence = get_account_sequence(horizon_url, &account_id).await?;
 
     // Decode the attester's G... address to public key bytes.
-    let attester_pubkey_bytes = decode_account_id_strkey(attester_address)
-        .ok_or_else(|| {
-            AuditError::Validation(format!(
-                "invalid attester Stellar address (expected G... strkey): {attester_address}"
-            ))
-        })?;
+    let attester_pubkey_bytes = decode_account_id_strkey(attester_address).ok_or_else(|| {
+        AuditError::Validation(format!(
+            "invalid attester Stellar address (expected G... strkey): {attester_address}"
+        ))
+    })?;
 
     let attester_addr_scval = ScVal::Address(ScAddress::Account(AccountId(
         PublicKey::PublicKeyTypeEd25519(Uint256(attester_pubkey_bytes)),
@@ -1726,13 +1729,9 @@ pub async fn authorize_attester_native(
     let pubkey_bytes = hex::decode(attester_ed25519_pubkey_hex)
         .map_err(|e| AuditError::Validation(format!("invalid ed25519 pubkey hex: {e}")))?;
     // Soroban SDK's BytesN<32> maps to ScVal::Bytes in the XDR layer.
-    let pubkey_scval = ScVal::Bytes(ScBytes(
-        pubkey_bytes
-            .try_into()
-            .map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("invalid pubkey bytes: {e}"))
-            })?,
-    ));
+    let pubkey_scval = ScVal::Bytes(ScBytes(pubkey_bytes.try_into().map_err(
+        |e: stellar_xdr::curr::Error| AuditError::Validation(format!("invalid pubkey bytes: {e}")),
+    )?));
 
     let args = vec![attester_addr_scval, pubkey_scval];
 
@@ -1747,7 +1746,13 @@ pub async fn authorize_attester_native(
 
     let sim_result = simulate_transaction(rpc_url, &tx).await?;
     let signed_tx = attach_soroban_data_and_auth(&tx, &sim_result)?;
-    sign_and_send(&signed_tx, &admin_keypair.signing_key, network_passphrase, rpc_url).await?;
+    sign_and_send(
+        &signed_tx,
+        &admin_keypair.signing_key,
+        network_passphrase,
+        rpc_url,
+    )
+    .await?;
     Ok(())
 }
 
@@ -1819,9 +1824,14 @@ pub fn decode_contract_id(contract_id: &str) -> AuditResult<[u8; 32]> {
         let payload = &decoded[..33];
         let checksum = &decoded[33..];
         let expected_checksum = crc16_xmodem(payload);
-        let expected_le = [(expected_checksum & 0xff) as u8, (expected_checksum >> 8) as u8];
+        let expected_le = [
+            (expected_checksum & 0xff) as u8,
+            (expected_checksum >> 8) as u8,
+        ];
         if checksum != expected_le {
-            return Err(AuditError::Validation("contract ID checksum mismatch".to_string()));
+            return Err(AuditError::Validation(
+                "contract ID checksum mismatch".to_string(),
+            ));
         }
         let mut result = [0u8; 32];
         result.copy_from_slice(&decoded[1..33]);
@@ -1900,7 +1910,9 @@ pub fn base32_decode(s: &str) -> Option<Vec<u8>> {
 
     for ch in s.chars() {
         let byte = ch as u8;
-        let index = ALPHABET.iter().position(|&c| c == byte.to_ascii_uppercase())?;
+        let index = ALPHABET
+            .iter()
+            .position(|&c| c == byte.to_ascii_uppercase())?;
         buffer = (buffer << 5) | index as u32;
         bits_left += 5;
         if bits_left >= 8 {
@@ -2064,8 +2076,7 @@ mod tests {
 
     #[test]
     fn test_contract_function_not_found_error_detection() {
-        let classified =
-            AuditError::Validation(CONTRACT_FUNCTION_NOT_FOUND_MESSAGE.to_string());
+        let classified = AuditError::Validation(CONTRACT_FUNCTION_NOT_FOUND_MESSAGE.to_string());
         assert!(is_contract_function_not_found_error(&classified));
 
         let raw = AuditError::Validation(
@@ -2118,7 +2129,9 @@ mod tests {
                 val: ScVal::Bytes(ScBytes(root_bytes.try_into().unwrap())),
             },
             ScMapEntry {
-                key: ScVal::Symbol(ScSymbol("timestamp".as_bytes().to_vec().try_into().unwrap())),
+                key: ScVal::Symbol(ScSymbol(
+                    "timestamp".as_bytes().to_vec().try_into().unwrap(),
+                )),
                 val: ScVal::U64(1700000000),
             },
             ScMapEntry {
@@ -2130,9 +2143,7 @@ mod tests {
         let root_map_scval = ScVal::Map(Some(ScMap(map_entries.try_into().unwrap())));
 
         // Wrap in Vec([map]) — this is how Soroban encodes Some(T).
-        let option_some = ScVal::Vec(Some(ScVec(
-            vec![root_map_scval].try_into().unwrap(),
-        )));
+        let option_some = ScVal::Vec(Some(ScVec(vec![root_map_scval].try_into().unwrap())));
 
         // Verify our decoding logic handles the Vec wrapper.
         let inner_val = match &option_some {
@@ -2209,5 +2220,4 @@ mod tests {
             Err(e) => panic!("got Err: {e}"),
         }
     }
-
 }

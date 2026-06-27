@@ -9,7 +9,7 @@
 //! All Docker interaction is via `docker compose` subprocess calls run in
 //! `spawn_blocking` so the async runtime is never blocked.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
@@ -20,66 +20,144 @@ use crate::error::{AppError, AppResult};
 /// The audit services Compose file (sits next to the replica-set Compose).
 const AUDIT_COMPOSE_FILE: &str = "docker-compose.audit.yml";
 
+/// The 3-node replica-set Compose file the audit services depend on.
+const AUDIT_DB_COMPOSE_FILE: &str = "docker-compose.audit-db.yml";
+
+/// Compose project name for the audit services (isolates them from the DB and
+/// the main mongo-buddy project that may live in the same directory).
+const AUDIT_PROJECT: &str = "nosqlbuddy-audit";
+
+/// Published audit image repository. Packaged builds pull this (no local
+/// build); the tag matches the app's crate version (the CI release tag).
+const PUBLISHED_IMAGE_REPO: &str = "ghcr.io/ronnakamoto/nosqlbuddy-audit";
+
 /// Default ports used by the audit stack containers.
 const PUBLISHER_PORT: u16 = 9173;
 const ATTESTER_PORT: u16 = 9174;
 const READER_PORT: u16 = 9175;
 
-/// Resolve the project root (where the Compose files live).
+/// Full published image reference for this build (e.g. `ghcr.io/...:0.1.0`).
+fn published_image_ref() -> String {
+    format!("{PUBLISHED_IMAGE_REPO}:{}", env!("CARGO_PKG_VERSION"))
+}
+
+/// Where the audit stack runs from, and how.
 ///
-/// In dev, this is the cargo manifest directory. In a packaged app, it falls
-/// back to the app's resource directory. We look for the Compose file in a
-/// few candidate locations and return the first that exists.
-fn resolve_compose_dir(app: &AppHandle) -> AppResult<PathBuf> {
+/// - **Source builds** run from the project root and build the image locally
+///   (`AUDIT_IMAGE` unset → `nosqlbuddy-audit:dev`, `up --build`).
+/// - **Packaged builds** copy the bundled stack (shipped under
+///   `<resource>/stack`) into a writable per-user dir so the wizard can write
+///   `.env.audit` + `attester.key` and compose can mount them, and pull the
+///   published image (`AUDIT_IMAGE` set, `up` without `--build`).
+struct StackCtx {
+    dir: PathBuf,
+    packaged: bool,
+}
+
+/// Resolve the directory the audit Compose files run from (and whether we're
+/// in packaged mode). See [`StackCtx`].
+fn stack_ctx(app: &AppHandle) -> AppResult<StackCtx> {
     use tauri::Manager;
 
-    // Candidate 1: the app resource directory (packaged builds).
-    if let Ok(res_dir) = app.path().resource_dir() {
-        if res_dir.join(AUDIT_COMPOSE_FILE).exists() {
-            return Ok(res_dir);
-        }
-    }
-
-    // Candidate 2: cargo manifest dir (dev builds).
+    // Source checkout: the project root (one level up from src-tauri) holds
+    // the Compose files. Build the image locally.
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // CARGO_MANIFEST_DIR is src-tauri/, the Compose file is one level up.
     let project_root = manifest_dir
         .parent()
         .unwrap_or(&manifest_dir)
         .to_path_buf();
     if project_root.join(AUDIT_COMPOSE_FILE).exists() {
-        return Ok(project_root);
+        return Ok(StackCtx {
+            dir: project_root,
+            packaged: false,
+        });
     }
 
-    // Candidate 3: current working directory.
+    // Packaged build: the stack is bundled read-only under <resource>/stack.
+    // Copy it into a writable per-user dir so it can be run and written to.
+    if let Ok(res_dir) = app.path().resource_dir() {
+        let bundled = res_dir.join("stack");
+        if bundled.join(AUDIT_COMPOSE_FILE).exists() {
+            let dest = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| AppError::Internal(format!("no app data dir: {e}")))?
+                .join("dev-stack");
+            sync_bundled_stack(&bundled, &dest)?;
+            return Ok(StackCtx {
+                dir: dest,
+                packaged: true,
+            });
+        }
+    }
+
+    // Fallback: current working directory (e.g. running the binary by hand).
     if let Ok(cwd) = std::env::current_dir() {
         if cwd.join(AUDIT_COMPOSE_FILE).exists() {
-            return Ok(cwd);
+            return Ok(StackCtx {
+                dir: cwd,
+                packaged: false,
+            });
         }
     }
 
     Err(AppError::NotFound(format!(
-        "{AUDIT_COMPOSE_FILE} not found in resource dir, project root, or cwd"
+        "{AUDIT_COMPOSE_FILE} not found in project root, bundled resources, or cwd"
     )))
 }
 
-/// Run a `docker compose` command against the audit Compose file.
+/// Copy the bundled stack (Compose files + scripts + env example) into the
+/// writable dir. Compose/scripts are refreshed each time so app upgrades take
+/// effect; user-generated files (`.env.audit`, `attester.key`) are never
+/// touched.
+fn sync_bundled_stack(src: &Path, dest: &Path) -> AppResult<()> {
+    std::fs::create_dir_all(dest.join("scripts"))
+        .map_err(|e| AppError::Internal(format!("create dev-stack dir: {e}")))?;
+    for rel in [
+        AUDIT_COMPOSE_FILE,
+        AUDIT_DB_COMPOSE_FILE,
+        "scripts/rs-init-audit.js",
+        "scripts/seed.js",
+        "audit-stack.env.example",
+    ] {
+        let from = src.join(rel);
+        let to = dest.join(rel);
+        if from.exists() {
+            if let Some(parent) = to.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            std::fs::copy(&from, &to)
+                .map_err(|e| AppError::Internal(format!("copy bundled {rel}: {e}")))?;
+        }
+    }
+    Ok(())
+}
+
+/// Run a `docker compose` command against one Compose file in the stack dir.
 ///
-/// If a `.env.audit` file sits next to the Compose file, it is passed via
-/// `--env-file` so credential variables (Pinata keys, Stellar identity) are
-/// substituted into the Compose file and injected into containers.
-fn docker_compose(app: &AppHandle, args: &[&str]) -> AppResult<String> {
-    let dir = resolve_compose_dir(app)?;
-    let env_file = dir.join(".env.audit");
-    let has_env = env_file.exists();
+/// `project` overrides the Compose project name (the audit services use
+/// [`AUDIT_PROJECT`]; the DB Compose declares its own `name:`, so pass `None`).
+/// If a `.env.audit` sits in the stack dir it is passed via `--env-file` so
+/// `${VAR}` placeholders (image, credentials) are interpolated. Packaged builds
+/// also export `AUDIT_IMAGE` so compose pulls the published image.
+fn run_compose(
+    ctx: &StackCtx,
+    project: Option<&str>,
+    file: &str,
+    args: &[&str],
+) -> AppResult<String> {
+    let has_env = ctx.dir.join(".env.audit").exists();
 
     let mut cmd = Command::new("docker");
-    cmd.current_dir(&dir);
-    // Use an explicit project name so the audit stack is isolated from the
-    // main mongo-buddy compose project that lives in the same directory.
-    // Without this, `docker compose ps` returns mongo1/mongo2/mongo3 as
-    // orphan containers and falsely reports the audit stack as "running".
-    cmd.args(["compose", "-p", "nosqlbuddy-audit", "-f", AUDIT_COMPOSE_FILE]);
+    cmd.current_dir(&ctx.dir);
+    if ctx.packaged {
+        cmd.env("AUDIT_IMAGE", published_image_ref());
+    }
+    cmd.arg("compose");
+    if let Some(p) = project {
+        cmd.args(["-p", p]);
+    }
+    cmd.args(["-f", file]);
     if has_env {
         cmd.args(["--env-file", ".env.audit"]);
     }
@@ -93,14 +171,228 @@ fn docker_compose(app: &AppHandle, args: &[&str]) -> AppResult<String> {
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
     if !output.status.success() {
-        return Err(AppError::Internal(format!(
-            "docker compose {} failed (exit {:?}): {stderr}",
+        // Full technical detail (command, exit code, stderr) goes to the log
+        // file + stdout for debugging. Stellar secret seeds are redacted so
+        // they never reach the logs.
+        let raw = format!(
+            "docker compose {} failed (exit {:?}): {}",
             args.join(" "),
-            output.status.code()
-        )));
+            output.status.code(),
+            stderr.trim()
+        );
+        log::error!("{}", redact_secrets(&raw));
+
+        // The UI only ever sees a concise message with a clear reason and the
+        // action to take — never the raw Docker/compiler output.
+        return Err(AppError::Internal(friendly_compose_error(args, &stderr)));
     }
 
     Ok(stdout)
+}
+
+/// Run the one-off setup wizard service, streaming its output to the UI.
+///
+/// Behaves like [`run_compose`] for the `run --rm setup …` command, but instead
+/// of buffering the whole run it reads stdout/stderr line-by-line, redacts
+/// secrets, and emits each line as an `audit-setup-progress` event so the
+/// frontend can show live progress. On failure it produces the same concise,
+/// secret-free message as [`run_compose`] (full detail goes to the log).
+fn run_setup_streaming(ctx: &StackCtx, app: &AppHandle) -> AppResult<String> {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    let has_env = ctx.dir.join(".env.audit").exists();
+
+    let mut cmd = Command::new("docker");
+    cmd.current_dir(&ctx.dir);
+    if ctx.packaged {
+        cmd.env("AUDIT_IMAGE", published_image_ref());
+    }
+    cmd.arg("compose");
+    cmd.args(["-p", AUDIT_PROJECT]);
+    cmd.args(["-f", AUDIT_COMPOSE_FILE]);
+    if has_env {
+        cmd.args(["--env-file", ".env.audit"]);
+    }
+    cmd.args(["run", "--rm", "setup", "setup", "--non-interactive"]);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| AppError::Internal(format!("failed to run docker: {e}")))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| AppError::Internal("failed to capture setup stdout".into()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| AppError::Internal("failed to capture setup stderr".into()))?;
+
+    // Drain stderr on a side thread so a full pipe can't deadlock the run.
+    let app_err = app.clone();
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = String::new();
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            let red = redact_secrets(&line);
+            if !red.trim().is_empty() {
+                crate::events::emit_audit_setup_progress(&app_err, &red);
+            }
+            buf.push_str(&red);
+            buf.push('\n');
+        }
+        buf
+    });
+
+    let mut stdout_buf = String::new();
+    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+        let red = redact_secrets(&line);
+        if !red.trim().is_empty() {
+            crate::events::emit_audit_setup_progress(app, &red);
+        }
+        stdout_buf.push_str(&red);
+        stdout_buf.push('\n');
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| AppError::Internal(format!("wait for docker setup: {e}")))?;
+    let stderr_buf = stderr_handle.join().unwrap_or_default();
+
+    if !status.success() {
+        let raw = format!(
+            "docker compose run setup failed (exit {:?}): {}",
+            status.code(),
+            stderr_buf.trim()
+        );
+        log::error!("{}", redact_secrets(&raw));
+        return Err(AppError::Internal(friendly_compose_error(
+            &["run"],
+            &stderr_buf,
+        )));
+    }
+
+    Ok(stdout_buf)
+}
+
+/// Translate a raw `docker compose` failure into a concise, user-facing message
+/// with a clear reason and the action to take. The full technical error is
+/// logged separately (see [`run_compose`]); this is the only thing the UI sees.
+fn friendly_compose_error(args: &[&str], stderr: &str) -> String {
+    let s = stderr.to_lowercase();
+
+    if s.contains("cannot connect to the docker daemon")
+        || s.contains("is the docker daemon running")
+        || s.contains("docker daemon is not running")
+    {
+        return "Docker isn't running. Start Docker Desktop, wait for it to finish starting, \
+                then try again."
+            .to_string();
+    }
+    if s.contains("unknown flag") || s.contains("unknown shorthand flag") {
+        return "Your Docker Compose version is too old and rejected a required option. Update \
+                Docker Desktop (or the Docker Compose plugin) to the latest version, then try \
+                again."
+            .to_string();
+    }
+    if s.contains("port is already allocated")
+        || s.contains("address already in use")
+        || s.contains("bind for")
+        || s.contains("ports are not available")
+    {
+        return "A required port is already in use. The audit stack needs ports 9173-9175 and \
+                MongoDB needs 27017-27019. Stop whatever is using them (or the existing stack), \
+                then try again."
+            .to_string();
+    }
+    if s.contains("no space left on device") {
+        return "Your disk is full, so Docker couldn't continue. Free up space (for example, run \
+                'docker system prune'), then try again."
+            .to_string();
+    }
+    if s.contains("pull access denied")
+        || s.contains("manifest unknown")
+        || s.contains("failed to resolve")
+        || s.contains("error pinging docker registry")
+        || s.contains("i/o timeout")
+        || s.contains("network is unreachable")
+        || s.contains("temporary failure in name resolution")
+    {
+        return "Couldn't download a required Docker image. Check your internet connection and \
+                that Docker can reach its registry, then try again."
+            .to_string();
+    }
+    if s.contains("failed to solve")
+        || s.contains("did not complete successfully")
+        || s.contains("cargo build")
+        || s.contains("exit code: 101")
+    {
+        return "The audit service image failed to build. The full build output has been written \
+                to the app log. If this keeps happening, the project may need a fix."
+            .to_string();
+    }
+    if s.contains("no such file") && s.contains("compose") {
+        return "A Docker Compose file is missing. Make sure you're running from the project \
+                root, then try again."
+            .to_string();
+    }
+
+    // The command ran a subprocess (e.g. the audit setup wizard) that failed
+    // with its own already-user-facing message. Prefer surfacing that over a
+    // generic fallback, since it carries the real reason and action.
+    if let Some(app_msg) = extract_app_error(stderr) {
+        return redact_secrets(&app_msg);
+    }
+
+    // Fallback: generic but still actionable, with no raw output leaked.
+    let action = match args.first().copied().unwrap_or("") {
+        "up" => "start",
+        "down" => "stop",
+        "run" => "run setup for",
+        "build" => "build",
+        "logs" => "read logs from",
+        _ => "manage",
+    };
+    format!(
+        "Couldn't {action} the audit stack. Technical details were written to the app log. \
+         Check Docker Desktop is running and try again."
+    )
+}
+
+/// Extract a meaningful application-level error from a subprocess's stderr.
+///
+/// The bundled audit wizard (and other Rust CLIs) print their failure as an
+/// `Error: "<message>"` line. That message is already written for end users, so
+/// we surface it rather than a generic Docker fallback. Docker's own
+/// "Error response from daemon: …" lines do not match (no colon after `Error`).
+fn extract_app_error(stderr: &str) -> Option<String> {
+    let line = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("Error:"))
+        .next_back()?;
+
+    let mut msg = line.trim_start_matches("Error:").trim().trim_matches('"').trim();
+
+    // Drop a leading "<context>: validation error: " noise prefix if present,
+    // keeping just the human-readable reason + action.
+    if let Some(idx) = msg.rfind("validation error: ") {
+        msg = msg[idx + "validation error: ".len()..].trim();
+    }
+
+    if msg.is_empty() {
+        None
+    } else {
+        Some(msg.to_string())
+    }
+}
+
+/// Run a `docker compose` command against the audit services Compose file.
+fn docker_compose(app: &AppHandle, args: &[&str]) -> AppResult<String> {
+    let ctx = stack_ctx(app)?;
+    run_compose(&ctx, Some(AUDIT_PROJECT), AUDIT_COMPOSE_FILE, args)
 }
 
 /// Check whether a binary is available on PATH.
@@ -139,6 +431,12 @@ pub struct DevPrerequisites {
     pub audit_stack_running: bool,
     /// Docker daemon is running (engine responsive).
     pub docker_daemon_running: bool,
+    /// The generated `.env.audit` credentials file is present in the stack dir.
+    pub env_audit_present: bool,
+    /// The attester ed25519 key file is present in the stack dir.
+    pub attester_key_present: bool,
+    /// Setup has completed (both `.env.audit` and `attester.key` exist).
+    pub audit_configured: bool,
     /// Human-readable summary of what's ready and what's missing.
     pub summary: String,
 }
@@ -160,9 +458,19 @@ pub fn check_prerequisites(app: &AppHandle) -> AppResult<DevPrerequisites> {
             .map(|o| o.status.success())
             .unwrap_or(false);
 
-    let compose_file_present = resolve_compose_dir(app)
-        .map(|d| d.join(AUDIT_COMPOSE_FILE).exists())
+    let compose_file_present = stack_ctx(app)
+        .map(|c| c.dir.join(AUDIT_COMPOSE_FILE).exists())
         .unwrap_or(false);
+
+    let (env_audit_present, attester_key_present) = stack_ctx(app)
+        .map(|c| {
+            (
+                c.dir.join(".env.audit").exists(),
+                c.dir.join("attester.key").exists(),
+            )
+        })
+        .unwrap_or((false, false));
+    let audit_configured = env_audit_present && attester_key_present;
 
     let publisher_port_free = port_free(PUBLISHER_PORT);
     let attester_port_free = port_free(ATTESTER_PORT);
@@ -197,6 +505,8 @@ pub fn check_prerequisites(app: &AppHandle) -> AppResult<DevPrerequisites> {
     let summary = if issues.is_empty() {
         if audit_stack_running {
             "All prerequisites met — audit stack is already running.".to_string()
+        } else if !audit_configured {
+            "Prerequisites met — run Set up to generate audit credentials.".to_string()
         } else {
             "All prerequisites met — ready to start the audit stack.".to_string()
         }
@@ -214,6 +524,9 @@ pub fn check_prerequisites(app: &AppHandle) -> AppResult<DevPrerequisites> {
         reader_port_free,
         audit_stack_running,
         docker_daemon_running,
+        env_audit_present,
+        attester_key_present,
+        audit_configured,
         summary,
     })
 }
@@ -279,9 +592,27 @@ fn parse_compose_ps(output: &str) -> Vec<DevStackService> {
     services
 }
 
-/// Bring up the audit stack (`docker compose up -d`).
+/// Bring up the audit stack.
+///
+/// Ensures the 3-node replica set is running first, then starts the audit
+/// services. Source builds rebuild the image locally (`--build`); packaged
+/// builds pull the published image.
 pub fn stack_up(app: &AppHandle) -> AppResult<String> {
-    docker_compose(app, &["up", "-d", "--build"])
+    let ctx = stack_ctx(app)?;
+    // The DB Compose declares its own project name, so do not override it.
+    let mut log = run_compose(&ctx, None, AUDIT_DB_COMPOSE_FILE, &["up", "-d"])?;
+    let audit_args: &[&str] = if ctx.packaged {
+        &["up", "-d"]
+    } else {
+        &["up", "-d", "--build"]
+    };
+    log.push_str(&run_compose(
+        &ctx,
+        Some(AUDIT_PROJECT),
+        AUDIT_COMPOSE_FILE,
+        audit_args,
+    )?);
+    Ok(log)
 }
 
 /// Tear down the audit stack (`docker compose down`).
@@ -304,6 +635,157 @@ pub fn stack_reset_data(app: &AppHandle) -> AppResult<String> {
 /// Fetch the last N lines of logs from the audit stack (all services).
 pub fn stack_logs(app: &AppHandle, tail: u32) -> AppResult<String> {
     docker_compose(app, &["logs", "--tail", &tail.to_string()])
+}
+
+// ─── Setup (non-interactive wizard) ──────────────────────────────────────
+
+/// Parameters for the non-interactive setup wizard, supplied by the desktop
+/// app's "Set up" button. All fields are optional; empty values fall back to
+/// the wizard's defaults (generate keypairs, bundled testnet contract, etc.).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevSetupParams {
+    /// `testnet` (default) or `mainnet`.
+    pub network: Option<String>,
+    pub pinata_api_key: Option<String>,
+    pub pinata_api_secret: Option<String>,
+    pub pinata_gateway_url: Option<String>,
+    /// Operator's existing publisher Stellar secret key (else generated).
+    pub publisher_secret_key: Option<String>,
+    /// Auditor's existing attester Stellar secret key (else generated).
+    pub attester_secret_key: Option<String>,
+    /// Existing Soroban contract ID (else the bundled testnet contract).
+    pub contract_id: Option<String>,
+    /// Re-run even if `.env.audit` already exists (regenerates keys).
+    pub overwrite: Option<bool>,
+}
+
+/// Result of running the setup wizard. The `log` is redacted of any Stellar
+/// secret keys before being returned to the UI.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevSetupResult {
+    pub success: bool,
+    /// Redacted wizard output (secrets stripped).
+    pub log: String,
+    pub env_audit_present: bool,
+    pub attester_key_present: bool,
+}
+
+/// Heuristically detect a Stellar secret seed (strkey: 56 chars, starts with
+/// `S`, base32 alphabet). Slightly over-broad on purpose — we'd rather redact
+/// a benign token than leak a key.
+fn is_stellar_secret(s: &str) -> bool {
+    s.len() == 56
+        && s.starts_with('S')
+        && s.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
+/// Redact Stellar secret keys (and `KEY=SECRET` env lines) from wizard output
+/// so secrets never reach the UI, logs, or the webview console.
+fn redact_secrets(input: &str) -> String {
+    input
+        .split('\n')
+        .map(|line| {
+            line.split_whitespace()
+                .map(|tok| {
+                    // Handle both bare seeds and `KEY=SEED` forms.
+                    let value = tok.rsplit('=').next().unwrap_or(tok);
+                    let core = value.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+                    if is_stellar_secret(core) {
+                        "[redacted]".to_string()
+                    } else {
+                        tok.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Run the non-interactive setup wizard inside the one-off `setup` Compose
+/// service. Operator-supplied secrets are passed via a temporary env-file
+/// (never on argv) that is deleted immediately afterward. The wizard writes
+/// `.env.audit` + `attester.key` into the stack dir (mounted at `/work`), where
+/// the publisher/attester/reader services pick them up.
+pub fn setup_audit_config(app: &AppHandle, params: DevSetupParams) -> AppResult<DevSetupResult> {
+    let ctx = stack_ctx(app)?;
+    let env_audit = ctx.dir.join(".env.audit");
+    let overwrite = params.overwrite.unwrap_or(false);
+    if env_audit.exists() && !overwrite {
+        return Err(AppError::Internal(
+            "Audit config already exists (.env.audit). Re-running setup regenerates keys and \
+             overwrites it — pass overwrite to proceed."
+                .into(),
+        ));
+    }
+
+    // Build the secret-bearing env-file the setup container reads.
+    let setup_env_name = ".setup.env";
+    let setup_env_path = ctx.dir.join(setup_env_name);
+    let network = params
+        .network
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("testnet");
+    let mut env_lines = format!("STELLAR_NETWORK={network}\n");
+    let mut push = |key: &str, val: &Option<String>| {
+        if let Some(v) = val.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            env_lines.push_str(&format!("{key}={v}\n"));
+        }
+    };
+    push("STELLAR_SECRET_KEY", &params.publisher_secret_key);
+    push("ATTESTER_SECRET_KEY", &params.attester_secret_key);
+    push("CONTRACT_ID", &params.contract_id);
+    push("PINATA_API_KEY", &params.pinata_api_key);
+    push("PINATA_API_SECRET", &params.pinata_api_secret);
+    push("PINATA_GATEWAY_URL", &params.pinata_gateway_url);
+    drop(push);
+
+    // Deploy a fresh per-user contract by default so the generated publisher
+    // becomes the contract admin — `authorize_attester` requires the caller to
+    // be the admin, which a fresh key never is for the bundled shared contract.
+    // The only time we reuse an existing contract is when the operator supplied
+    // an explicit contract ID to target.
+    let use_existing_contract = params
+        .contract_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    if !use_existing_contract {
+        env_lines.push_str("DEPLOY_CHOICE=deploy\n");
+    }
+
+    std::fs::write(&setup_env_path, env_lines.as_bytes())
+        .map_err(|e| AppError::Internal(format!("write setup env file: {e}")))?;
+
+    // `docker compose run` auto-enables the service's `setup` profile. The args
+    // after the service name replace the service `command`, so we pass the full
+    // `setup --non-interactive` subcommand to the image entrypoint. The secret
+    // env vars are injected via the service's `env_file: .setup.env` entry in
+    // the Compose file (not `run --env-file`, which older Compose releases such
+    // as v2.31 reject), keeping secrets off argv.
+    // Stream the wizard's output line-by-line to the UI (key generation,
+    // funding, contract deploy, attester authorization) so the user can see
+    // progress instead of staring at a spinner.
+    let run_result = run_setup_streaming(&ctx, app);
+
+    // Always remove the temp env-file (best-effort), even on failure.
+    let _ = std::fs::remove_file(&setup_env_path);
+
+    // `run_compose` already returns a concise, secret-free message (and logs
+    // the raw error), so propagate it as-is rather than re-wrapping it.
+    let log = run_result?;
+
+    Ok(DevSetupResult {
+        success: true,
+        log: redact_secrets(&log),
+        env_audit_present: ctx.dir.join(".env.audit").exists(),
+        attester_key_present: ctx.dir.join("attester.key").exists(),
+    })
 }
 
 // ─── Tauri commands ────────────────────────────────────────────────────
@@ -359,6 +841,18 @@ pub async fn audit_dev_stack_logs(app: AppHandle, tail: Option<u32>) -> AppResul
     tokio::task::spawn_blocking(move || stack_logs(&app, tail))
         .await
         .map_err(|e| AppError::Internal(format!("stack logs task join: {e}")))?
+}
+
+/// Run the non-interactive setup wizard (generate keys, fund, authorize, write
+/// `.env.audit` + `attester.key`). Secrets are redacted from the returned log.
+#[tauri::command]
+pub async fn audit_dev_stack_setup(
+    app: AppHandle,
+    params: DevSetupParams,
+) -> AppResult<DevSetupResult> {
+    tokio::task::spawn_blocking(move || setup_audit_config(&app, params))
+        .await
+        .map_err(|e| AppError::Internal(format!("stack setup task join: {e}")))?
 }
 
 #[cfg(test)]

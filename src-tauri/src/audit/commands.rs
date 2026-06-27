@@ -415,6 +415,21 @@ pub async fn audit_mark_epoch_committed(
     Ok(state.epoch_manager.mark_committed(epoch_number, tx_hash)?)
 }
 
+/// Wipe all local audit data: the audit log (events + Merkle tree), the batch
+/// (epoch) history, and the verification timeline. On-chain commitments are
+/// NOT affected — this only clears local state so capture can start fresh.
+#[tauri::command]
+pub async fn audit_reset_data(state: State<'_, AppState>) -> AppResult<()> {
+    state.audit_log.clear()?;
+    state.epoch_manager.reset()?;
+    state.verification_store.clear()?;
+    // Re-align the open epoch's counter with the now-empty audit log.
+    state
+        .epoch_manager
+        .sync_open_epoch_with_audit_log(&state.audit_log)?;
+    Ok(())
+}
+
 // ─── Reader mode commands ─────────────────────────────────────────────
 
 /// Verify the local audit log against the latest on-chain root.

@@ -21,6 +21,8 @@ COPY zk-audit/Cargo.toml ./zk-audit/Cargo.toml
 COPY zk-audit/src ./zk-audit/src
 COPY src-tauri/Cargo.toml ./src-tauri/Cargo.toml
 COPY audit-service/Cargo.toml ./audit-service/Cargo.toml
+COPY mongo-uri/Cargo.toml ./mongo-uri/Cargo.toml
+COPY mongo-uri/src ./mongo-uri/src
 
 # Create a dummy lib + bin so the dependency layer compiles.
 RUN mkdir -p audit-service/src/audit audit-service/src/auditd audit-service/src/bin && \
@@ -44,14 +46,43 @@ COPY audit-service/src ./audit-service/src
 RUN touch audit-service/src/lib.rs audit-service/src/bin/nosqlbuddy-audit.rs && \
     cargo build --release --bin nosqlbuddy-audit --manifest-path audit-service/Cargo.toml
 
+# ─── Soroban contract WASM (for the wizard's "deploy a fresh contract") ──
+# The desktop Set up wizard can deploy a per-user audit contract so the
+# generated publisher becomes its admin. That path needs the compiled contract
+# WASM. Build it here (the builder has the Rust toolchain) so the slim runtime
+# can ship it without a compiler. The contract is a standalone crate (its own
+# workspace), so a plain cargo wasm build is sufficient for deployment.
+RUN rustup target add wasm32v1-none
+COPY zk-audit/soroban-contract/Cargo.toml zk-audit/soroban-contract/Cargo.lock ./zk-audit/soroban-contract/
+COPY zk-audit/soroban-contract/src ./zk-audit/soroban-contract/src
+RUN cargo build --release --target wasm32v1-none \
+        --manifest-path zk-audit/soroban-contract/Cargo.toml
+
 # ─── Runtime stage ──────────────────────────────────────────────────────
 FROM debian:bookworm-slim
 
-# Install runtime libs only (libssl, ca-certs). No stellar CLI needed —
-# the daemon signs transactions natively via ed25519 + Soroban RPC.
+# The daemon signs transactions natively (ed25519 + Soroban RPC), but the setup
+# wizard's "deploy a fresh contract" path shells out to the `stellar` CLI, which
+# requires libdbus/libudev at runtime. libssl/ca-certs cover TLS; curl fetches
+# the CLI (pinned to match the contract build).
+ARG STELLAR_CLI_VERSION=27.0.0
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    libssl3 \
+        ca-certificates \
+        libssl3 \
+        libdbus-1-3 \
+        libudev1 \
+        curl \
+    && arch="$(dpkg --print-architecture)" \
+    && case "$arch" in \
+         amd64) triple="x86_64-unknown-linux-gnu" ;; \
+         arm64) triple="aarch64-unknown-linux-gnu" ;; \
+         *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/stellar-cli-${STELLAR_CLI_VERSION}-${triple}.tar.gz" \
+        -o /tmp/stellar.tar.gz \
+    && tar -xzf /tmp/stellar.tar.gz -C /usr/local/bin stellar \
+    && rm /tmp/stellar.tar.gz \
+    && stellar --version \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the built binary.
@@ -59,6 +90,14 @@ COPY --from=builder /build/target/release/nosqlbuddy-audit /usr/local/bin/nosqlb
 
 # Copy circuit artifacts for ZK proof generation (R1CS, WASM, proving key).
 COPY src-tauri/resources/circuits/ /opt/circuits/
+
+# Prebuilt Soroban contract WASM for the wizard's "deploy a fresh contract"
+# path. CONTRACT_WASM_PATH tells the wizard to use this prebuilt artifact
+# instead of compiling (the runtime has no Rust toolchain).
+COPY --from=builder \
+    /build/zk-audit/soroban-contract/target/wasm32v1-none/release/zk_audit_commitment.wasm \
+    /opt/contract/zk_audit_commitment.wasm
+ENV CONTRACT_WASM_PATH=/opt/contract/zk_audit_commitment.wasm
 
 # Default data directory inside the container.
 ENV AUDITD_DATA_DIR=/data

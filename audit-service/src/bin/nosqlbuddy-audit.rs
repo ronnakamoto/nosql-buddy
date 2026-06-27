@@ -72,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// Generates Stellar keypairs, optionally deploys the contract, initializes
 /// it, authorizes the attester, and writes `.env.audit`.
-async fn cmd_setup(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use audit_service::audit::stellar_native;
 
     println!("╔══════════════════════════════════════════════════════════════╗");
@@ -81,13 +81,32 @@ async fn cmd_setup(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     println!("╚══════════════════════════════════════════════════════════════╝");
     println!();
 
+    // Non-interactive mode (used by the desktop app's "Set up" button): take
+    // sensible defaults and read any operator-provided values from the
+    // environment instead of prompting on stdin.
+    let non_interactive = args.iter().any(|a| a == "--non-interactive" || a == "-y");
+    let ask = |question: &str, default: &str| -> String {
+        if non_interactive {
+            default.to_string()
+        } else {
+            prompt(question, default)
+        }
+    };
+    if non_interactive {
+        println!("Running in non-interactive mode (defaults + environment).");
+        println!();
+    }
+
     // 1. Choose network.
-    let network = prompt("Stellar network [testnet/mainnet] (default: testnet)", "testnet");
+    let network = ask(
+        "Stellar network [testnet/mainnet] (default: testnet)",
+        &env_default(non_interactive, "STELLAR_NETWORK", "testnet"),
+    );
     let is_mainnet = network == "mainnet";
 
     let (rpc_url, horizon_url, passphrase, default_contract_id) = if is_mainnet {
         (
-            prompt("Mainnet RPC URL", "https://soroban.stellar.org:443"),
+            ask("Mainnet RPC URL", "https://soroban.stellar.org:443"),
             "https://horizon.stellar.org".to_string(),
             stellar_native::MAINNET_PASSPHRASE.to_string(),
             String::new(),
@@ -104,9 +123,9 @@ async fn cmd_setup(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // 2. Publisher keypair.
     println!();
     println!("── Publisher key (controlled by the operator) ──");
-    let publisher_secret = prompt(
+    let publisher_secret = ask(
         "Paste publisher Stellar secret key (S...), or press Enter to generate one",
-        "",
+        &env_default(non_interactive, "STELLAR_SECRET_KEY", ""),
     );
     let publisher_kp = if publisher_secret.is_empty() {
         let kp = stellar_native::generate_keypair();
@@ -125,9 +144,9 @@ async fn cmd_setup(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     println!("── Attester key (controlled by the auditor/regulator) ──");
     println!("  This is a SEPARATE key from the publisher. The trust model requires");
     println!("  the attester to be independent from the operator.");
-    let attester_secret = prompt(
+    let attester_secret = ask(
         "Paste attester Stellar secret key (S...), or press Enter to generate one",
-        "",
+        &env_default(non_interactive, "ATTESTER_SECRET_KEY", ""),
     );
     let attester_kp = if attester_secret.is_empty() {
         let kp = stellar_native::generate_keypair();
@@ -144,13 +163,13 @@ async fn cmd_setup(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // 4. Contract: deploy new or use existing?
     println!();
     println!("── Soroban contract ──");
-    let deploy_choice = prompt(
+    let deploy_choice = ask(
         if is_mainnet {
             "Deploy a new contract or use existing? [deploy/existing] (default: existing)"
         } else {
             "Deploy a new contract or use the bundled testnet contract? [deploy/existing] (default: existing)"
         },
-        "existing",
+        &env_default(non_interactive, "DEPLOY_CHOICE", "existing"),
     );
 
     // 5. Fund accounts on testnet via Friendbot (auto-fund for testnet only).
@@ -159,26 +178,13 @@ async fn cmd_setup(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if !is_mainnet {
         println!();
         println!("── Funding accounts on testnet (Friendbot) ──");
-        print!("  Funding publisher account {}... ", publisher_kp.account_id());
-        let _ = io::stdout().flush();
-        match audit_service::audit::stellar_native::fund_account(&publisher_kp.account_id()).await {
-            Ok(()) => println!("OK"),
-            Err(e) => {
-                println!("SKIP ({e})");
-                println!("  (Account may already be funded — continuing)");
-            }
-        }
-        print!("  Funding attester account {}... ", attester_kp.account_id());
-        let _ = io::stdout().flush();
-        match audit_service::audit::stellar_native::fund_account(&attester_kp.account_id()).await {
-            Ok(()) => println!("OK"),
-            Err(e) => {
-                println!("SKIP ({e})");
-                println!("  (Account may already be funded — continuing)");
-            }
-        }
-        // Wait a moment for the funding to propagate to Horizon/RPC.
-        println!("  Waiting 3s for funding to propagate...");
+        fund_and_wait_for_testnet_account("publisher", &publisher_kp.account_id(), &horizon_url)
+            .await?;
+        fund_and_wait_for_testnet_account("attester", &attester_kp.account_id(), &horizon_url)
+            .await?;
+        // Give Soroban RPC/account sequence caches a short settling window
+        // after Horizon confirms both funded accounts exist.
+        println!("  Funding confirmed; waiting 3s for RPC propagation...");
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
 
@@ -193,9 +199,17 @@ async fn cmd_setup(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("  Deploying to {network}...");
         let cid = deploy_contract(&wasm_path, &network, &publisher_kp.secret_key_str())?;
         println!("  Contract deployed: {cid}");
+        // Give the freshly created contract instance time to propagate to the
+        // RPC node before we invoke `initialize` on it — otherwise the
+        // simulation can fail because the contract isn't visible yet.
+        println!("  Waiting 12s for the contract to be visible on RPC...");
+        tokio::time::sleep(std::time::Duration::from_secs(12)).await;
         cid
     } else if is_mainnet {
-        prompt("Enter your mainnet contract ID (C...)", "")
+        ask(
+            "Enter your mainnet contract ID (C...)",
+            &env_default(non_interactive, "CONTRACT_ID", ""),
+        )
     } else {
         println!("  Using bundled testnet contract: {default_contract_id}");
         default_contract_id.clone()
@@ -217,22 +231,31 @@ async fn cmd_setup(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             &passphrase,
         )
         .await?;
-        println!("  Contract initialized. Admin: {}", publisher_kp.account_id());
+        println!(
+            "  Contract initialized. Admin: {}",
+            publisher_kp.account_id()
+        );
     }
 
     // 8. Generate attester ed25519 oplog signing key.
     println!();
     println!("── Attester ed25519 oplog signing key ──");
     println!("  This is a separate key from the Stellar key. It signs the oplog hash.");
-    let attester_key_file = prompt(
+    let attester_key_file = ask(
         "Path to save the attester ed25519 key (default: ./attester.key)",
-        "./attester.key",
+        &env_default(non_interactive, "ATTESTER_KEY_FILE", "./attester.key"),
     );
     let attester_key_path = PathBuf::from(&attester_key_file);
-    let ed25519_key = audit_service::auditd::attester::load_or_generate_attester_key(&attester_key_path)
-        .map_err(|e| format!("failed to generate attester key: {e}"))?;
+    let ed25519_key =
+        audit_service::auditd::attester::load_or_generate_attester_key(&attester_key_path)
+            .map_err(|e| format!("failed to generate attester key: {e}"))?;
+    let abs_attester_key_path = absolute_path(&attester_key_path);
     let ed25519_pubkey_hex = hex::encode(ed25519_key.verifying_key().to_bytes());
     println!("  Attester ed25519 public key: {ed25519_pubkey_hex}");
+    println!(
+        "  Attester ed25519 key written to: {}",
+        abs_attester_key_path.display()
+    );
 
     // Wait for the initialize transaction to be processed by the network.
     if deploy_choice == "deploy" {
@@ -254,18 +277,38 @@ async fn cmd_setup(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         &passphrase,
     )
     .await?;
-    println!("  Attester authorized: {} (pubkey: {})", attester_kp.account_id(), &ed25519_pubkey_hex[..16]);
+    println!(
+        "  Attester authorized: {} (pubkey: {})",
+        attester_kp.account_id(),
+        &ed25519_pubkey_hex[..16]
+    );
 
     // 10. Pinata credentials (optional).
     println!();
     println!("── Pinata IPFS credentials (optional) ──");
-    let pinata_api_key = prompt("Pinata API key (press Enter to skip)", "");
-    let pinata_api_secret = prompt("Pinata API secret (press Enter to skip)", "");
-    let pinata_gateway = prompt("Pinata gateway URL (default: https://gateway.pinata.cloud)", "https://gateway.pinata.cloud");
+    let pinata_api_key = ask(
+        "Pinata API key (press Enter to skip)",
+        &env_default(non_interactive, "PINATA_API_KEY", ""),
+    );
+    let pinata_api_secret = ask(
+        "Pinata API secret (press Enter to skip)",
+        &env_default(non_interactive, "PINATA_API_SECRET", ""),
+    );
+    let pinata_gateway = ask(
+        "Pinata gateway URL (default: https://gateway.pinata.cloud)",
+        &env_default(
+            non_interactive,
+            "PINATA_GATEWAY_URL",
+            "https://gateway.pinata.cloud",
+        ),
+    );
 
     // 11. Write .env.audit.
     println!();
-    let env_path = prompt("Write .env.audit to (default: .env.audit)", ".env.audit");
+    let env_path = ask(
+        "Write .env.audit to (default: .env.audit)",
+        &env_default(non_interactive, "ENV_AUDIT_PATH", ".env.audit"),
+    );
     write_env_file(
         &env_path,
         &contract_id,
@@ -275,7 +318,8 @@ async fn cmd_setup(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         &pinata_api_secret,
         &pinata_gateway,
     )?;
-    println!("  Wrote {env_path}");
+    let abs_env_path = absolute_path(&PathBuf::from(&env_path));
+    println!("  Wrote {}", abs_env_path.display());
 
     // 12. Summary.
     println!();
@@ -285,14 +329,25 @@ async fn cmd_setup(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     println!("║  Network:      {network:<47}║");
     println!("║  Contract:     {contract_id:<47}║");
     println!("║  Publisher:    {pub:<47}║", pub = publisher_kp.account_id());
-    println!("║  Attester:     {att:<47}║", att = attester_kp.account_id());
-    println!("║  Ed25519 key:  {attester_key_file:<47}║");
-    println!("║  Env file:     {env_path:<47}║");
+    println!(
+        "║  Attester:     {att:<47}║",
+        att = attester_kp.account_id()
+    );
+    println!(
+        "║  Ed25519 key:  {abs_attester:<47}║",
+        abs_attester = abs_attester_key_path.display()
+    );
+    println!(
+        "║  Env file:     {abs_env:<47}║",
+        abs_env = abs_env_path.display()
+    );
     println!("╚══════════════════════════════════════════════════════════════╝");
     println!();
     println!("Next steps:");
     if is_mainnet {
-        println!("  1. Fund the publisher and attester accounts on mainnet (XLM required for tx fees)");
+        println!(
+            "  1. Fund the publisher and attester accounts on mainnet (XLM required for tx fees)"
+        );
         println!("     Publisher: {}", publisher_kp.account_id());
         println!("     Attester:  {}", attester_kp.account_id());
     } else {
@@ -307,11 +362,141 @@ async fn cmd_setup(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Resolve a (possibly relative) path to an absolute, normalized path for
+/// display, so users see exactly where files were written. Falls back to a
+/// best-effort `current_dir`-joined path if the file can't be canonicalized.
+fn absolute_path(path: &PathBuf) -> PathBuf {
+    if let Ok(canon) = path.canonicalize() {
+        return canon;
+    }
+    if path.is_absolute() {
+        return path.clone();
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .unwrap_or_else(|_| path.clone())
+}
+
+/// In non-interactive mode, read a value from the environment (falling back to
+/// `fallback` when unset/empty); in interactive mode always return `fallback`
+/// as the prompt default so existing behavior is unchanged.
+fn env_default(non_interactive: bool, var: &str, fallback: &str) -> String {
+    if non_interactive {
+        std::env::var(var)
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| fallback.to_string())
+    } else {
+        fallback.to_string()
+    }
+}
+
+/// Fund a testnet account, then wait until Horizon can read it.
+async fn fund_and_wait_for_testnet_account(
+    role: &str,
+    account_id: &str,
+    horizon_url: &str,
+) -> Result<(), String> {
+    print!("  Funding {role} account {account_id}... ");
+    let _ = io::stdout().flush();
+    let friendbot_error = match audit_service::audit::stellar_native::fund_account(account_id).await
+    {
+        Ok(()) => {
+            println!("OK");
+            None
+        }
+        Err(e) => {
+            println!("SKIP ({e})");
+            Some(e.to_string())
+        }
+    };
+
+    print!("  Waiting for {role} account to be visible on Horizon... ");
+    let _ = io::stdout().flush();
+    match wait_for_horizon_account(
+        horizon_url,
+        account_id,
+        20,
+        std::time::Duration::from_secs(3),
+    )
+    .await
+    {
+        Ok(()) => {
+            println!("OK");
+            Ok(())
+        }
+        Err(last_horizon_error) => {
+            println!("FAILED");
+            let friendbot_hint = friendbot_error
+                .map(|e| format!(" Friendbot said: {e}."))
+                .unwrap_or_default();
+            Err(format!(
+                "testnet {role} account {account_id} was not visible after Friendbot funding.\
+                 {friendbot_hint} Last Horizon check: {last_horizon_error}.\
+                 Fund it manually with: curl -fsS \"https://friendbot.stellar.org?addr={account_id}\" and rerun setup."
+            ))
+        }
+    }
+}
+
+async fn wait_for_horizon_account(
+    horizon_url: &str,
+    account_id: &str,
+    attempts: usize,
+    delay: std::time::Duration,
+) -> Result<(), String> {
+    let url = format!(
+        "{}/accounts/{}",
+        horizon_url.trim_end_matches('/'),
+        account_id
+    );
+    let client = reqwest::Client::new();
+    let mut last_error = "not checked".to_string();
+
+    for attempt in 1..=attempts {
+        match client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => return Ok(()),
+            Ok(resp) => {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                let text = text.trim();
+                last_error = if text.is_empty() {
+                    format!("HTTP {status}")
+                } else {
+                    format!("HTTP {status}: {text}")
+                };
+            }
+            Err(e) => {
+                last_error = e.to_string();
+            }
+        }
+
+        if attempt < attempts {
+            tokio::time::sleep(delay).await;
+        }
+    }
+
+    Err(last_error)
+}
+
 /// Build the Soroban contract WASM using `stellar contract build`.
 ///
 /// This uses the Stellar CLI's built-in build command which handles
 /// WASM compatibility (reference-types, optimization, etc.) correctly.
 fn build_contract_wasm() -> Result<PathBuf, String> {
+    // Prefer a prebuilt WASM shipped with the image (CONTRACT_WASM_PATH). The
+    // slim runtime container has the stellar CLI for deploy but no Rust
+    // toolchain to compile the contract, so the WASM is built ahead of time and
+    // bundled. Falls back to `stellar contract build` when running from a full
+    // source checkout (e.g. a developer's machine).
+    if let Ok(prebuilt) = std::env::var("CONTRACT_WASM_PATH") {
+        let path = PathBuf::from(prebuilt);
+        if path.exists() {
+            eprintln!("  Using prebuilt contract WASM: {}", path.display());
+            return Ok(path);
+        }
+    }
+
     // The contract is at <project-root>/zk-audit/soroban-contract/.
     // Try a few candidate locations relative to the current directory.
     let candidates = [
@@ -319,19 +504,16 @@ fn build_contract_wasm() -> Result<PathBuf, String> {
         PathBuf::from("../zk-audit/soroban-contract/Cargo.toml"),
         PathBuf::from("../../zk-audit/soroban-contract/Cargo.toml"),
     ];
-    let manifest = candidates
-        .iter()
-        .find(|p| p.exists())
-        .ok_or_else(|| {
-            format!(
-                "contract manifest not found in any of: {}",
-                candidates
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })?;
+    let manifest = candidates.iter().find(|p| p.exists()).ok_or_else(|| {
+        format!(
+            "contract manifest not found in any of: {}",
+            candidates
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
 
     let contract_dir = manifest.parent().unwrap();
 
@@ -342,9 +524,13 @@ fn build_contract_wasm() -> Result<PathBuf, String> {
         .arg("--profile")
         .arg("release")
         .output()
-        .map_err(|e| format!("failed to run `stellar contract build` — is the stellar CLI installed?\n\
+        .map_err(|e| {
+            format!(
+                "failed to run `stellar contract build` — is the stellar CLI installed?\n\
              Install: https://docs.stellar.org/tools/developer-tools/cli/install\n\
-             Error: {e}"))?;
+             Error: {e}"
+            )
+        })?;
 
     if !output.status.success() {
         return Err(format!(
@@ -355,12 +541,11 @@ fn build_contract_wasm() -> Result<PathBuf, String> {
 
     // `stellar contract build` outputs to target/wasm32v1-none/release/
     // (not wasm32-unknown-unknown like plain cargo build).
-    let wasm = contract_dir
-        .join("target/wasm32v1-none/release/zk_audit_commitment.wasm");
+    let wasm = contract_dir.join("target/wasm32v1-none/release/zk_audit_commitment.wasm");
     if !wasm.exists() {
         // Fall back to the standard target dir.
-        let wasm_fallback = contract_dir
-            .join("target/wasm32-unknown-unknown/release/zk_audit_commitment.wasm");
+        let wasm_fallback =
+            contract_dir.join("target/wasm32-unknown-unknown/release/zk_audit_commitment.wasm");
         if !wasm_fallback.exists() {
             return Err(format!(
                 "WASM not found at {} (or {}) — check the build output",
@@ -374,33 +559,129 @@ fn build_contract_wasm() -> Result<PathBuf, String> {
 }
 
 /// Deploy the contract via the stellar CLI (one-time operation).
-fn deploy_contract(wasm_path: &PathBuf, network: &str, source_secret: &str) -> Result<String, String> {
-    let output = std::process::Command::new("stellar")
-        .args(["contract", "deploy"])
-        .arg("--wasm").arg(wasm_path)
-        .arg("--source").arg(source_secret)
-        .arg("--network").arg(network)
-        .output()
-        .map_err(|e| format!(
-            "failed to run `stellar contract deploy` — is the stellar CLI installed?\n\
-             Install: https://docs.stellar.org/tools/developer-tools/cli/install\n\
-             Error: {e}"
-        ))?;
+///
+/// Performed as two explicit transactions — upload the WASM, then instantiate
+/// from its hash — with a short wait in between. The CLI's combined
+/// `deploy --wasm` builds both transactions back-to-back, which races on the
+/// source account's sequence number right after funding and fails with
+/// `TxBadSeq` or `TxNoAccount`. Splitting the steps lets each transaction fetch
+/// a fresh sequence number; the deploy step also retries on transient RPC lag.
+fn deploy_contract(
+    wasm_path: &PathBuf,
+    network: &str,
+    source_secret: &str,
+) -> Result<String, String> {
+    let wasm_hash = upload_contract_wasm(wasm_path, network, source_secret)?;
+    eprintln!("  Uploaded WASM (hash {wasm_hash}); waiting for the account sequence to settle...");
+    std::thread::sleep(std::time::Duration::from_secs(6));
+    deploy_from_wasm_hash(&wasm_hash, network, source_secret)
+}
 
-    if !output.status.success() {
-        return Err(format!(
-            "stellar contract deploy failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+/// Upload the contract WASM (its own transaction) and return its 64-char hex
+/// hash. Idempotent: re-uploading an already-installed WASM is a no-op on-chain.
+fn upload_contract_wasm(
+    wasm_path: &PathBuf,
+    network: &str,
+    source_secret: &str,
+) -> Result<String, String> {
+    let mut last_stderr = String::new();
+    for attempt in 1..=3 {
+        let output = std::process::Command::new("stellar")
+            .args(["contract", "upload"])
+            .arg("--wasm")
+            .arg(wasm_path)
+            .arg("--source")
+            .arg(source_secret)
+            .arg("--network")
+            .arg(network)
+            .output()
+            .map_err(|e| {
+                format!(
+                    "failed to run `stellar contract upload` — is the stellar CLI installed?\n\
+                 Install: https://docs.stellar.org/tools/developer-tools/cli/install\n\
+                 Error: {e}"
+                )
+            })?;
+
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            // The CLI prints the 64-char hex WASM hash on the last line.
+            let hash = stdout.lines().last().unwrap_or("").trim().to_string();
+            if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(format!(
+                    "unexpected stellar CLI output (expected 64-char wasm hash):\n{stdout}"
+                ));
+            }
+            return Ok(hash);
+        }
+
+        last_stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if last_stderr.contains("Account not found") && attempt < 3 {
+            eprintln!(
+                "  Upload attempt {attempt} could not see the funded account; retrying in 5s..."
+            );
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            continue;
+        }
+        break;
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    // The CLI prints the contract ID (C...) on the last line.
-    let cid = stdout.lines().last().unwrap_or("").trim().to_string();
-    if !cid.starts_with('C') {
-        return Err(format!("unexpected stellar CLI output (expected C... contract ID):\n{stdout}"));
+    Err(format!("stellar contract upload failed:\n{last_stderr}"))
+}
+
+/// Instantiate a contract from an already-uploaded WASM hash, retrying on
+/// transient RPC lag while the account or sequence number catches up.
+fn deploy_from_wasm_hash(
+    wasm_hash: &str,
+    network: &str,
+    source_secret: &str,
+) -> Result<String, String> {
+    let mut last_stderr = String::new();
+    for attempt in 1..=3 {
+        let output = std::process::Command::new("stellar")
+            .args(["contract", "deploy"])
+            .arg("--wasm-hash")
+            .arg(wasm_hash)
+            .arg("--source")
+            .arg(source_secret)
+            .arg("--network")
+            .arg(network)
+            .output()
+            .map_err(|e| {
+                format!(
+                    "failed to run `stellar contract deploy` — is the stellar CLI installed?\n\
+                 Install: https://docs.stellar.org/tools/developer-tools/cli/install\n\
+                 Error: {e}"
+                )
+            })?;
+
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            // The CLI prints the contract ID (C...) on the last line.
+            let cid = stdout.lines().last().unwrap_or("").trim().to_string();
+            if !cid.starts_with('C') {
+                return Err(format!(
+                    "unexpected stellar CLI output (expected C... contract ID):\n{stdout}"
+                ));
+            }
+            return Ok(cid);
+        }
+
+        last_stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let retryable = last_stderr.contains("TxBadSeq")
+            || last_stderr.contains("TxNoAccount")
+            || last_stderr.contains("Account not found");
+        if retryable && attempt < 3 {
+            eprintln!(
+                "  Deploy attempt {attempt} hit a transient RPC/account error; retrying in 5s..."
+            );
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            continue;
+        }
+        break;
     }
-    Ok(cid)
+
+    Err(format!("stellar contract deploy failed:\n{last_stderr}"))
 }
 
 /// Call `initialize(admin)` on the contract via native signing.
@@ -564,9 +845,10 @@ async fn cmd_start(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // can independently compute the oplog hash for completeness verification.
     let mut mongo_client: Option<mongodb::Client> = None;
     if config.mode == DaemonMode::Publish {
-        let mongo_uri = config.mongo_uri.as_deref().ok_or_else(|| {
-            "publisher mode requires --mongo-uri".to_string()
-        })?;
+        let mongo_uri = config
+            .mongo_uri
+            .as_deref()
+            .ok_or_else(|| "publisher mode requires --mongo-uri".to_string())?;
 
         log::info!("connecting to MongoDB: {}", redact_uri(mongo_uri));
         // Pass the URI through untouched: the publisher watches change streams,
@@ -584,17 +866,24 @@ async fn cmd_start(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         mongo_client = Some(client);
     } else if config.mode == DaemonMode::Attest {
         let mongo_uri = config.mongo_uri.as_deref().ok_or_else(|| {
-            "attester mode requires --mongo-uri (connect to the independent replica member)".to_string()
+            "attester mode requires --mongo-uri (connect to the independent replica member)"
+                .to_string()
         })?;
 
-        log::info!("attester: connecting to independent replica: {}", redact_uri(mongo_uri));
+        log::info!(
+            "attester: connecting to independent replica: {}",
+            redact_uri(mongo_uri)
+        );
         let mongo_uri = force_direct_connection(mongo_uri);
         let client = mongodb::Client::with_uri_str(&mongo_uri).await?;
         log::info!("attester: connected to independent replica member");
         mongo_client = Some(client);
     } else if config.mode == DaemonMode::Read {
         if let Some(mongo_uri) = config.mongo_uri.as_deref() {
-            log::info!("reader: connecting to independent replica for oplog verification: {}", redact_uri(mongo_uri));
+            log::info!(
+                "reader: connecting to independent replica for oplog verification: {}",
+                redact_uri(mongo_uri)
+            );
             let mongo_uri = force_direct_connection(mongo_uri);
             let client = mongodb::Client::with_uri_str(&mongo_uri).await?;
             log::info!("reader: connected to independent replica member");
@@ -608,9 +897,10 @@ async fn cmd_start(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut attester_key: Option<ed25519_dalek::SigningKey> = None;
     let mut attester_address: Option<String> = None;
     if config.mode == DaemonMode::Attest {
-        let key_file = config.attester_key_file.clone().unwrap_or_else(|| {
-            config.data_dir.join("audit").join("attester.key")
-        });
+        let key_file = config
+            .attester_key_file
+            .clone()
+            .unwrap_or_else(|| config.data_dir.join("audit").join("attester.key"));
         let key = audit_service::auditd::attester::load_or_generate_attester_key(&key_file)
             .map_err(|e| format!("failed to load attester key: {e}"))?;
         let public_key_hex = hex::encode(key.verifying_key().to_bytes());
@@ -619,48 +909,76 @@ async fn cmd_start(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Load the publisher's Stellar keypair for native signing.
-    let signing_keypair: Option<audit_service::audit::stellar_native::StellarKeypair> = if config.mode == DaemonMode::Publish {
-        let sk = config.secret_key.clone()
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| std::env::var("STELLAR_SECRET_KEY").ok().filter(|s| !s.trim().is_empty()))
-            .or_else(|| std::env::var("PUBLISHER_SECRET_KEY").ok().filter(|s| !s.trim().is_empty()));
-        match sk {
-            Some(s) => {
-                let kp = audit_service::auditd::load_keypair_from_secret_key(&s)
-                    .map_err(|e| format!("failed to load publisher keypair: {e}"))?;
-                log::info!("publisher: loaded Stellar keypair (account: {})", kp.account_id());
-                Some(kp)
+    let signing_keypair: Option<audit_service::audit::stellar_native::StellarKeypair> =
+        if config.mode == DaemonMode::Publish {
+            let sk = config
+                .secret_key
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| {
+                    std::env::var("STELLAR_SECRET_KEY")
+                        .ok()
+                        .filter(|s| !s.trim().is_empty())
+                })
+                .or_else(|| {
+                    std::env::var("PUBLISHER_SECRET_KEY")
+                        .ok()
+                        .filter(|s| !s.trim().is_empty())
+                });
+            match sk {
+                Some(s) => {
+                    let kp = audit_service::auditd::load_keypair_from_secret_key(&s)
+                        .map_err(|e| format!("failed to load publisher keypair: {e}"))?;
+                    log::info!(
+                        "publisher: loaded Stellar keypair (account: {})",
+                        kp.account_id()
+                    );
+                    Some(kp)
+                }
+                None => {
+                    return Err(
+                        "publisher mode requires --secret-key or STELLAR_SECRET_KEY env var"
+                            .to_string()
+                            .into(),
+                    );
+                }
             }
-            None => {
-                return Err("publisher mode requires --secret-key or STELLAR_SECRET_KEY env var".to_string().into());
-            }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     // Load the attester's Stellar keypair for native transaction signing.
-    let attester_stellar_keypair: Option<audit_service::audit::stellar_native::StellarKeypair> = if config.mode == DaemonMode::Attest {
-        let sk = config.attester_secret_key.clone()
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| std::env::var("ATTESTER_SECRET_KEY").ok().filter(|s| !s.trim().is_empty()));
-        match sk {
-            Some(s) => {
-                let kp = audit_service::auditd::load_keypair_from_secret_key(&s)
-                    .map_err(|e| format!("failed to load attester Stellar keypair: {e}"))?;
-                log::info!("attester: loaded Stellar keypair (account: {})", kp.account_id());
-                if attester_address.is_none() {
-                    attester_address = Some(kp.account_id());
+    let attester_stellar_keypair: Option<audit_service::audit::stellar_native::StellarKeypair> =
+        if config.mode == DaemonMode::Attest {
+            let sk = config
+                .attester_secret_key
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| {
+                    std::env::var("ATTESTER_SECRET_KEY")
+                        .ok()
+                        .filter(|s| !s.trim().is_empty())
+                });
+            match sk {
+                Some(s) => {
+                    let kp = audit_service::auditd::load_keypair_from_secret_key(&s)
+                        .map_err(|e| format!("failed to load attester Stellar keypair: {e}"))?;
+                    log::info!(
+                        "attester: loaded Stellar keypair (account: {})",
+                        kp.account_id()
+                    );
+                    if attester_address.is_none() {
+                        attester_address = Some(kp.account_id());
+                    }
+                    Some(kp)
                 }
-                Some(kp)
+                None => {
+                    return Err("attester mode requires --attester-secret-key or ATTESTER_SECRET_KEY env var".to_string().into());
+                }
             }
-            None => {
-                return Err("attester mode requires --attester-secret-key or ATTESTER_SECRET_KEY env var".to_string().into());
-            }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     // Build the daemon state.
     let state = Arc::new(DaemonState {
@@ -694,7 +1012,10 @@ async fn cmd_start(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Start the HTTP server.
-    log::info!("nosqlbuddy-audit listening on http://0.0.0.0:{}", config.port);
+    log::info!(
+        "nosqlbuddy-audit listening on http://0.0.0.0:{}",
+        config.port
+    );
     let result = audit_service::auditd::run_server(state, config.port).await;
 
     // Cleanup PID file on exit.
@@ -836,12 +1157,10 @@ fn parse_start_args(args: &[String]) -> DaemonConfig {
                 if i < args.len() {
                     config.chain = match args[i].as_str() {
                         "testnet" => audit_service::auditd::DaemonChainConfig::testnet(),
-                        "mainnet" => {
-                            audit_service::auditd::DaemonChainConfig::mainnet(
-                                config.rpc_url.clone(),
-                                String::new(),
-                            )
-                        }
+                        "mainnet" => audit_service::auditd::DaemonChainConfig::mainnet(
+                            config.rpc_url.clone(),
+                            String::new(),
+                        ),
                         _ => {
                             eprintln!("error: --network must be 'testnet' or 'mainnet'");
                             std::process::exit(1);
@@ -878,9 +1197,15 @@ fn parse_start_args(args: &[String]) -> DaemonConfig {
     }
 
     // Read Pinata credentials from environment if not provided via CLI.
-    let pinata_api_key = std::env::var("PINATA_API_KEY").ok().filter(|s| !s.trim().is_empty());
-    let pinata_api_secret = std::env::var("PINATA_API_SECRET").ok().filter(|s| !s.trim().is_empty());
-    let pinata_gateway_url = std::env::var("PINATA_GATEWAY_URL").ok().filter(|s| !s.trim().is_empty());
+    let pinata_api_key = std::env::var("PINATA_API_KEY")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    let pinata_api_secret = std::env::var("PINATA_API_SECRET")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    let pinata_gateway_url = std::env::var("PINATA_GATEWAY_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
     if pinata_api_key.is_some() || pinata_api_secret.is_some() || pinata_gateway_url.is_some() {
         let mut pc = config.pinata_config.clone().unwrap_or_default();
         if let Some(key) = pinata_api_key {
@@ -902,8 +1227,12 @@ fn parse_start_args(args: &[String]) -> DaemonConfig {
         std::process::exit(1);
     }
     if config.mode == DaemonMode::Attest && config.mongo_uri.is_none() {
-        eprintln!("error: --mode attest requires --mongo-uri (connect to the independent replica member)");
-        eprintln!("  Example: nosqlbuddy-audit start --mode attest --mongo-uri mongodb://localhost:27019");
+        eprintln!(
+            "error: --mode attest requires --mongo-uri (connect to the independent replica member)"
+        );
+        eprintln!(
+            "  Example: nosqlbuddy-audit start --mode attest --mongo-uri mongodb://localhost:27019"
+        );
         std::process::exit(1);
     }
 
@@ -919,7 +1248,10 @@ fn cmd_stop(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let pid_file = pid_file_path(&data_dir, port);
 
     if !pid_file.exists() {
-        eprintln!("nosqlbuddy-audit is not running (no PID file at {})", pid_file.display());
+        eprintln!(
+            "nosqlbuddy-audit is not running (no PID file at {})",
+            pid_file.display()
+        );
         std::process::exit(1);
     }
 
@@ -1020,7 +1352,8 @@ fn is_process_running(pid: i32) -> bool {
     #[cfg(not(unix))]
     {
         // On Windows, check if the process handle is valid.
-        let handle = unsafe { windows::Win32::System::Threading::OpenProcess(0, false, pid as u32) };
+        let handle =
+            unsafe { windows::Win32::System::Threading::OpenProcess(0, false, pid as u32) };
         !handle.is_invalid()
     }
 }
@@ -1033,13 +1366,17 @@ fn kill_process(pid: i32) -> Result<(), String> {
         if rc == 0 {
             Ok(())
         } else {
-            Err(format!("kill({pid}, SIGTERM) failed: errno {}", std::io::Error::last_os_error()))
+            Err(format!(
+                "kill({pid}, SIGTERM) failed: errno {}",
+                std::io::Error::last_os_error()
+            ))
         }
     }
     #[cfg(not(unix))]
     {
         // On Windows, use TerminateProcess.
-        let handle = unsafe { windows::Win32::System::Threading::OpenProcess(0x0001, false, pid as u32) };
+        let handle =
+            unsafe { windows::Win32::System::Threading::OpenProcess(0x0001, false, pid as u32) };
         if handle.is_invalid() {
             return Err("OpenProcess failed".to_string());
         }

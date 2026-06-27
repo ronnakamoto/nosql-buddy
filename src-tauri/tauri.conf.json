@@ -43,9 +43,14 @@
     "category": "DeveloperTool",
     "publisher": "NoSQLBuddy",
     "copyright": "(c) 2026 NoSQLBuddy",
-    "resources": [
-      "resources/circuits/merkle_inclusion.r1cs",
-      "resources/circuits/merkle_inclusion.wasm"
-    ]
+    "resources": {
+      "resources/circuits/merkle_inclusion.r1cs": "resources/circuits/merkle_inclusion.r1cs",
+      "resources/circuits/merkle_inclusion.wasm": "resources/circuits/merkle_inclusion.wasm",
+      "../docker-compose.audit.yml": "stack/docker-compose.audit.yml",
+      "../docker-compose.audit-db.yml": "stack/docker-compose.audit-db.yml",
+      "../scripts/rs-init-audit.js": "stack/scripts/rs-init-audit.js",
+      "../scripts/seed.js": "stack/scripts/seed.js",
+      "../audit-stack.env.example": "stack/audit-stack.env.example"
+    }
   }
 }

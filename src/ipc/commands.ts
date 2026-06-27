@@ -486,7 +486,30 @@ export interface DevPrerequisites {
   readerPortFree: boolean;
   auditStackRunning: boolean;
   dockerDaemonRunning: boolean;
+  envAuditPresent: boolean;
+  attesterKeyPresent: boolean;
+  auditConfigured: boolean;
   summary: string;
+}
+
+/** Parameters for the non-interactive setup wizard. */
+export interface DevSetupParams {
+  network?: string;
+  pinataApiKey?: string;
+  pinataApiSecret?: string;
+  pinataGatewayUrl?: string;
+  publisherSecretKey?: string;
+  attesterSecretKey?: string;
+  contractId?: string;
+  overwrite?: boolean;
+}
+
+/** Result of the non-interactive setup wizard (log is secret-redacted). */
+export interface DevSetupResult {
+  success: boolean;
+  log: string;
+  envAuditPresent: boolean;
+  attesterKeyPresent: boolean;
 }
 
 /** One audit-stack container. */
@@ -614,6 +637,7 @@ const commands = {
   auditCloseEpoch: () => invoke<Epoch>("audit_close_epoch"),
   auditMarkEpochCommitted: (epochNumber: number, txHash: string) =>
     invoke<void>("audit_mark_epoch_committed", { epochNumber, txHash }),
+  auditResetData: () => invoke<void>("audit_reset_data"),
 
   // --- ZK Audit: Phase 3 — Reader mode, IPFS, RPC, Attestation ---
   auditVerifyReaderMode: () =>
@@ -724,6 +748,8 @@ const commands = {
   auditDevStackResetData: () => invoke<string>("audit_dev_stack_reset_data"),
   auditDevStackLogs: (tail?: number) =>
     invoke<string>("audit_dev_stack_logs", { tail }),
+  auditDevStackSetup: (params: DevSetupParams) =>
+    invoke<DevSetupResult>("audit_dev_stack_setup", { params }),
 
   // --- ZK Audit: Dev mode audit service HTTP proxy (to docker) ---
   auditDevProxyGet: (port: number, path: string) =>

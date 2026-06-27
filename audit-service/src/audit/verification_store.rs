@@ -112,6 +112,15 @@ impl VerificationStore {
             .clone()
     }
 
+    /// Remove all recorded verification runs and persist the empty history.
+    pub fn clear(&self) -> AuditResult<()> {
+        self.records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.save()
+    }
+
     /// Persist the current history to disk, if a path is configured.
     fn save(&self) -> AuditResult<()> {
         let path = self

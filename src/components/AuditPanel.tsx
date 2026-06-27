@@ -115,15 +115,6 @@ export default function AuditPanel({
         onModeChanged={switchMode}
       />
     );
-  } else if (view === "dev" && config && isConfigured) {
-    // Configured dev mode → unified surface
-    body = (
-      <AuditSurface
-        config={config}
-        connectionId={connectionId}
-        onShowSettings={showSettings}
-      />
-    );
   } else if (view === "production" && config && isConfigured) {
     // Configured production mode → unified surface
     body = (
@@ -134,7 +125,7 @@ export default function AuditPanel({
       />
     );
   } else if (view === "dev") {
-    // Dev setup flow (Docker onboarding)
+    // Dev mode → Docker stack flow (Set up / Start Stack / live view).
     body = (
       <AuditDevFlow
         onShowSettings={showSettings}
@@ -156,8 +147,8 @@ export default function AuditPanel({
   // When showing the unified surface, the AuditSurface itself renders its own
   // sticky header. We still show the pane chrome title so it's consistent with
   // other tabs — but we hide the mode tabs (they live in Settings now).
-  const showModeTabs = view !== "chooser" && view !== "settings" && !isConfigured;
-  const isUnifiedSurface = (view === "dev" || view === "production") && isConfigured && !configLoading;
+  const isUnifiedSurface = view === "production" && isConfigured && !configLoading;
+  const showModeTabs = view !== "chooser" && view !== "settings" && !isUnifiedSurface;
 
   return (
     <div

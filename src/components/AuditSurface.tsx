@@ -121,6 +121,10 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
   // ─── Error ────────────────────────────────────────────────────────────
   const [error, setError] = useState<string | null>(null);
 
+  // ─── Reset audit data ─────────────────────────────────────────────────
+  const [resetBusy, setResetBusy] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
+
   // ─── Polling ─────────────────────────────────────────────────────────
   const refresh = useCallback(async () => {
     try {
@@ -313,6 +317,28 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
     }
   }, [connectionId]);
 
+  const handleResetData = useCallback(async () => {
+    setResetBusy(true);
+    setError(null);
+    try {
+      await commands.auditResetData();
+      setConfirmReset(false);
+      setVerifyReport(null);
+      setVerificationHistory([]);
+      setCommitResult(null);
+      setPinataResult(null);
+      setCurrentProof(null);
+      setOplogReport(null);
+      await refresh();
+      await refreshOnchainRoot();
+      await refreshVerificationHistory();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setResetBusy(false);
+    }
+  }, [refresh, refreshOnchainRoot, refreshVerificationHistory]);
+
   // ─── Adaptive section collapse ────────────────────────────────────────
   // When batch is sealed/committed, collapse the feed so the commit action leads.
   useEffect(() => {
@@ -344,6 +370,37 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
 
       <div className="audit-surface__body">
         {error && <Alert tone="danger">{error}</Alert>}
+
+        {/* ─── Reset audit data ──────────────────────────────────────────── */}
+        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+          {confirmReset ? (
+            <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
+              <span style={{ fontSize: "var(--font-size-xs)", color: "var(--ink-muted)" }}>
+                Clear all local audit data? On-chain history is unaffected.
+              </span>
+              <button className="audit-mode-tab" onClick={() => setConfirmReset(false)} disabled={resetBusy}>
+                Cancel
+              </button>
+              <button
+                className="audit-mode-tab"
+                onClick={handleResetData}
+                disabled={resetBusy}
+                style={{ color: "var(--danger-500)" }}
+              >
+                {resetBusy ? "Resetting…" : "Confirm reset"}
+              </button>
+            </div>
+          ) : (
+            <button
+              className="audit-mode-tab"
+              onClick={() => setConfirmReset(true)}
+              style={{ color: "var(--warning-500)" }}
+              title="Clear local events, batches, and verification history (on-chain history is unaffected)"
+            >
+              Reset audit data
+            </button>
+          )}
+        </div>
 
         {/* ─── 2. Status section ────────────────────────────────────────── */}
         <AuditStatusSection

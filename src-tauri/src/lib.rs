@@ -216,6 +216,7 @@ pub fn run() {
             audit::commands::audit_current_epoch,
             audit::commands::audit_close_epoch,
             audit::commands::audit_mark_epoch_committed,
+            audit::commands::audit_reset_data,
             audit::commands::audit_verify_reader_mode,
             audit::commands::audit_list_verification_history,
             audit::commands::audit_publish_epoch_to_ipfs,
@@ -254,6 +255,7 @@ pub fn run() {
             audit::dev_stack::audit_dev_stack_down,
             audit::dev_stack::audit_dev_stack_reset_data,
             audit::dev_stack::audit_dev_stack_logs,
+            audit::dev_stack::audit_dev_stack_setup,
             // ─── Dev mode daemon HTTP proxy ────────────────────────────
             audit::audit_dev_proxy_get,
             audit::audit_dev_proxy_post,

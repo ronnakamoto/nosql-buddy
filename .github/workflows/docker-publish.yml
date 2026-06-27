@@ -1,0 +1,74 @@
+name: Publish Audit Service Docker Image
+
+on:
+  push:
+    tags:
+      - 'v*' # Trigger on version tags (e.g., v0.1.0)
+  workflow_dispatch: # Allow manual triggers
+
+env:
+  REGISTRY: ghcr.io
+  # Must match the image referenced by deploy/docker-compose.audit.yml,
+  # deploy/audit-stack.env.example, and published_image_ref() in
+  # src-tauri/src/audit/dev_stack.rs.
+  IMAGE_NAME: ${{ github.repository_owner }}/nosqlbuddy-audit
+
+jobs:
+  build-and-push-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: audit-service/Dockerfile.audit
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Prepare release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          mkdir -p release-assets
+          cp deploy/docker-compose.audit.yml release-assets/
+          cp deploy/audit-stack.env.example release-assets/
+          # Zip the assets for easy downloading
+          cd release-assets && zip -r ../nosqlbuddy-audit-deploy.zip ./*
+
+      - name: Upload release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            nosqlbuddy-audit-deploy.zip
+            deploy/docker-compose.audit.yml
+            deploy/audit-stack.env.example

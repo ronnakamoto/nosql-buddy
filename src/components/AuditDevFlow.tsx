@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect, useCallback } from "react";
+import { useMemo, useState, useEffect, useCallback, useRef } from "react";
 import commands, {
   type DevPrerequisites,
   type DevStackStatus,
@@ -19,8 +19,10 @@ import {
   TxHashLink,
   ContractLink,
   LogsModal,
+  Modal,
 } from "./AuditUi";
-import type { ProofResult } from "../ipc/commands";
+import type { ProofResult, DevSetupParams } from "../ipc/commands";
+import { onAuditSetupProgress } from "../ipc/events";
 import { FlaskConical, CircleDashed, X, CheckCircle, ExternalLink } from "lucide-react";
 
 /**
@@ -86,6 +88,10 @@ export function AuditDevFlow(_: { onShowSettings: () => void; onSwitchMode: () =
   const [logsBusy, setLogsBusy] = useState(false);
   const [logs, setLogs] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [setupModalOpen, setSetupModalOpen] = useState(false);
+  const [setupBusy, setSetupBusy] = useState(false);
+  const [setupResultLog, setSetupResultLog] = useState<string | null>(null);
+  const [setupProgress, setSetupProgress] = useState<string[]>([]);
 
   const refreshInfra = useCallback(async () => {
     try {
@@ -175,6 +181,25 @@ export function AuditDevFlow(_: { onShowSettings: () => void; onSwitchMode: () =
     }
   };
 
+  const handleSetup = async (params: DevSetupParams) => {
+    setSetupBusy(true);
+    setError(null);
+    setSetupProgress([]);
+    const unlisten = await onAuditSetupProgress((line) =>
+      setSetupProgress((prev) => [...prev, line]),
+    );
+    try {
+      const res = await commands.auditDevStackSetup(params);
+      setSetupResultLog(res.log);
+      await refreshInfra();
+    } catch (e) {
+      setError(formatError(e));
+    } finally {
+      unlisten();
+      setSetupBusy(false);
+    }
+  };
+
   const ready = prereqs?.auditStackRunning ?? false;
 
   // Determine workflow step state for the step guide
@@ -223,6 +248,7 @@ export function AuditDevFlow(_: { onShowSettings: () => void; onSwitchMode: () =
           onStart={stackUp}
           onStop={stackDown}
           onToggleLogs={showLogs}
+          onOpenSetup={() => { setSetupResultLog(null); setSetupModalOpen(true); }}
         />
 
         {logs !== null && (
@@ -234,6 +260,15 @@ export function AuditDevFlow(_: { onShowSettings: () => void; onSwitchMode: () =
             title="Dev Stack Logs"
           />
         )}
+
+        <SetupWizardModal
+          open={setupModalOpen}
+          onClose={() => setSetupModalOpen(false)}
+          onSetup={handleSetup}
+          busy={setupBusy}
+          resultLog={setupResultLog}
+          progress={setupProgress}
+        />
 
         {/* ─── Live view or empty state ──────────────────────────────── */}
         {ready ? (
@@ -271,6 +306,7 @@ function StackStatusBar({
   onStart,
   onStop,
   onToggleLogs,
+  onOpenSetup,
 }: {
   prereqs: DevPrerequisites | null;
   stack: DevStackStatus | null;
@@ -285,6 +321,7 @@ function StackStatusBar({
   onStart: () => void;
   onStop: () => void;
   onToggleLogs: () => void;
+  onOpenSetup: () => void;
 }) {
   if (!prereqs) {
     return (
@@ -307,7 +344,8 @@ function StackStatusBar({
           ? "docker-compose.audit.yml missing"
           : null;
 
-  const canStart = !missingPrereq && !ready;
+  const configured = prereqs.auditConfigured;
+  const canStart = !missingPrereq && !ready && configured;
 
   return (
     <Card compact>
@@ -342,7 +380,7 @@ function StackStatusBar({
           )}
           {!ready && !missingPrereq && (
             <span style={{ fontSize: "var(--font-size-xs)", color: "var(--ink-faint)" }}>
-              Start the MongoDB replica set first
+              {configured ? "Start the MongoDB replica set first" : "Run Set up to generate audit credentials"}
             </span>
           )}
           <Button variant="ghost" onClick={onToggleLogs} loading={logsBusy} disabled={logsBusy}>
@@ -376,9 +414,19 @@ function StackStatusBar({
               >
                 Reset Data
               </Button>
-              <Button variant="primary" loading={busy} disabled={!canStart} onClick={onStart}>
-                Start Stack
-              </Button>
+              {configured ? (
+                <Button variant="primary" loading={busy} disabled={!canStart} onClick={onStart}>
+                  Start Stack
+                </Button>
+              ) : (
+                <Button
+                  variant="primary"
+                  disabled={!!missingPrereq}
+                  onClick={onOpenSetup}
+                >
+                  Set up
+                </Button>
+              )}
             </div>
           )}
         </div>
@@ -388,6 +436,173 @@ function StackStatusBar({
 }
 
 function DevLiveView() {
+  return <DevLiveViewInner />;
+}
+
+/** Auto-scrolling monospace log for streamed setup progress lines. */
+function ProgressLog({ lines, placeholder }: { lines: string[]; placeholder: string }) {
+  const ref = useRef<HTMLPreElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [lines]);
+  return (
+    <pre
+      ref={ref}
+      style={{
+        maxHeight: "240px",
+        minHeight: "120px",
+        overflow: "auto",
+        background: "var(--surface-2)",
+        border: "1px solid var(--border)",
+        borderRadius: "var(--radius-md)",
+        padding: "var(--space-3)",
+        fontSize: "var(--font-size-xs)",
+        fontFamily: "var(--font-mono)",
+        color: lines.length > 0 ? "var(--ink-muted)" : "var(--ink-faint)",
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+        margin: 0,
+      }}
+    >
+      {lines.length > 0 ? lines.join("\n") : placeholder}
+    </pre>
+  );
+}
+
+function SetupWizardModal({
+  open,
+  onClose,
+  onSetup,
+  busy,
+  resultLog,
+  progress,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onSetup: (params: DevSetupParams) => void;
+  busy: boolean;
+  resultLog: string | null;
+  progress: string[];
+}) {
+  const [pinataApiKey, setPinataApiKey] = useState("");
+  const [pinataApiSecret, setPinataApiSecret] = useState("");
+  const [pinataGatewayUrl, setPinataGatewayUrl] = useState("");
+
+  const submit = () => {
+    onSetup({
+      network: "testnet",
+      pinataApiKey: pinataApiKey.trim() || undefined,
+      pinataApiSecret: pinataApiSecret.trim() || undefined,
+      pinataGatewayUrl: pinataGatewayUrl.trim() || undefined,
+    });
+  };
+
+  return (
+    <Modal
+      open={open}
+      onClose={busy ? () => {} : onClose}
+      title="Set up the audit stack"
+      subtitle="Generates Stellar keys, funds them on testnet, and writes credentials"
+      maxWidth={560}
+      footer={
+        resultLog ? (
+          <Button variant="primary" onClick={onClose}>Done</Button>
+        ) : (
+          <div style={{ display: "flex", gap: "var(--space-2)" }}>
+            <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
+            <Button variant="primary" loading={busy} disabled={busy} onClick={submit}>
+              Run Setup
+            </Button>
+          </div>
+        )
+      }
+    >
+      {resultLog ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)" }}>
+          <Alert tone="success">
+            Setup complete. Credentials were written locally. You can now start the stack.
+          </Alert>
+          <pre
+            style={{
+              maxHeight: "320px",
+              overflow: "auto",
+              background: "var(--surface-2)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-md)",
+              padding: "var(--space-3)",
+              fontSize: "var(--font-size-xs)",
+              fontFamily: "var(--font-mono)",
+              color: "var(--ink-muted)",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+            }}
+          >
+            {resultLog}
+          </pre>
+        </div>
+      ) : busy ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
+            <Spinner size={16} />
+            <span style={{ fontSize: "var(--font-size-sm)", color: "var(--ink-muted)" }}>
+              Generating keys, funding accounts, deploying the contract, and authorizing the
+              attester… this can take a minute or two.
+            </span>
+          </div>
+          <ProgressLog
+            lines={progress}
+            placeholder="Waiting for the setup wizard to start…"
+          />
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)" }}>
+          <Alert tone="info">
+            This uses the Stellar <strong>testnet</strong>. Fresh publisher and attester keypairs
+            are generated and funded, and a new audit contract is deployed automatically (your
+            publisher becomes its admin) — no terminal needed. The secret keys are stored locally
+            and never shown here.
+          </Alert>
+          <div>
+            <div style={{ fontSize: "var(--font-size-sm)", fontWeight: 600, marginBottom: "var(--space-2)" }}>
+              Pinata IPFS credentials (optional)
+            </div>
+            <p style={{ fontSize: "var(--font-size-xs)", color: "var(--ink-faint)", marginTop: 0, marginBottom: "var(--space-2)" }}>
+              Provide these to pin audit batches to IPFS. Leave blank to skip; you can still anchor
+              roots on-chain.
+            </p>
+            <label className="field__label">Pinata API key</label>
+            <input
+              className="field__input"
+              type="text"
+              value={pinataApiKey}
+              onChange={(e) => setPinataApiKey(e.target.value)}
+              placeholder="optional"
+            />
+            <label className="field__label" style={{ marginTop: "var(--space-2)" }}>Pinata API secret</label>
+            <input
+              className="field__input"
+              type="password"
+              value={pinataApiSecret}
+              onChange={(e) => setPinataApiSecret(e.target.value)}
+              placeholder="optional"
+            />
+            <label className="field__label" style={{ marginTop: "var(--space-2)" }}>Pinata gateway URL</label>
+            <input
+              className="field__input"
+              type="text"
+              value={pinataGatewayUrl}
+              onChange={(e) => setPinataGatewayUrl(e.target.value)}
+              placeholder="https://gateway.pinata.cloud"
+            />
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function DevLiveViewInner() {
   const [status, setStatus] = useState<DaemonStatus | null>(null);
   const [events, setEvents] = useState<DevEvent[]>([]);
   const [epochs, setEpochs] = useState<DevEpoch[]>([]);

@@ -25,6 +25,26 @@ pub struct ConnectionClosedPayload {
     pub at: String,
 }
 
+/// Payload for the `audit-setup-progress` event: one (secret-redacted) line of
+/// output from the audit setup wizard, streamed live to the UI so users can see
+/// progress (key generation, funding, contract deploy, attester authorization).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditSetupProgressPayload {
+    pub line: String,
+}
+
+/// Emit a single line of audit-setup progress. Best-effort: emission failures
+/// are ignored so they never abort the setup run.
+pub fn emit_audit_setup_progress(app: &AppHandle, line: &str) {
+    let _ = app.emit(
+        "audit-setup-progress",
+        AuditSetupProgressPayload {
+            line: line.to_string(),
+        },
+    );
+}
+
 pub fn emit_connection_opened(
     app: &AppHandle,
     connection_id: &str,

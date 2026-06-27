@@ -45,6 +45,7 @@
 pub mod attestation;
 pub mod change_stream;
 pub mod dev_proxy;
+pub mod dev_setup;
 pub mod epoch;
 pub mod interceptor;
 pub mod ipfs;
@@ -60,7 +61,6 @@ pub mod sled_store;
 pub mod stellar;
 pub mod stellar_native;
 pub mod stellar_rpc;
-pub mod dev_setup;
 pub mod verification_store;
 
 #[cfg(test)]
@@ -304,12 +304,8 @@ impl AuditLog {
         }
 
         for ev in &parsed {
-            let recomputed_leaf = leaf_from_payload(
-                &ev.operation,
-                &ev.database,
-                &ev.collection,
-                &ev.payload,
-            );
+            let recomputed_leaf =
+                leaf_from_payload(&ev.operation, &ev.database, &ev.collection, &ev.payload);
             let recomputed_hex = fr_to_hex(recomputed_leaf);
             if recomputed_hex != ev.leaf_hex {
                 return Err(AuditError::ZkAudit(format!(
@@ -324,7 +320,9 @@ impl AuditLog {
             if ev.index >= tree.leaf_count() as u64 {
                 return Err(AuditError::ZkAudit(format!(
                     "audit log tamper detected at index {}: index {} exceeds tree leaf count {}",
-                    ev.index, ev.index, tree.leaf_count()
+                    ev.index,
+                    ev.index,
+                    tree.leaf_count()
                 )));
             }
 
@@ -416,7 +414,8 @@ impl AuditLog {
             // 1. Recompute the leaf from the stored payload and verify
             //    it matches the stored leaf_hex. Mismatch ⇒ payload was
             //    edited after the fact.
-            let recomputed_leaf = leaf_from_payload(&ev.operation, &ev.database, &ev.collection, &ev.payload);
+            let recomputed_leaf =
+                leaf_from_payload(&ev.operation, &ev.database, &ev.collection, &ev.payload);
             let recomputed_hex = fr_to_hex(recomputed_leaf);
             if recomputed_hex != ev.leaf_hex {
                 return Err(AuditError::ZkAudit(format!(
@@ -550,10 +549,7 @@ impl AuditLog {
 
     /// Get the number of recorded events.
     pub fn event_count(&self) -> usize {
-        self.events
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len()
+        self.events.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// List all recorded audit events.
@@ -608,8 +604,9 @@ impl AuditLog {
         if let Some(store) = sled_guard.as_ref() {
             if let Some(token_json) = store.load_resume_token(connection_id)? {
                 let token: mongodb::change_stream::event::ResumeToken =
-                    serde_json::from_str(&token_json)
-                        .map_err(|e| AuditError::Internal(format!("deserialize resume token: {e}")))?;
+                    serde_json::from_str(&token_json).map_err(|e| {
+                        AuditError::Internal(format!("deserialize resume token: {e}"))
+                    })?;
                 return Ok(Some(token));
             }
         }
@@ -623,6 +620,47 @@ impl AuditLog {
         let sled_guard = self.sled_store.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(store) = sled_guard.as_ref() {
             store.clear_resume_token(connection_id)?;
+        }
+        Ok(())
+    }
+
+    /// Wipe all audit state: the in-memory Merkle tree and event list, the
+    /// sled-backed tree store, and the persisted JSONL log (truncated).
+    ///
+    /// After this returns the log is empty (0 events, fresh root) and ready to
+    /// record new events. On-chain commitments are NOT affected — this only
+    /// clears local state.
+    pub fn clear(&self) -> AuditResult<()> {
+        // Reset the in-memory tree and events.
+        {
+            let mut tree = self.tree.lock().unwrap_or_else(|e| e.into_inner());
+            *tree = AuditMerkleTree::with_height(20)?;
+        }
+        {
+            let mut events = self.events.lock().unwrap_or_else(|e| e.into_inner());
+            events.clear();
+        }
+        // Clear the sled-backed tree store, if enabled.
+        {
+            let sled_guard = self.sled_store.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(store) = sled_guard.as_ref() {
+                store.clear()?;
+            }
+        }
+        // Truncate the persisted JSONL log and keep a fresh append handle.
+        {
+            let mut persistence = self.persistence.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(state) = persistence.as_mut() {
+                OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(&state.events_path)?;
+                state.file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&state.events_path)?;
+            }
         }
         Ok(())
     }
@@ -651,7 +689,9 @@ impl AuditLog {
     /// Returns `None` if persistence has not been set up yet.
     pub fn sled_db_path(&self) -> Option<std::path::PathBuf> {
         let sled_guard = self.sled_store.lock().unwrap_or_else(|e| e.into_inner());
-        sled_guard.as_ref().map(|store| store.db_path().to_path_buf())
+        sled_guard
+            .as_ref()
+            .map(|store| store.db_path().to_path_buf())
     }
 }
 
@@ -720,7 +760,8 @@ mod tests {
         {
             let audit = AuditLog::new().unwrap();
             audit.set_persistence_dir(&dir).unwrap();
-            interceptor::record_insert(&std::sync::Arc::new(audit), "db", "col", r#"{"a":1}"#).unwrap();
+            interceptor::record_insert(&std::sync::Arc::new(audit), "db", "col", r#"{"a":1}"#)
+                .unwrap();
         }
         let dir2 = dir.clone();
         {
@@ -760,7 +801,11 @@ mod tests {
         let root_after_session2 = {
             let audit = AuditLog::new().unwrap();
             audit.set_persistence_dir(&dir).unwrap();
-            assert_eq!(audit.event_count(), 2, "two events must survive from session 1");
+            assert_eq!(
+                audit.event_count(),
+                2,
+                "two events must survive from session 1"
+            );
             let a = std::sync::Arc::new(audit);
             interceptor::record_insert(&a, "db", "col", r#"{"a":3}"#).unwrap();
             assert_eq!(a.event_count(), 3);
@@ -828,7 +873,11 @@ mod tests {
 
         let audit = AuditLog::new().unwrap();
         audit.set_persistence_dir(&dir).unwrap();
-        assert_eq!(audit.event_count(), 2, "partial line must be dropped, prior 2 kept");
+        assert_eq!(
+            audit.event_count(),
+            2,
+            "partial line must be dropped, prior 2 kept"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

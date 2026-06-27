@@ -7,10 +7,12 @@ NoSQLBuddy connects to MongoDB, lets you browse data, run queries, build aggrega
 ## Contents
 
 - [Quickstart](#quickstart) — run the app and connect in minutes
+- [No MongoDB yet?](#no-mongodb-yet-run-the-seeded-demo-database) — run a seeded local database
 - [Features](#features)
 - [Using NoSQLBuddy](#using-nosqlbuddy) — how to use the core features
 - [ZK Audit Log](#zk-audit-log) — [Dev Mode](#dev-mode-full-stack-locally) · [Production Mode](#production-mode-in-app-your-keys)
 - [Standalone audit service](#standalone-audit-service-nosqlbuddy-audit) (advanced / reference)
+- [Deploying the audit service to a server](#deploying-the-audit-service-to-a-server)
 - [Security](#security)
 - [Testing](#testing)
 
@@ -29,6 +31,7 @@ Get the app running and connected to MongoDB in a few minutes.
    ```bash
    docker compose up -d   # MongoDB at localhost:27017, seeded with demo data
    ```
+   New to MongoDB or don't have one running? See [No MongoDB yet?](#no-mongodb-yet-run-the-seeded-demo-database) for what this starts and how to manage it.
 
 3. **Launch NoSQLBuddy:**
    ```bash
@@ -44,6 +47,48 @@ Get the app running and connected to MongoDB in a few minutes.
 > Want the tamper-evident, on-chain audit log? See [ZK Audit Log](#zk-audit-log).
 
 Prerequisites: [Node.js](https://nodejs.org/) 18+, [Rust](https://www.rust-lang.org/tools/install) 1.77+, and (optional) [Docker Desktop](https://www.docker.com/products/docker-desktop/) for the local database and audit stack. Full details under [Getting started](#getting-started).
+
+## No MongoDB yet? Run the seeded demo database
+
+NoSQLBuddy doesn't bundle a database — point it at any MongoDB you already have (local, Atlas, or remote). If you don't have one, this repo ships a one-command local database preloaded with realistic demo data, so you have something to browse right away.
+
+Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/). From the project root:
+
+```bash
+docker compose up -d
+```
+
+This starts a **single-node MongoDB replica set** at `localhost:27017` and seeds it with a sample e-commerce dataset (the `shopkeeper` database):
+
+| Collection | Contents |
+|---|---|
+| `products` | 12 products with price, cost, stock, ratings, tags, and nested specs |
+| `categories` | 5 product categories |
+| `customers` | 5 customers with nested name and address objects |
+| `orders` | 6 orders across delivered / shipped / processing / pending / cancelled states |
+| `inventory_log` | Stock movements from orders and supplier restocks |
+
+Unique, text, and compound indexes are created too, so schema/index analysis and explain plans have something to work with.
+
+Connect the app with this URI (the **New Connection** dialog):
+
+```
+mongodb://localhost:27017/?replicaSet=rs0
+```
+
+A single-member replica set is always its own primary, so writes never fail with `NotWritablePrimary`, and it still supports change streams and transactions — everything NoSQLBuddy's live features (including the audit log) need. No `/etc/hosts` aliases or `directConnection` tricks required.
+
+Manage it from the project root:
+
+```bash
+docker compose ps                # status
+docker compose logs -f           # tail logs
+docker compose down              # stop (data is kept in a named volume)
+docker compose down -v           # stop and wipe all data
+docker compose run --rm seeder   # re-seed the demo data
+```
+
+> This single-node dev database is **separate** from the 3-node replica set used by the audit trust-anchor demo (`docker-compose.audit-db.yml`). For everyday app use, the single-node DB above is all you need.
 
 ## Features
 
@@ -157,30 +202,25 @@ Runs the **complete audit system** on your machine via Docker — publisher, ind
 
 **Use this when:** you want to see or demo the entire audit system working end to end, without deploying anything of your own.
 
-**Prerequisites:** Docker Desktop, the 3-node MongoDB replica set running, and a [Pinata](https://pinata.cloud) account (or local IPFS) for batch publishing.
+**Prerequisites:** Docker Desktop, and (optional) a [Pinata](https://pinata.cloud) account or local IPFS for batch publishing. **Start Stack** brings up the 3-node MongoDB replica set for you.
 
-**Steps:**
+**Steps (no terminal needed):**
 
-1. Start the 3-node MongoDB replica set (from the project root):
-   ```bash
-   docker compose -f docker-compose.audit-db.yml up -d
-   ```
+1. Open the app, go to the Audit tab, and select **Dev Mode**.
 
-2. Run the setup wizard (interactive, in Docker). This one command does all the key work for you — it generates the two independent Stellar keypairs (publisher + attester), funds them on testnet via Friendbot, uses the bundled testnet contract, generates the attester's ed25519 oplog key, authorizes the attester on the contract, and writes `./attester.key` and `.env.audit` into the project root:
-   ```bash
-   docker compose -f docker-compose.audit.yml run --build --rm setup
-   ```
-   Press Enter to accept the defaults (testnet, generate both keys, bundled contract, `./attester.key`, `.env.audit`) and enter your Pinata API key/secret when prompted. The wizard runs in a container with the project root mounted, so the files land exactly where the audit stack expects them: `docker-compose.audit.yml` mounts `./attester.key` and reads `.env.audit`.
+2. Click **Set up**. This runs the setup wizard for you — no terminal required. It generates the two independent Stellar keypairs (publisher + attester), funds them on testnet via Friendbot, uses the bundled testnet contract, generates the attester's ed25519 oplog key, authorizes the attester on the contract, and writes `attester.key` + `.env.audit`. Enter your Pinata API key/secret in the form to enable IPFS publishing (optional). Your secret keys are stored locally and are never displayed.
 
    > **No `stellar` CLI needed for Dev Mode.** The wizard funds accounts and authorizes the attester with native signing against the bundled testnet contract. The CLI is only required if you choose to *deploy* a brand-new contract, which Dev Mode doesn't.
    >
    > **Why two keys?** The trust model requires the attester to be independent from the operator. If both used the same key, the operator could submit fake attestations themselves, defeating independent verification — so the wizard generates two separate keypairs.
 
-3. Open the app, go to the Audit tab, select **Dev Mode**, and click **Start Stack** (this launches the publisher, attester, and reader containers using the `.env.audit` and `./attester.key` the wizard produced).
+3. Click **Start Stack**. This brings up the 3-node MongoDB replica set and the publisher, attester, and reader containers using the `.env.audit` and `attester.key` that setup produced.
 
 4. The live view shows: event feed, epoch progress, on-chain root, K-of-N attestation status, oplog completeness verification, and epoch history — all querying the Docker daemons in real time.
 
 5. Click **Commit Now** to close the epoch, pin to IPFS, and commit the root on-chain.
+
+> **Installed (packaged) app:** everything above works the same in an installed build (dmg/msi/etc.). The **Set up** and **Start Stack** buttons pull the published audit image automatically — no source tree and no local `--build`.
 
 **Manual Docker commands** (alternative to the in-app Start Stack button):
 ```bash
@@ -469,6 +509,36 @@ curl http://localhost:9173/root
 # 8. (Optional) Generate a Groth16 inclusion proof
 curl -X POST http://localhost:9173/proof/0
 ```
+
+## Deploying the audit service to a server
+
+For production, run the audit daemon from the **published Docker image** — no source checkout and no Rust toolchain required. Release builds publish `ghcr.io/ronnakamoto/nosqlbuddy-audit` (tagged per release) and attach `deploy/docker-compose.audit.yml` + `audit-stack.env.example` as release assets.
+
+MongoDB is yours to operate — this stack does **not** start a database. The publisher connects to your primary; the attester/reader connect to an independent replica member you control.
+
+1. On the server, create a working directory and get the deploy assets (from the release, or the repo's `deploy/` directory):
+   ```bash
+   sudo mkdir -p /opt/nosqlbuddy-audit && cd /opt/nosqlbuddy-audit
+   # place docker-compose.audit.yml + audit-stack.env.example here, then:
+   cp audit-stack.env.example .env.audit
+   ```
+
+2. Generate keys and authorize the attester (writes `./attester.key` and fills in `.env.audit`). This runs the setup wizard from the published image:
+   ```bash
+   docker compose --env-file .env.audit run --rm setup
+   ```
+
+3. Edit `.env.audit`: set `PUBLISHER_MONGO_URI` / `ATTESTER_MONGO_URI` to your replica set, pin `AUDIT_IMAGE_TAG` to a release, and fill in IPFS/Pinata credentials. (If MongoDB runs on the same host, use `host.docker.internal` in the URIs.)
+
+4. Start and manage the stack:
+   ```bash
+   docker compose --env-file .env.audit up -d
+   docker compose --env-file .env.audit ps
+   docker compose --env-file .env.audit logs -f
+   docker compose --env-file .env.audit down
+   ```
+
+> **Run every command with `--env-file .env.audit`** so the `${VAR}` placeholders resolve. Daemon state persists in named volumes (`audit-publisher-data`, `audit-attester-data`, `audit-reader-data`); secrets are injected via `environment:` and are never baked into the image.
 
 ## Testing
 

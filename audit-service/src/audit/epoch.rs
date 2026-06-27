@@ -44,8 +44,8 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use crate::audit::AuditLog;
 use crate::audit::oplog::OplogTimestamp;
+use crate::audit::AuditLog;
 use crate::error::{AuditError, AuditResult};
 
 /// Configuration for when an epoch auto-closes.
@@ -158,12 +158,17 @@ impl EpochManager {
             match Self::load_from_file(&path, config.clone()) {
                 Ok(mgr) => return mgr,
                 Err(e) => {
-                    log::warn!("failed to load epoch state from {}: {e}; starting fresh", path.display());
+                    log::warn!(
+                        "failed to load epoch state from {}: {e}; starting fresh",
+                        path.display()
+                    );
                 }
             }
         }
         let mgr = Self::new(config);
-        *mgr.persistence_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
+        *mgr.persistence_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(path);
         mgr
     }
 
@@ -196,11 +201,29 @@ impl EpochManager {
             let state: PersistedEpochState = serde_json::from_str(&data)
                 .map_err(|e| AuditError::Internal(format!("parse epoch state: {e}")))?;
             *self.epochs.lock().unwrap_or_else(|e| e.into_inner()) = state.epochs;
-            *self.next_oplog_start_ts.lock().unwrap_or_else(|e| e.into_inner()) =
-                state.next_oplog_start_ts;
+            *self
+                .next_oplog_start_ts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = state.next_oplog_start_ts;
         }
-        *self.persistence_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
+        *self
+            .persistence_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(path);
         // Persist current state so the file is created when absent.
+        self.save()
+    }
+
+    /// Reset to a single fresh open epoch (number 0, start 0) and persist.
+    ///
+    /// Used by the desktop app's "Reset audit data" action so the batch
+    /// counter starts over alongside a cleared audit log.
+    pub fn reset(&self) -> AuditResult<()> {
+        *self.epochs.lock().unwrap_or_else(|e| e.into_inner()) = vec![Epoch::new(0, 0)];
+        *self
+            .next_oplog_start_ts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         self.save()
     }
 
@@ -221,8 +244,16 @@ impl EpochManager {
         }
 
         let state = PersistedEpochState {
-            epochs: self.epochs.lock().unwrap_or_else(|e| e.into_inner()).clone(),
-            next_oplog_start_ts: self.next_oplog_start_ts.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            epochs: self
+                .epochs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            next_oplog_start_ts: self
+                .next_oplog_start_ts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
         };
         let json = serde_json::to_string_pretty(&state)
             .map_err(|e| AuditError::Internal(format!("serialize epoch state: {e}")))?;
@@ -313,8 +344,8 @@ impl EpochManager {
         current.event_count += 1;
 
         // Check if we should auto-close the epoch.
-        let should_close = config.event_threshold > 0
-            && current.event_count >= config.event_threshold;
+        let should_close =
+            config.event_threshold > 0 && current.event_count >= config.event_threshold;
 
         if should_close {
             current.end_index = Some(index);
@@ -370,11 +401,7 @@ impl EpochManager {
     }
 
     /// Mark an epoch as committed on-chain.
-    pub fn mark_committed(
-        &self,
-        epoch_number: u64,
-        tx_hash: String,
-    ) -> AuditResult<()> {
+    pub fn mark_committed(&self, epoch_number: u64, tx_hash: String) -> AuditResult<()> {
         let mut epochs = self.epochs.lock().unwrap_or_else(|e| e.into_inner());
         for epoch in epochs.iter_mut() {
             if epoch.epoch_number == epoch_number {
@@ -393,7 +420,10 @@ impl EpochManager {
 
     /// Get all epochs (open and closed).
     pub fn list_epochs(&self) -> Vec<Epoch> {
-        self.epochs.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.epochs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Restore the current open epoch's event count from the audit log.
@@ -408,7 +438,11 @@ impl EpochManager {
         &self,
         audit_log: &AuditLog,
     ) -> AuditResult<Option<Epoch>> {
-        let config = self.config.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let config = self
+            .config
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let mut epochs = self.epochs.lock().unwrap_or_else(|e| e.into_inner());
 
         let current = epochs.last_mut().expect("always at least one epoch");
@@ -473,7 +507,10 @@ impl EpochManager {
 
     /// Get the current epoch configuration.
     pub fn config(&self) -> EpochConfig {
-        self.config.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.config
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Update the epoch configuration.
@@ -688,18 +725,22 @@ mod tests {
         let closed = mgr.record_event(1, &audit).unwrap().unwrap();
         assert!(!closed.has_oplog_hash());
 
-        let start_ts = OplogTimestamp { time: 1000, increment: 0 };
-        let end_ts = OplogTimestamp { time: 2000, increment: 5 };
-        let majority_ts = OplogTimestamp { time: 2000, increment: 10 };
+        let start_ts = OplogTimestamp {
+            time: 1000,
+            increment: 0,
+        };
+        let end_ts = OplogTimestamp {
+            time: 2000,
+            increment: 5,
+        };
+        let majority_ts = OplogTimestamp {
+            time: 2000,
+            increment: 10,
+        };
 
-        let updated = mgr.attach_oplog_hash(
-            0,
-            start_ts,
-            end_ts,
-            42,
-            "abc123".to_string(),
-            majority_ts,
-        ).unwrap();
+        let updated = mgr
+            .attach_oplog_hash(0, start_ts, end_ts, 42, "abc123".to_string(), majority_ts)
+            .unwrap();
 
         assert!(updated.has_oplog_hash());
         assert_eq!(updated.oplog_start_ts, Some(start_ts));
@@ -720,9 +761,18 @@ mod tests {
         mgr.record_event(0, &audit).unwrap();
         mgr.record_event(1, &audit).unwrap();
 
-        let start_ts = OplogTimestamp { time: 1000, increment: 0 };
-        let end_ts = OplogTimestamp { time: 2000, increment: 5 };
-        let majority_ts = OplogTimestamp { time: 2000, increment: 10 };
+        let start_ts = OplogTimestamp {
+            time: 1000,
+            increment: 0,
+        };
+        let end_ts = OplogTimestamp {
+            time: 2000,
+            increment: 5,
+        };
+        let majority_ts = OplogTimestamp {
+            time: 2000,
+            increment: 10,
+        };
 
         mgr.attach_oplog_hash(0, start_ts, end_ts, 42, "abc".to_string(), majority_ts)
             .unwrap();
@@ -736,9 +786,18 @@ mod tests {
     fn attach_oplog_hash_rejects_open_epoch() {
         let mgr = EpochManager::new(EpochConfig::default());
 
-        let start_ts = OplogTimestamp { time: 1000, increment: 0 };
-        let end_ts = OplogTimestamp { time: 2000, increment: 5 };
-        let majority_ts = OplogTimestamp { time: 2000, increment: 10 };
+        let start_ts = OplogTimestamp {
+            time: 1000,
+            increment: 0,
+        };
+        let end_ts = OplogTimestamp {
+            time: 2000,
+            increment: 5,
+        };
+        let majority_ts = OplogTimestamp {
+            time: 2000,
+            increment: 10,
+        };
 
         let err = mgr
             .attach_oplog_hash(0, start_ts, end_ts, 1, "abc".to_string(), majority_ts)
@@ -756,9 +815,18 @@ mod tests {
         mgr.record_event(0, &audit).unwrap();
         mgr.record_event(1, &audit).unwrap();
 
-        let start_ts = OplogTimestamp { time: 1000, increment: 0 };
-        let end_ts = OplogTimestamp { time: 2000, increment: 5 };
-        let majority_ts = OplogTimestamp { time: 2000, increment: 10 };
+        let start_ts = OplogTimestamp {
+            time: 1000,
+            increment: 0,
+        };
+        let end_ts = OplogTimestamp {
+            time: 2000,
+            increment: 5,
+        };
+        let majority_ts = OplogTimestamp {
+            time: 2000,
+            increment: 10,
+        };
 
         let err = mgr
             .attach_oplog_hash(99, start_ts, end_ts, 1, "abc".to_string(), majority_ts)
@@ -779,8 +847,14 @@ mod tests {
         mgr.record_event(1, &audit).unwrap();
 
         let start0 = OplogTimestamp::zero();
-        let end0 = OplogTimestamp { time: 1000, increment: 5 };
-        let majority0 = OplogTimestamp { time: 1000, increment: 10 };
+        let end0 = OplogTimestamp {
+            time: 1000,
+            increment: 5,
+        };
+        let majority0 = OplogTimestamp {
+            time: 1000,
+            increment: 10,
+        };
 
         mgr.attach_oplog_hash(0, start0, end0, 10, "root0".to_string(), majority0)
             .unwrap();
@@ -793,8 +867,14 @@ mod tests {
         let start1 = mgr.next_oplog_start_ts();
         assert_eq!(start1, end0);
 
-        let end1 = OplogTimestamp { time: 2000, increment: 3 };
-        let majority1 = OplogTimestamp { time: 2000, increment: 8 };
+        let end1 = OplogTimestamp {
+            time: 2000,
+            increment: 3,
+        };
+        let majority1 = OplogTimestamp {
+            time: 2000,
+            increment: 8,
+        };
 
         let updated1 = mgr
             .attach_oplog_hash(1, start1, end1, 15, "root1".to_string(), majority1)
@@ -839,10 +919,16 @@ mod tests {
             mgr.attach_oplog_hash(
                 0,
                 OplogTimestamp::zero(),
-                OplogTimestamp { time: 1000, increment: 0 },
+                OplogTimestamp {
+                    time: 1000,
+                    increment: 0,
+                },
                 5,
                 "root0".to_string(),
-                OplogTimestamp { time: 1000, increment: 0 },
+                OplogTimestamp {
+                    time: 1000,
+                    increment: 0,
+                },
             )
             .unwrap();
         }
@@ -868,7 +954,10 @@ mod tests {
             // next_oplog_start_ts should also be restored.
             assert_eq!(
                 mgr.next_oplog_start_ts(),
-                OplogTimestamp { time: 1000, increment: 0 }
+                OplogTimestamp {
+                    time: 1000,
+                    increment: 0
+                }
             );
         }
 
@@ -877,10 +966,8 @@ mod tests {
 
     #[test]
     fn sync_restores_open_epoch_count_after_restart() {
-        let tmp = std::env::temp_dir().join(format!(
-            "nosqlbuddy_audit_sync_test_{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("nosqlbuddy_audit_sync_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let path = tmp.join("epochs.json");
 

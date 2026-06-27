@@ -34,3 +34,16 @@ export async function onMenuAction(
 ): Promise<UnlistenFn> {
   return listen<string>("menu-action", (event) => handler(event.payload));
 }
+
+export interface AuditSetupProgressPayload {
+  line: string;
+}
+
+/** Subscribe to live audit setup wizard progress lines (secret-redacted). */
+export async function onAuditSetupProgress(
+  handler: (line: string) => void,
+): Promise<UnlistenFn> {
+  return listen<AuditSetupProgressPayload>("audit-setup-progress", (event) =>
+    handler(event.payload.line),
+  );
+}
