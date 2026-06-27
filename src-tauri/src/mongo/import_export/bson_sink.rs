@@ -5,19 +5,19 @@ use async_trait::async_trait;
 use bson::Document;
 
 use super::core::DocumentSink;
-use super::io_util::WriteTarget;
+use super::io_util::WriteSink;
 use crate::error::{AppError, AppResult};
 
 pub struct BsonSink {
-    target: Option<WriteTarget>,
+    target: Option<WriteSink>,
 }
 
 impl BsonSink {
-    pub fn new(target: WriteTarget) -> Self {
+    pub fn new(target: WriteSink) -> Self {
         Self { target: Some(target) }
     }
 
-    fn target_mut(&mut self) -> AppResult<&mut WriteTarget> {
+    fn target_mut(&mut self) -> AppResult<&mut WriteSink> {
         self.target
             .as_mut()
             .ok_or_else(|| AppError::Internal("bson sink already finalized".into()))
@@ -38,7 +38,7 @@ impl DocumentSink for BsonSink {
 
     async fn finish(mut self: Box<Self>) -> AppResult<()> {
         if let Some(target) = self.target.take() {
-            target.commit()?;
+            target.finish()?;
         }
         Ok(())
     }
@@ -62,7 +62,9 @@ mod tests {
     async fn bson_sink_writes_and_file_round_trips() {
         let path = std::env::temp_dir().join(format!("mongo-buddy-bson-sink-test-{}", uuid::Uuid::new_v4()));
         let writer = crate::mongo::import_export::io_util::AtomicFileWriter::create(path.clone()).unwrap();
-        let mut sink = BsonSink::new(WriteTarget::File(writer));
+        let mut sink = BsonSink::new(crate::mongo::import_export::io_util::WriteSink::Plain(
+            crate::mongo::import_export::io_util::WriteTarget::File(writer),
+        ));
 
         sink.start().await.unwrap();
         sink.write(doc! { "_id": ObjectId::from_str("64f1a2b3c4d5e6f789012345").unwrap(), "name": "Alice", "age": 30 }).await.unwrap();
@@ -93,7 +95,9 @@ mod tests {
     async fn bson_sink_abort_does_not_leave_file() {
         let path = std::env::temp_dir().join(format!("mongo-buddy-bson-abort-test-{}", uuid::Uuid::new_v4()));
         let writer = crate::mongo::import_export::io_util::AtomicFileWriter::create(path.clone()).unwrap();
-        let sink = BsonSink::new(WriteTarget::File(writer));
+        let sink = BsonSink::new(crate::mongo::import_export::io_util::WriteSink::Plain(
+            crate::mongo::import_export::io_util::WriteTarget::File(writer),
+        ));
         Box::new(sink).abort().await.unwrap();
         // The .part file should be cleaned up by AtomicFileWriter::abort.
         let part = crate::mongo::import_export::io_util::part_path_for(&path);

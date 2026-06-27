@@ -1,25 +1,32 @@
 import { useCallback, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import commands, { formatError, type DumpResult, type DatabaseSummary } from "../../ipc/commands";
+import commands, { formatError, type CompressionFormat, type DumpResult, type DatabaseSummary, type ScheduleConfig } from "../../ipc/commands";
 import { Alert } from "../../components/Alert";
 import { useToast } from "../../context/ToastContext";
 import { CollectionCheckList, type CollectionItem } from "./CollectionCheckList";
+import { SchedulePanel } from "./SchedulePanel";
 
 export interface DumpWizardProps {
   connectionId: string;
   database?: string;
   collections?: CollectionItem[];
   onClose: () => void;
+  onDumped?: () => void;
 }
 
 type Phase = "config" | "running" | "done" | "error";
+type DumpFormat = "bson" | "json";
 
-export function DumpWizard({ connectionId, database: initialDatabase = "", collections: initialCollections = [], onClose }: DumpWizardProps) {
+export function DumpWizard({ connectionId, database: initialDatabase = "", collections: initialCollections = [], onClose, onDumped }: DumpWizardProps) {
   const [databases, setDatabases] = useState<DatabaseSummary[]>([]);
   const [database, setDatabase] = useState(initialDatabase);
   const [collections, setCollections] = useState<CollectionItem[]>(initialCollections);
   const [selected, setSelected] = useState<string[]>(initialCollections.map((c) => c.name));
   const [destination, setDestination] = useState<string | null>(null);
+  const [format, setFormat] = useState<DumpFormat>("bson");
+  const [compression, setCompression] = useState<CompressionFormat>("gzip");
+  const [pathTemplate, setPathTemplate] = useState("${collection}");
+  const [schedule, setSchedule] = useState<ScheduleConfig | null>(null);
   const [phase, setPhase] = useState<Phase>("config");
   const [result, setResult] = useState<DumpResult | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -84,21 +91,33 @@ export function DumpWizard({ connectionId, database: initialDatabase = "", colle
         database,
         collections: selected,
         destinationDir: destination,
+        pathTemplate,
+        format,
+        compression,
         jobId,
       });
+      if (schedule) {
+        await commands.updateSchedule({
+          jobId: res.jobId,
+          cron: schedule.cron,
+          enabled: schedule.enabled,
+          retentionCount: schedule.retentionCount,
+        });
+      }
       setResult(res);
       setPhase("done");
       toast.push(
         `Dumped ${res.processed.toLocaleString()} document(s) to ${destination}.`,
         "success",
       );
+      onDumped?.();
     } catch (e) {
       const msg = formatError(e);
       setErrorMsg(msg);
       setPhase("error");
       toast.push(msg, "error");
     }
-  }, [connectionId, database, selected, destination, toast]);
+  }, [connectionId, database, selected, destination, pathTemplate, format, compression, toast]);
 
   const isReady = database && !loadingColl && collections.length > 0;
 
@@ -165,6 +184,50 @@ export function DumpWizard({ connectionId, database: initialDatabase = "", colle
                   </button>
                 </div>
               </div>
+
+              <div className="field">
+                <label className="field__label">Format</label>
+                <div className="row" style={{ gap: "var(--space-2)" }}>
+                  {(["bson", "json"] as DumpFormat[]).map((f) => (
+                    <button
+                      key={f}
+                      className={`btn btn--sm ${format === f ? "is-active" : ""}`}
+                      onClick={() => setFormat(f)}
+                      aria-pressed={format === f}
+                    >
+                      {f.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="field">
+                <label className="field__label">Compression</label>
+                <select
+                  className="field__select"
+                  value={compression}
+                  onChange={(e) => setCompression(e.target.value as CompressionFormat)}
+                >
+                  <option value="none">None</option>
+                  <option value="gzip">Gzip</option>
+                  <option value="zstd">Zstd</option>
+                </select>
+              </div>
+
+              <div className="field">
+                <label className="field__label">Filename template</label>
+                <input
+                  className="field__input"
+                  value={pathTemplate}
+                  onChange={(e) => setPathTemplate(e.target.value)}
+                  placeholder="${collection}"
+                />
+                <p className="field__hint">
+                  Tokens: {"${db}"}, {"${collection}"}, {"${date}"}, {"${time}"}, {"${profile}"}
+                </p>
+              </div>
+
+              <SchedulePanel value={schedule} onChange={setSchedule} />
 
               {database && (
                 <div>

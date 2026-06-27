@@ -97,6 +97,8 @@ export function ExportWizard({
   const [canonical, setCanonical] = useState(false);
   const [csvDelimiter, setCsvDelimiter] = useState(",");
   const [csvHeaders, setCsvHeaders] = useState(true);
+  const [compression, setCompression] = useState<import("../../ipc/commands").CompressionFormat>("none");
+  const [csvArrayMode, setCsvArrayMode] = useState<import("../../ipc/commands").CsvArrayMode | null>(null);
   const [targetDatabase, setTargetDatabase] = useState(database);
   const [targetCollection, setTargetCollection] = useState(`${collection}_copy`);
 
@@ -229,6 +231,8 @@ export function ExportWizard({
         csvDelimiter: format === "csv" ? csvDelimiter : null,
         csvHeaders,
         csvColumns: null,
+        compression,
+        csvArrayMode: format === "csv" ? csvArrayMode : null,
         fieldMapping,
       };
 
@@ -279,6 +283,8 @@ export function ExportWizard({
     canonical,
     csvDelimiter,
     csvHeaders,
+    compression,
+    csvArrayMode,
     targetDatabase,
     targetCollection,
     showMapping,
@@ -318,6 +324,8 @@ export function ExportWizard({
         csvDelimiter: format === "csv" ? csvDelimiter : null,
         csvHeaders,
         csvColumns: null,
+        compression,
+        csvArrayMode: format === "csv" ? csvArrayMode : null,
         fieldMapping: showMapping && mappingEntries.length > 0 ? mappingEntries : null,
       },
     };
@@ -342,6 +350,8 @@ export function ExportWizard({
     canonical,
     csvDelimiter,
     csvHeaders,
+    compression,
+    csvArrayMode,
     showMapping,
     mappingEntries,
     taskName,
@@ -458,7 +468,7 @@ export function ExportWizard({
             <div className="field">
             <span className="field__label">Format</span>
             <div className="row" style={{ gap: "var(--space-2)" }}>
-              {(["json", "csv"] as ExportFormat[]).map((f) => (
+              {(["json", "csv", "bson"] as ExportFormat[]).map((f) => (
                 <button
                   key={f}
                   className={`btn btn--sm ${format === f ? "is-active" : ""}`}
@@ -470,6 +480,22 @@ export function ExportWizard({
                 </button>
               ))}
             </div>
+            </div>
+          )}
+
+          {destination === "file" && (
+            <div className="field">
+              <label className="field__label">Compression</label>
+              <select
+                className="field__select"
+                value={compression}
+                onChange={(e) => setCompression(e.target.value as import("../../ipc/commands").CompressionFormat)}
+                disabled={phase === "running"}
+              >
+                <option value="none">None</option>
+                <option value="gzip">Gzip</option>
+                <option value="zstd">Zstd</option>
+              </select>
             </div>
           )}
 
@@ -578,6 +604,18 @@ export function ExportWizard({
                 />
                 <span style={{ fontSize: 13 }}>Include header row</span>
               </label>
+              <div className="field">
+                <span className="field__label">Array handling</span>
+                <select
+                  className="field__select"
+                  value={csvArrayMode ?? "jsonString"}
+                  onChange={(e) => setCsvArrayMode(e.target.value as import("../../ipc/commands").CsvArrayMode)}
+                  disabled={phase === "running"}
+                >
+                  <option value="jsonString">Serialize as JSON string</option>
+                  <option value="flatten">Flatten: dotted keys (tags.0, tags.1)</option>
+                </select>
+              </div>
               <Alert tone="warning" style={{ margin: 0 }}>
                 CSV cannot represent all BSON types. Nested objects, arrays, and
                 binary become JSON strings; ObjectId and dates become their

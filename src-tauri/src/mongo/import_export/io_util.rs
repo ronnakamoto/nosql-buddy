@@ -19,10 +19,46 @@ pub fn validate_target_path(path: &str) -> AppResult<PathBuf> {
     validate_user_path(path, "export", false)
 }
 
-/// Validate an import source path. The file must already exist and live under
+/// Validate an import source file path. The file must already exist and live under
 /// the same user roots as export targets.
 pub fn validate_source_path(path: &str) -> AppResult<PathBuf> {
     validate_user_path(path, "import", true)
+}
+
+/// Validate a restore source directory path. The directory must already exist and live under
+/// the same user roots as export targets.
+pub fn validate_source_dir(path: &str) -> AppResult<PathBuf> {
+    let target = PathBuf::from(path);
+    let parent = target
+        .parent()
+        .ok_or_else(|| AppError::Validation("restore path has no parent directory".into()))?;
+    let parent_canon = parent
+        .canonicalize()
+        .map_err(|e| AppError::Validation(format!("invalid restore directory: {e}")))?;
+
+    let allowed: Vec<PathBuf> = [
+        dirs::document_dir(),
+        dirs::download_dir(),
+        dirs::desktop_dir(),
+        dirs::home_dir(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|p| p.canonicalize().ok())
+    .collect();
+
+    let permitted = allowed.iter().any(|root| parent_canon.starts_with(root));
+    if !permitted {
+        return Err(AppError::Validation(
+            "restore path must be under your Documents, Downloads, Desktop, or Home directory".into(),
+        ));
+    }
+    if !target.is_dir() {
+        return Err(AppError::Validation(
+            "restore source directory does not exist".into(),
+        ));
+    }
+    Ok(target)
 }
 
 fn validate_user_path(path: &str, operation: &str, must_exist: bool) -> AppResult<PathBuf> {
@@ -160,11 +196,177 @@ impl WriteTarget {
     }
 }
 
+/// Compression kind for archives and file exports.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum CompressionKind {
+    None,
+    Gzip,
+    Zstd,
+}
+
+impl CompressionKind {
+    pub fn extension(&self) -> &'static str {
+        match self {
+            CompressionKind::None => "",
+            CompressionKind::Gzip => ".gz",
+            CompressionKind::Zstd => ".zst",
+        }
+    }
+}
+
+/// A transparent [`std::io::Write`] adapter around [`WriteTarget`] so it can be
+/// fed to `flate2` / `zstd` encoders.
+struct DirectWriter(WriteTarget);
+
+impl std::io::Write for DirectWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write_all(buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match &mut self.0 {
+            WriteTarget::File(f) => {
+                f.writer().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?.flush()
+            }
+            WriteTarget::Buffer(_) => Ok(()),
+        }
+    }
+}
+
+/// A wrapper that applies optional compression on top of a [`WriteTarget`].
+/// All writes go through the compressor; `finish` flushes and returns the
+/// underlying [`WriteTarget`] so it can be committed / aborted as usual.
+pub struct CompressedWriter {
+    encoder: Encoder,
+}
+
+enum Encoder {
+    None(DirectWriter),
+    Gzip(flate2::write::GzEncoder<DirectWriter>),
+    Zstd(zstd::stream::write::Encoder<'static, DirectWriter>),
+}
+
+impl std::io::Write for Encoder {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Encoder::None(w) => w.write(buf),
+            Encoder::Gzip(w) => w.write(buf),
+            Encoder::Zstd(w) => w.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Encoder::None(w) => w.flush(),
+            Encoder::Gzip(w) => w.flush(),
+            Encoder::Zstd(w) => w.flush(),
+        }
+    }
+}
+
+impl CompressedWriter {
+    pub fn new(target: WriteTarget, kind: CompressionKind) -> AppResult<Self> {
+        let direct = DirectWriter(target);
+        let encoder = match kind {
+            CompressionKind::None => Encoder::None(direct),
+            CompressionKind::Gzip => Encoder::Gzip(flate2::write::GzEncoder::new(
+                direct,
+                flate2::Compression::default(),
+            )),
+            CompressionKind::Zstd => Encoder::Zstd(
+                zstd::stream::write::Encoder::new(direct, 3).map_err(|e| {
+                    AppError::Io(format!("zstd encoder init failed: {e}"))
+                })?,
+            ),
+        };
+        Ok(Self { encoder })
+    }
+
+    pub fn write_all(&mut self, bytes: &[u8]) -> AppResult<()> {
+        use std::io::Write;
+        self.encoder
+            .write_all(bytes)
+            .map_err(|e| AppError::Io(format!("compression write failed: {e}")))
+    }
+
+    /// Finish compression and return the inner [`WriteTarget`].
+    pub fn finish(self) -> AppResult<WriteTarget> {
+        match self.encoder {
+            Encoder::None(direct) => Ok(direct.0),
+            Encoder::Gzip(gz) => {
+                let direct = gz.finish().map_err(|e| AppError::Io(format!("gzip finish: {e}")))?;
+                Ok(direct.0)
+            }
+            Encoder::Zstd(zst) => {
+                let direct = zst.finish().map_err(|e| AppError::Io(format!("zstd finish: {e}")))?;
+                Ok(direct.0)
+            }
+        }
+    }
+
+    /// Abort without flushing. Returns the inner [`WriteTarget`] so it can be
+    /// aborted in turn (removing the partial file).
+    pub fn abort(self) -> WriteTarget {
+        match self.encoder {
+            Encoder::None(direct) => direct.0,
+            Encoder::Gzip(gz) => {
+                // Best-effort: try to finish; if it fails, drop the encoder
+                // and return the inner target so the caller can clean up.
+                match gz.finish() {
+                    Ok(direct) => direct.0,
+                    Err(_) => WriteTarget::Buffer(Vec::new()),
+                }
+            }
+            Encoder::Zstd(zst) => {
+                match zst.finish() {
+                    Ok(direct) => direct.0,
+                    Err(_) => WriteTarget::Buffer(Vec::new()),
+                }
+            }
+        }
+    }
+}
+
+/// A unified write target that may be plain or compressed.
+/// Sinks use this so they do not need to branch on compression themselves.
+pub enum WriteSink {
+    Plain(WriteTarget),
+    Compressed(CompressedWriter),
+}
+
+impl WriteSink {
+    pub fn write_all(&mut self, bytes: &[u8]) -> AppResult<()> {
+        match self {
+            WriteSink::Plain(t) => t.write_all(bytes),
+            WriteSink::Compressed(c) => c.write_all(bytes),
+        }
+    }
+
+    pub fn finish(self) -> AppResult<Option<String>> {
+        match self {
+            WriteSink::Plain(t) => t.commit(),
+            WriteSink::Compressed(c) => {
+                let target = c.finish()?;
+                target.commit()
+            }
+        }
+    }
+
+    pub fn abort(self) {
+        match self {
+            WriteSink::Plain(t) => t.abort(),
+            WriteSink::Compressed(c) => c.abort().abort(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_test_path(name: &str) -> PathBuf {
@@ -219,5 +421,80 @@ mod tests {
 
         let denied = validate_target_path("/etc/mongo-buddy-export-validation.json");
         assert!(matches!(denied, Err(AppError::Validation(_))));
+    }
+
+    #[test]
+    fn compressed_writer_none_round_trips() {
+        let path = unique_test_path("plain.txt");
+        let target = WriteTarget::File(AtomicFileWriter::create(path.clone()).unwrap());
+        let mut writer = CompressedWriter::new(target, CompressionKind::None).unwrap();
+        writer.write_all(b"hello plain").unwrap();
+        let finished = writer.finish().unwrap();
+        finished.commit().unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "hello plain");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(path.parent().unwrap());
+    }
+
+    #[test]
+    fn compressed_writer_gzip_round_trips() {
+        let path = unique_test_path("compressed.gz");
+        let target = WriteTarget::File(AtomicFileWriter::create(path.clone()).unwrap());
+        let mut writer = CompressedWriter::new(target, CompressionKind::Gzip).unwrap();
+        writer.write_all(b"hello gzip").unwrap();
+        let finished = writer.finish().unwrap();
+        finished.commit().unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(file);
+        let mut buf = Vec::new();
+        decoder.read_to_end(&mut buf).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "hello gzip");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(path.parent().unwrap());
+    }
+
+    #[test]
+    fn compressed_writer_zstd_round_trips() {
+        let path = unique_test_path("compressed.zst");
+        let target = WriteTarget::File(AtomicFileWriter::create(path.clone()).unwrap());
+        let mut writer = CompressedWriter::new(target, CompressionKind::Zstd).unwrap();
+        writer.write_all(b"hello zstd").unwrap();
+        let finished = writer.finish().unwrap();
+        finished.commit().unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut decoder = zstd::stream::read::Decoder::new(file).unwrap();
+        let mut buf = Vec::new();
+        decoder.read_to_end(&mut buf).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "hello zstd");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(path.parent().unwrap());
+    }
+
+    #[test]
+    fn source_dir_validation_allows_home_dir_and_rejects_system_dir() {
+        let home = dirs::home_dir().unwrap();
+        let allowed = home.join("mongo-buddy-restore-test-dir");
+        fs::create_dir_all(&allowed).unwrap();
+        assert_eq!(
+            validate_source_dir(&allowed.to_string_lossy()).unwrap(),
+            allowed
+        );
+        let _ = fs::remove_dir(&allowed);
+
+        let denied = validate_source_dir("/etc");
+        assert!(matches!(denied, Err(AppError::Validation(_))));
+    }
+
+    #[test]
+    fn source_dir_validation_rejects_file() {
+        let home = dirs::home_dir().unwrap();
+        let file = home.join("mongo-buddy-restore-test-file.txt");
+        fs::write(&file, b"x").unwrap();
+        let result = validate_source_dir(&file.to_string_lossy());
+        assert!(matches!(result, Err(AppError::Validation(_))));
+        let _ = fs::remove_file(&file);
     }
 }

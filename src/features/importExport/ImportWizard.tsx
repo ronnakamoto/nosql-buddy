@@ -93,7 +93,10 @@ export function ImportWizard({
   }, []);
 
   const chooseFile = useCallback(async () => {
-    const extensions = format === "json" ? ["json", "ndjson"] : ["csv", "tsv"];
+    const extensions =
+      format === "json" ? ["json", "ndjson"] :
+      format === "bson" ? ["bson", "bson.gz", "bson.zst"] :
+      ["csv", "tsv"];
     const chosen = await open({
       multiple: false,
       directory: false,
@@ -348,7 +351,7 @@ export function ImportWizard({
           <div className="field">
             <span className="field__label">Format</span>
             <div className="row" style={{ gap: "var(--space-2)" }}>
-              {(["json", "csv"] as ImportFormat[]).map((f) => (
+              {(["json", "csv", "bson"] as ImportFormat[]).map((f) => (
                 <button
                   key={f}
                   className={`btn btn--sm ${format === f ? "is-active" : ""}`}
@@ -356,6 +359,9 @@ export function ImportWizard({
                     setFormat(f);
                     setPreview(null);
                     setShowMapping(false);
+                    if (f === "bson" && sourceKind === "clipboard") {
+                      setSourceKind("file");
+                    }
                   }}
                   disabled={phase === "running"}
                   aria-pressed={format === f}
@@ -374,7 +380,7 @@ export function ImportWizard({
                   key={kind}
                   className={`btn btn--sm ${sourceKind === kind ? "is-active" : ""}`}
                   onClick={() => setSourceKind(kind)}
-                  disabled={phase === "running"}
+                  disabled={phase === "running" || (kind === "clipboard" && format === "bson")}
                   aria-pressed={sourceKind === kind}
                 >
                   {kind === "file" ? "File" : "Clipboard"}

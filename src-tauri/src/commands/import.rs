@@ -8,11 +8,13 @@ use std::sync::Arc;
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
+use crate::events::notify_job_completed;
 use crate::mongo::bson_json::doc_to_display_json;
 use crate::mongo::import_export::collection_sink::CollectionSink;
 use crate::mongo::import_export::core::{
     run_pipeline, DocumentSink, DocumentSource, JobContext, RowError, RowResult,
 };
+use crate::mongo::import_export::bson_source::BsonSource;
 use crate::mongo::import_export::csv_source::CsvSource;
 use crate::mongo::import_export::io_util::validate_source_path;
 use crate::mongo::import_export::json_source::{JsonImportShape, JsonSource};
@@ -30,6 +32,7 @@ const MAX_ERROR_SAMPLES: usize = 100;
 pub enum ImportFormat {
     Json,
     Csv,
+    Bson,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -205,7 +208,8 @@ pub async fn run_import(
         JobStatus::Done
     };
     let msg = format!("Imported {} documents, {} errors", inserted.load(Ordering::Relaxed), report.errors);
-    state.jobs.update_status(&request.job_id, status, msg).await;
+    state.jobs.update_status(&request.job_id, status, msg.clone()).await;
+    notify_job_completed(&app, &request.job_id, "Import", &msg);
 
     Ok(ImportResult {
         job_id: report.job_id,
@@ -261,6 +265,17 @@ fn build_source(request: &ImportRequest) -> AppResult<Box<dyn DocumentSource>> {
                 delimiter,
                 request.options.csv_headers,
             )?))
+        }
+        (ImportFormat::Bson, ImportSourceKind::File) => {
+            let path =
+                request.source.path.as_deref().ok_or_else(|| {
+                    AppError::Validation("file import requires a source path".into())
+                })?;
+            let path = validate_source_path(path)?;
+            Ok(Box::new(BsonSource::from_path(&path)?))
+        }
+        (ImportFormat::Bson, ImportSourceKind::Clipboard) => {
+            Err(AppError::Validation("BSON import does not support clipboard".into()))
         }
     }
 }

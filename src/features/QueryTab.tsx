@@ -61,6 +61,8 @@ export interface QueryTabProps {
    * in aggregation mode and pre-populate it with this pipeline.
    */
   onOpenInAggregationEditor?: (pipeline: unknown[]) => void;
+  /** Called after a successful import to refresh external views (e.g. sidebar). */
+  onImported?: () => void;
 }
 
 type Mode = "find" | "aggregate" | "sql";
@@ -349,6 +351,7 @@ export function QueryTab({
   onClose,
   onResult,
   onOpenInAggregationEditor,
+  onImported,
 }: QueryTabProps) {
   const [mode, setMode] = useState<Mode>("find");
   const [filterText, setFilterText] = useState(DEFAULT_FILTER);
@@ -742,6 +745,8 @@ export function QueryTab({
           csvDelimiter: null,
           csvHeaders: true,
           csvColumns: null,
+          compression: "none",
+          csvArrayMode: null,
         },
       });
       if (result.clipboardText != null) {
@@ -1304,7 +1309,10 @@ export function QueryTab({
           database={database}
           collection={collection}
           onClose={() => setImportOpen(false)}
-          onImported={() => void run()}
+          onImported={() => {
+            void run();
+            onImported?.();
+          }}
         />
       )}
       {pendingDelete && (

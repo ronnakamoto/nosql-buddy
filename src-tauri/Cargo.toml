@@ -42,6 +42,9 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "sync-s
 dirs = "5"
 regex = "1"
 boa_engine = "0.21"
+flate2 = "1"
+zstd = "0.13"
+cron = "0.15"
 
 # Audit service (extracted standalone crate)
 audit-service = { package = "nosqlbuddy-audit-service", path = "../audit-service" }

@@ -6,6 +6,7 @@
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
+use tauri_plugin_notification::NotificationExt;
 
 /// Payload for the `connection-opened` event.
 #[derive(Debug, Clone, Serialize)]
@@ -149,4 +150,13 @@ fn chrono_now() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis().to_string())
         .unwrap_or_else(|_| "0".to_string())
+}
+
+/// Show a native OS notification when a long-running job completes.
+/// Silently ignored if the notification plugin fails.
+pub fn notify_job_completed(app: &AppHandle, _job_id: &str, kind: &str, message: &str) {
+    let _ = app.notification().builder()
+        .title(format!("NoSQLBuddy — {} completed", kind))
+        .body(message.to_string())
+        .show();
 }

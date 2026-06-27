@@ -45,12 +45,16 @@ impl AppState {
         // `tauri::AppHandle` to it. We use a placeholder here.
         let store_path = std::env::temp_dir().join("nosqlbuddy");
         let profiles = Arc::new(ProfileRepository::new(store_path, secrets.clone()));
+        let jobs_path = dirs::data_dir().map(|d| d.join("nosqlbuddy").join("jobs.jsonl"));
+        if let Some(ref p) = jobs_path {
+            let _ = std::fs::create_dir_all(p.parent().unwrap());
+        }
         Self {
             profiles,
             secrets,
             clients: ClientRegistry::new(),
             shell_registry: ShellRegistry::new(),
-            jobs: JobStore::new(),
+            jobs: JobStore::with_path(jobs_path),
             audit_log: Arc::new(AuditLog::new().expect("failed to create audit log")),
             change_streams: ChangeStreamRegistry::new(),
             epoch_manager: EpochManager::default(),

@@ -11,11 +11,11 @@ use bson::{Bson, Document};
 use std::sync::{Arc, Mutex};
 
 use super::core::DocumentSink;
-use super::io_util::WriteTarget;
+use super::io_util::WriteSink;
 use crate::error::{AppError, AppResult};
 
 pub struct CsvSink {
-    target: Option<WriteTarget>,
+    target: Option<WriteSink>,
     output_slot: Arc<Mutex<Option<String>>>,
     columns: Vec<String>,
     delimiter: u8,
@@ -24,7 +24,7 @@ pub struct CsvSink {
 
 impl CsvSink {
     pub fn new(
-        target: WriteTarget,
+        target: WriteSink,
         output_slot: Arc<Mutex<Option<String>>>,
         columns: Vec<String>,
         delimiter: u8,
@@ -39,7 +39,7 @@ impl CsvSink {
         }
     }
 
-    fn target_mut(&mut self) -> AppResult<&mut WriteTarget> {
+    fn target_mut(&mut self) -> AppResult<&mut WriteSink> {
         self.target
             .as_mut()
             .ok_or_else(|| AppError::Internal("csv sink already finalized".into()))
@@ -87,7 +87,7 @@ impl DocumentSink for CsvSink {
             .target
             .take()
             .ok_or_else(|| AppError::Internal("csv sink already finalized".into()))?;
-        if let Some(text) = target.commit()? {
+        if let Some(text) = target.finish()? {
             *self
                 .output_slot
                 .lock()
@@ -193,7 +193,7 @@ mod tests {
             }),
         };
         let mut sink = CsvSink::new(
-            WriteTarget::Buffer(Vec::new()),
+            WriteSink::Plain(crate::mongo::import_export::io_util::WriteTarget::Buffer(Vec::new())),
             output.clone(),
             vec![
                 "_id".into(),

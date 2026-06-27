@@ -7,6 +7,7 @@ use tauri::State;
 use crate::error::AppResult;
 use crate::mongo::job_store::{JobFilter, JobLogEntry, JobMeta, JobStatus};
 use crate::state::AppState;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -115,4 +116,42 @@ pub async fn rerun_job(job_id: String, state: State<'_, AppState>) -> AppResult<
     state.jobs.log_info(&new_meta.job_id, "Queued for rerun").await;
 
     Ok(new_meta)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateScheduleRequest {
+    pub job_id: String,
+    pub cron: String,
+    pub enabled: bool,
+    pub retention_count: Option<u32>,
+}
+
+#[tauri::command]
+pub async fn update_schedule(
+    request: UpdateScheduleRequest,
+    state: State<'_, AppState>,
+) -> AppResult<JobMeta> {
+    let mut meta = state
+        .jobs
+        .get(&request.job_id)
+        .await
+        .ok_or_else(|| crate::error::AppError::NotFound(format!("job not found: {}", request.job_id)))?;
+
+    let next = if request.enabled {
+        let schedule = cron::Schedule::from_str(&request.cron)
+            .map_err(|e| crate::error::AppError::Validation(format!("invalid cron: {e}")))?;
+        schedule.upcoming(chrono::Local).next().map(|dt| dt.to_rfc3339())
+    } else {
+        None
+    };
+
+    meta.schedule = Some(crate::mongo::job_store::ScheduleConfig {
+        cron: request.cron,
+        enabled: request.enabled,
+        retention_count: request.retention_count,
+        next_run_at: next,
+    });
+    state.jobs.create_job(meta.clone()).await;
+    Ok(meta)
 }

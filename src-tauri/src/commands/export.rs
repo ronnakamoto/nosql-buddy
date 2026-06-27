@@ -14,11 +14,13 @@ use std::sync::{Arc, Mutex};
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
+use crate::events::notify_job_completed;
 use crate::mongo::bson_json::{parse_filter, parse_optional_doc};
+use crate::mongo::import_export::bson_sink::BsonSink;
 use crate::mongo::import_export::collection_sink::CollectionSink;
 use crate::mongo::import_export::core::{run_pipeline, DocumentSink, DocumentSource, JobContext};
 use crate::mongo::import_export::csv::CsvSink;
-use crate::mongo::import_export::io_util::{validate_target_path, AtomicFileWriter, WriteTarget};
+use crate::mongo::import_export::io_util::{validate_target_path, AtomicFileWriter, CompressionKind, CompressedWriter, WriteSink, WriteTarget};
 use crate::mongo::import_export::json::{JsonShape, JsonSink};
 use crate::mongo::import_export::mapping::{FieldMappingEntry, FieldMappingTransform};
 use crate::mongo::import_export::placeholders::{resolve_path, PlaceholderContext};
@@ -44,6 +46,7 @@ pub enum SourceMode {
 pub enum ExportFormat {
     Json,
     Csv,
+    Bson,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -86,6 +89,7 @@ pub struct ExportOptions {
     pub csv_delimiter: Option<String>,
     pub csv_headers: bool,
     pub csv_columns: Option<Vec<String>>,
+    pub compression: CompressionKind,
     /// Optional field-mapping table applied as a Transform before the sink.
     /// When present and non-empty, the mapping is the complete output schema:
     /// undeclared fields are dropped. For CSV, the sink columns are derived
@@ -207,7 +211,7 @@ pub async fn export_documents(
     );
 
     // Build the write target (validated file path, or in-memory buffer).
-    let (target, file_path) = build_target(&resolved_destination)?;
+    let (target, file_path) = build_target(&resolved_destination, request.options.compression)?;
     let output_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
     // Build the sink for the chosen format.
@@ -233,6 +237,9 @@ pub async fn export_documents(
                 delimiter,
                 request.options.csv_headers,
             ))
+        }
+        ExportFormat::Bson => {
+            Box::new(BsonSink::new(target))
         }
     };
 
@@ -292,6 +299,8 @@ pub async fn export_documents(
         .lock()
         .map_err(|_| AppError::Internal("export output slot mutex poisoned".into()))?
         .take();
+
+    notify_job_completed(&app, &request.job_id, "Export", &format!("Exported {} documents", report.processed));
 
     Ok(ExportResult {
         job_id: report.job_id,
@@ -504,7 +513,10 @@ fn parse_documents(documents_json: Option<&str>) -> AppResult<Vec<Document>> {
     Ok(docs)
 }
 
-fn build_target(dest: &ExportDestinationDto) -> AppResult<(WriteTarget, Option<String>)> {
+fn build_target(
+    dest: &ExportDestinationDto,
+    compression: CompressionKind,
+) -> AppResult<(WriteSink, Option<String>)> {
     match dest.kind {
         DestinationKind::File => {
             let path = dest
@@ -513,12 +525,18 @@ fn build_target(dest: &ExportDestinationDto) -> AppResult<(WriteTarget, Option<S
                 .ok_or_else(|| AppError::Validation("file export requires a target path".into()))?;
             let validated = validate_target_path(path)?;
             let writer = AtomicFileWriter::create(validated.clone())?;
+            let target = WriteTarget::File(writer);
+            let sink = if compression == CompressionKind::None {
+                WriteSink::Plain(target)
+            } else {
+                WriteSink::Compressed(CompressedWriter::new(target, compression)?)
+            };
             Ok((
-                WriteTarget::File(writer),
+                sink,
                 Some(validated.to_string_lossy().to_string()),
             ))
         }
-        DestinationKind::Clipboard => Ok((WriteTarget::Buffer(Vec::new()), None)),
+        DestinationKind::Clipboard => Ok((WriteSink::Plain(WriteTarget::Buffer(Vec::new())), None)),
     }
 }
 
@@ -602,9 +620,9 @@ mod tests {
             };
             let json_slot = Arc::new(Mutex::new(None));
             let json_path_text = json_path.to_string_lossy();
-            let json_target = WriteTarget::File(AtomicFileWriter::create(validate_target_path(
+            let json_target = WriteSink::Plain(WriteTarget::File(AtomicFileWriter::create(validate_target_path(
                 json_path_text.as_ref(),
-            )?)?);
+            )?)?));
             let json_report = run_pipeline(
                 build_source(&coll, &find_source).await?,
                 Vec::new(),
@@ -643,9 +661,9 @@ mod tests {
             let columns = sample_columns(&coll, &aggregate_source).await?;
             let csv_slot = Arc::new(Mutex::new(None));
             let csv_path_text = csv_path.to_string_lossy();
-            let csv_target = WriteTarget::File(AtomicFileWriter::create(validate_target_path(
+            let csv_target = WriteSink::Plain(WriteTarget::File(AtomicFileWriter::create(validate_target_path(
                 csv_path_text.as_ref(),
-            )?)?);
+            )?)?));
             let csv_report = run_pipeline(
                 build_source(&coll, &aggregate_source).await?,
                 Vec::new(),
@@ -681,7 +699,7 @@ mod tests {
                 build_source(&coll, &sql_translated_source).await?,
                 Vec::new(),
                 Box::new(JsonSink::new(
-                    WriteTarget::Buffer(Vec::new()),
+                    WriteSink::Plain(WriteTarget::Buffer(Vec::new())),
                     clipboard_slot.clone(),
                     JsonShape::Ndjson,
                     false,
@@ -709,7 +727,7 @@ mod tests {
                 build_source(&coll, &documents_source).await?,
                 Vec::new(),
                 Box::new(CsvSink::new(
-                    WriteTarget::Buffer(Vec::new()),
+                    WriteSink::Plain(WriteTarget::Buffer(Vec::new())),
                     documents_slot.clone(),
                     vec!["kind".into(), "n".into()],
                     b',',
@@ -803,7 +821,7 @@ mod tests {
         let transform = FieldMappingTransform::new(entries).unwrap();
         let slot = Arc::new(Mutex::new(None));
         let sink: Box<dyn DocumentSink> = Box::new(CsvSink::new(
-            WriteTarget::Buffer(Vec::new()),
+            WriteSink::Plain(WriteTarget::Buffer(Vec::new())),
             slot.clone(),
             columns,
             b',',
@@ -850,7 +868,7 @@ mod tests {
         let transform = FieldMappingTransform::new(entries).unwrap();
         let slot = Arc::new(Mutex::new(None));
         let sink: Box<dyn DocumentSink> = Box::new(JsonSink::new(
-            WriteTarget::Buffer(Vec::new()),
+            WriteSink::Plain(WriteTarget::Buffer(Vec::new())),
             slot.clone(),
             JsonShape::Array,
             false,

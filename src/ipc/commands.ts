@@ -263,9 +263,11 @@ export type SqlLanguage =
 // ─── Import / Export ────────────────────────────────────────────────
 
 export type ExportSourceMode = "find" | "aggregate" | "documents";
-export type ExportFormat = "json" | "csv";
+export type ExportFormat = "json" | "csv" | "bson";
 export type ExportDestinationKind = "file" | "clipboard";
 export type JsonShape = "array" | "ndjson";
+export type CompressionFormat = "none" | "gzip" | "zstd";
+export type CsvArrayMode = "jsonString" | "flatten";
 
 export interface ExportSourceDto {
   mode: ExportSourceMode;
@@ -287,6 +289,8 @@ export interface ExportOptions {
   csvDelimiter?: string | null;
   csvHeaders: boolean;
   csvColumns?: string[] | null;
+  compression: CompressionFormat;
+  csvArrayMode?: CsvArrayMode | null;
   /**
    * Optional field-mapping table applied as a transform before the sink. When
    * present and non-empty, the mapping is the complete output schema:
@@ -317,7 +321,7 @@ export interface ExportResult {
   clipboardText: string | null;
 }
 
-export type ImportFormat = "json" | "csv";
+export type ImportFormat = "json" | "csv" | "bson";
 export type ImportSourceKind = "file" | "clipboard";
 export type JsonImportShape = "object" | "array" | "ndjson";
 
@@ -515,6 +519,9 @@ export interface DumpRequest {
   database: string;
   collections: string[];
   destinationDir: string;
+  pathTemplate: string;
+  format: "bson" | "json";
+  compression: CompressionFormat;
   jobId: string;
 }
 
@@ -1246,6 +1253,8 @@ const commands = {
     invoke<boolean>("delete_job", { jobId }),
   rerunJob: (jobId: string) =>
     invoke<JobMeta>("rerun_job", { jobId }),
+  updateSchedule: (request: { jobId: string; cron: string; enabled: boolean; retentionCount?: number | null }) =>
+    invoke<JobMeta>("update_schedule", { request }),
 
   // --- Dump / Restore ---
   dumpDatabase: (request: DumpRequest) =>

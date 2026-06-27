@@ -38,7 +38,17 @@ export function Modal({ open, title, onClose, children, footer, width }: ModalPr
         style={width ? { width: `min(${width}px, 92vw)` } : undefined}
       >
         <div className="modal__header">
-          <h2 className="modal__title">{title}</h2>
+          <div className="modal__heading">
+            <h2 className="modal__title">{title}</h2>
+          </div>
+          <button
+            className="modal__close"
+            onClick={onClose}
+            aria-label="Close"
+            type="button"
+          >
+            ×
+          </button>
         </div>
         <div className="modal__body">{children}</div>
         {footer && <div className="modal__footer">{footer}</div>}

@@ -5,6 +5,7 @@
 //! via `tokio::sync::RwLock`.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -118,14 +119,35 @@ pub struct JobStore {
     active: RwLock<HashMap<String, Arc<AtomicBool>>>,
     jobs: RwLock<Vec<JobMeta>>,
     logs: RwLock<HashMap<String, Vec<JobLogEntry>>>,
+    persist_path: Option<PathBuf>,
 }
 
 impl JobStore {
     pub fn new() -> Self {
-        Self {
+        Self::with_path(None)
+    }
+
+    pub fn with_path(path: Option<PathBuf>) -> Self {
+        let mut store = Self {
             active: RwLock::new(HashMap::new()),
             jobs: RwLock::new(Vec::new()),
             logs: RwLock::new(HashMap::new()),
+            persist_path: path,
+        };
+        if let Some(path) = &store.persist_path {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                let loaded: Vec<JobMeta> = text.lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
+                store.jobs = RwLock::new(loaded);
+            }
+        }
+        store
+    }
+
+    async fn save(&self) {
+        if let Some(path) = &self.persist_path {
+            let jobs = self.jobs.read().await;
+            let lines: Vec<String> = jobs.iter().map(|j| serde_json::to_string(j).unwrap_or_default()).collect();
+            let _ = std::fs::write(path, lines.join("\n"));
         }
     }
 
@@ -136,6 +158,8 @@ impl JobStore {
         // If a job with the same id already exists, remove it.
         jobs.retain(|j| j.job_id != id);
         jobs.push(meta);
+        drop(jobs);
+        self.save().await;
         id
     }
 
@@ -180,6 +204,8 @@ impl JobStore {
                 _ => {}
             }
         }
+        drop(jobs);
+        self.save().await;
     }
 
     /// Update progress counters for a running job.
@@ -192,6 +218,8 @@ impl JobStore {
             }
             job.errors = errors;
         }
+        drop(jobs);
+        self.save().await;
     }
 
     /// Append a log entry to a job's log.
@@ -279,6 +307,7 @@ impl JobStore {
         drop(jobs);
         if removed {
             self.logs.write().await.remove(job_id);
+            self.save().await;
         }
         removed
     }
@@ -474,5 +503,48 @@ mod tests {
         let store = JobStore::new();
         let jobs = store.list(JobFilter::default()).await;
         assert!(jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn persistence_round_trip_saves_and_restores_jobs() {
+        let path = std::env::temp_dir().join(format!("mongo-buddy-job-store-test-{}", uuid::Uuid::new_v4()));
+        {
+            let store = JobStore::with_path(Some(path.clone()));
+            let mut meta = sample_meta(JobKind::Dump, "persist-job-1");
+            meta.status = JobStatus::Done;
+            meta.message = "all good".into();
+            meta.processed = 42;
+            store.create_job(meta).await;
+            store.update_status("persist-job-1", JobStatus::Failed, "boom".into()).await;
+        }
+
+        // Re-open and verify
+        let store2 = JobStore::with_path(Some(path.clone()));
+        let jobs = store2.list(JobFilter::default()).await;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].job_id, "persist-job-1");
+        assert_eq!(jobs[0].status, JobStatus::Failed);
+        assert_eq!(jobs[0].message, "boom");
+        assert_eq!(jobs[0].processed, 42);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn persistence_deletes_are_flushed() {
+        let path = std::env::temp_dir().join(format!("mongo-buddy-job-store-delete-test-{}", uuid::Uuid::new_v4()));
+        {
+            let store = JobStore::with_path(Some(path.clone()));
+            store.create_job(sample_meta(JobKind::Dump, "del-1")).await;
+            store.create_job(sample_meta(JobKind::Export, "del-2")).await;
+            store.delete("del-1").await;
+        }
+
+        let store2 = JobStore::with_path(Some(path.clone()));
+        let jobs = store2.list(JobFilter::default()).await;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].job_id, "del-2");
+
+        let _ = std::fs::remove_file(&path);
     }
 }

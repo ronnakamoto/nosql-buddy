@@ -33,8 +33,13 @@ export function CollectionMappingTable({ mappings, onChange }: CollectionMapping
       </div>
       <div className="collection-mapping-table__body">
         {sorted.map((m) => (
-          <div key={m.source} className="collection-mapping-table__row">
+          <label
+            key={m.source}
+            className={`collection-mapping-table__row ${!m.enabled ? "collection-mapping-table__row--disabled" : ""}`}
+            htmlFor={`restore-map-${m.source}`}
+          >
             <input
+              id={`restore-map-${m.source}`}
               type="checkbox"
               checked={m.enabled}
               onChange={(e) => update(m.source, { enabled: e.target.checked })}
@@ -49,8 +54,9 @@ export function CollectionMappingTable({ mappings, onChange }: CollectionMapping
               onChange={(e) => update(m.source, { target: e.target.value })}
               disabled={!m.enabled}
               aria-label={`Target name for ${m.source}`}
+              onClick={(e) => e.stopPropagation()}
             />
-          </div>
+          </label>
         ))}
       </div>
     </div>

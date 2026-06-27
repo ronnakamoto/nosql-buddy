@@ -82,6 +82,21 @@ fn build_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Men
             Some("CmdOrCtrl+I"),
         )?)
         .separator()
+        .item(&MenuItem::with_id(
+            app,
+            "dump_database",
+            "Dump Database…",
+            true,
+            Some("CmdOrCtrl+Shift+D"),
+        )?)
+        .item(&MenuItem::with_id(
+            app,
+            "restore_database",
+            "Restore Database…",
+            true,
+            Some("CmdOrCtrl+Shift+R"),
+        )?)
+        .separator()
         .quit()
         .build()?;
 
@@ -226,6 +241,7 @@ pub fn run() {
             commands::jobs::cancel_job,
             commands::jobs::delete_job,
             commands::jobs::rerun_job,
+            commands::jobs::update_schedule,
             commands::shell::eval_shell,
             commands::shell::shell_autocomplete,
             audit::commands::audit_get_status,

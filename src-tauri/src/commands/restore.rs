@@ -5,11 +5,11 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::error::AppResult;
-use crate::events::{emit_job_log_entry, emit_job_status_changed};
+use crate::events::{emit_job_log_entry, emit_job_status_changed, notify_job_completed};
 use crate::mongo::import_export::bson_source::BsonSource;
 use crate::mongo::import_export::collection_sink::{CollectionSink, InsertMode};
 use crate::mongo::import_export::core::{run_pipeline, JobContext};
-use crate::mongo::import_export::io_util::validate_source_path;
+use crate::mongo::import_export::io_util::validate_source_dir;
 use crate::mongo::job_store::{JobKind, JobMeta, JobStatus};
 use crate::state::AppState;
 
@@ -62,16 +62,29 @@ pub struct ArchivePreviewEntry {
 
 #[tauri::command]
 pub async fn preview_archive(source_dir: String) -> AppResult<Vec<ArchivePreviewEntry>> {
-    let dir = validate_source_path(&source_dir)?;
+    let dir = validate_source_dir(&source_dir)?;
     let mut entries = Vec::new();
 
     for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("bson") {
+        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+
+        let is_bson = ext == "bson" || (ext == "gz" && stem.ends_with(".bson")) || (ext == "zst" && stem.ends_with(".bson"));
+        if !is_bson {
             continue;
         }
-        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+
+        // Extract the collection name consistently:
+        //  - categories.bson       -> "categories"
+        //  - categories.bson.gz  -> "categories"  (stem is "categories.bson", strip ".bson")
+        //  - categories.bson.zst -> "categories"
+        let name = if ext == "gz" || ext == "zst" {
+            stem.strip_suffix(".bson").unwrap_or(stem).to_string()
+        } else {
+            stem.to_string()
+        };
         let size = entry.metadata()?.len();
         // Rough estimate: 500 bytes average document size.
         let approx = size / 500;
@@ -96,7 +109,7 @@ pub async fn restore_database(
     let entry = state.clients.get(&request.connection_id).await?;
     let db = entry.client.database(&request.target_database);
 
-    let dir = validate_source_path(&request.source_dir)?;
+    let dir = validate_source_dir(&request.source_dir)?;
 
     // Register job.
     let mut meta = JobMeta::new(
@@ -136,13 +149,22 @@ pub async fn restore_database(
             break;
         }
 
-        let source_path = dir.join(format!("{}.bson", mapping.source));
-        if !source_path.is_file() {
-            let msg = format!("Source file not found: {}", source_path.display());
+        // Resolve the source file, trying plain, gzip, and zstd variants.
+        let base = dir.join(format!("{}.bson", mapping.source));
+        let gz = dir.join(format!("{}.bson.gz", mapping.source));
+        let zst = dir.join(format!("{}.bson.zst", mapping.source));
+        let source_path = if base.is_file() {
+            base
+        } else if gz.is_file() {
+            gz
+        } else if zst.is_file() {
+            zst
+        } else {
+            let msg = format!("Source file not found: {}", base.display());
             state.jobs.log_warn(&request.job_id, &msg).await;
             emit_job_log_entry(&app, &request.job_id, &chrono_now(), "warn", &msg);
             continue;
-        }
+        };
 
         let collection = db.collection::<Document>(&mapping.target);
 
@@ -225,6 +247,7 @@ pub async fn restore_database(
         &msg,
         finished.clone(),
     );
+    notify_job_completed(&app, &request.job_id, "Restore", &msg);
 
     Ok(RestoreResult {
         job_id: request.job_id,
@@ -237,4 +260,77 @@ pub async fn restore_database(
 
 fn chrono_now() -> String {
     chrono::Local::now().to_rfc3339()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn temp_dir_with_files(files: &[(&str, &[u8])]) -> PathBuf {
+        let dir = dirs::home_dir()
+            .unwrap()
+            .join(format!("mongo-buddy-restore-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, content) in files {
+            std::fs::write(dir.join(name), content).unwrap();
+        }
+        dir
+    }
+
+    #[tokio::test]
+    async fn preview_archive_finds_plain_bson_files() {
+        let dir = temp_dir_with_files(&[
+            ("users.bson", b"xxx"),
+            ("orders.bson", b"yyy"),
+            ("readme.txt", b"zzz"),
+        ]);
+        let entries = preview_archive(dir.to_string_lossy().to_string()).await.unwrap();
+        let names: Vec<String> = entries.iter().map(|e| e.source_name.clone()).collect();
+        assert!(names.contains(&"users".to_string()));
+        assert!(names.contains(&"orders".to_string()));
+        assert!(!names.contains(&"readme".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn preview_archive_finds_gzip_bson_files() {
+        let dir = temp_dir_with_files(&[
+            ("users.bson.gz", b"xxx"),
+            ("orders.bson.gz", b"yyy"),
+        ]);
+        let entries = preview_archive(dir.to_string_lossy().to_string()).await.unwrap();
+        let names: Vec<String> = entries.iter().map(|e| e.source_name.clone()).collect();
+        assert!(names.contains(&"users".to_string()));
+        assert!(names.contains(&"orders".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn preview_archive_finds_zstd_bson_files() {
+        let dir = temp_dir_with_files(&[
+            ("products.bson.zst", b"xxx"),
+        ]);
+        let entries = preview_archive(dir.to_string_lossy().to_string()).await.unwrap();
+        let names: Vec<String> = entries.iter().map(|e| e.source_name.clone()).collect();
+        assert!(names.contains(&"products".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn preview_archive_mixed_compression_strips_bson_suffix_consistently() {
+        let dir = temp_dir_with_files(&[
+            ("categories.bson", b"a"),
+            ("orders.bson.gz", b"b"),
+            ("products.bson.zst", b"c"),
+        ]);
+        let entries = preview_archive(dir.to_string_lossy().to_string()).await.unwrap();
+        let names: Vec<String> = entries.iter().map(|e| e.source_name.clone()).collect();
+        // All should be bare collection names, no trailing ".bson".
+        assert!(names.contains(&"categories".to_string()));
+        assert!(names.contains(&"orders".to_string()));
+        assert!(names.contains(&"products".to_string()));
+        assert!(!names.iter().any(|n| n.ends_with(".bson")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

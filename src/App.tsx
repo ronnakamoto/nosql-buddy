@@ -45,6 +45,7 @@ import {
   HardDrive,
   Download,
   Upload,
+  RefreshCw,
 } from "lucide-react";
 
 type AuditView = "chooser" | "dev" | "production" | "settings";
@@ -559,6 +560,8 @@ export default function App() {
   const [docCount, setDocCount] = useState<number | null>(null);
   const [dumpTarget, setDumpTarget] = useState<{ connectionId: string; database: string; collections: CollectionItem[] } | null>(null);
   const [restoreTarget, setRestoreTarget] = useState<{ connectionId: string; database: string } | null>(null);
+  const [refreshingConn, setRefreshingConn] = useState(false);
+  const [refreshingDb, setRefreshingDb] = useState<string | null>(null);
   const toasts = useToasts();
 
   // Initial load
@@ -591,6 +594,17 @@ export default function App() {
       }
       else if (action === "import_data") {
         window.dispatchEvent(new CustomEvent("nosqlbuddy:import-data"));
+      }
+      else if (action === "dump_database") {
+        if (active) {
+          const db = active.databases[0]?.name ?? "";
+          setDumpTarget({ connectionId: active.handle.connectionId, database: db, collections: [] });
+        }
+      }
+      else if (action === "restore_database") {
+        if (active) {
+          setRestoreTarget({ connectionId: active.handle.connectionId, database: "" });
+        }
       }
       else if (action === "new_tab") {
         if (active) {
@@ -655,6 +669,37 @@ export default function App() {
       }
       setActive({ handle, profile, databases: handle.databases, collections });
       toasts.push(`Connected to ${profile.name}`, "success");
+    } catch (e) {
+      toasts.push(describeError(e), "error");
+    }
+  }
+
+  async function refreshConnection() {
+    if (!active) return;
+    try {
+      const handle = await commands.openConnection(active.profile.id);
+      const collections: Record<string, CollectionSummary[]> = {};
+      for (const db of handle.databases) {
+        try {
+          collections[db.name] = await commands.listCollections(handle.connectionId, db.name);
+        } catch {
+          collections[db.name] = [];
+        }
+      }
+      setActive({ ...active, handle, databases: handle.databases, collections });
+    } catch (e) {
+      toasts.push(describeError(e), "error");
+    }
+  }
+
+  async function refreshDatabase(database: string) {
+    if (!active) return;
+    try {
+      const cols = await commands.listCollections(active.handle.connectionId, database);
+      setActive((prev) => {
+        if (!prev) return prev;
+        return { ...prev, collections: { ...prev.collections, [database]: cols } };
+      });
     } catch (e) {
       toasts.push(describeError(e), "error");
     }
@@ -854,6 +899,21 @@ export default function App() {
                 <span className="tree-group__icon" aria-hidden="true"><Database size={13} /></span>
                 <span className="tree-group__label">{db.name}</span>
                 <span className="tree-group__count">{collections.length} collections</span>
+                <button
+                  className="tree-item__action"
+                  style={{ opacity: refreshingDb === db.name ? 1 : undefined }}
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    setRefreshingDb(db.name);
+                    await refreshDatabase(db.name);
+                    setRefreshingDb(null);
+                  }}
+                  disabled={refreshingDb === db.name}
+                  title="Refresh database"
+                  aria-label="Refresh database"
+                >
+                  <RefreshCw size={13} className={refreshingDb === db.name ? "spin" : ""} />
+                </button>
                 {active && (
                   <DatabaseRowMenu
                     onDump={() => {
@@ -969,9 +1029,6 @@ export default function App() {
               >
                 {active.handle.serverInfo?.topology ?? "unknown"}
               </span>
-              <button className="btn btn--ghost btn--sm" onClick={closeConnection} title="Close this connection">
-                Disconnect
-              </button>
             </>
           ) : error ? (
             <span className="app__titlebar-conn-error" title={error}>Connection error</span>
@@ -997,6 +1054,32 @@ export default function App() {
         <div className="app__sidebar-explorer">
           {active ? (
             <>
+              <div className="app__sidebar-toolbar">
+                <button
+                  className="btn btn--ghost btn--sm"
+                  onClick={async () => {
+                    setRefreshingConn(true);
+                    await refreshConnection();
+                    setRefreshingConn(false);
+                  }}
+                  disabled={refreshingConn}
+                  title="Refresh connection"
+                  aria-label="Refresh connection"
+                >
+                  <RefreshCw size={13} className={refreshingConn ? "spin" : ""} />
+                  <span>Refresh</span>
+                </button>
+                <div className="app__sidebar-toolbar-spacer" />
+                <button
+                  className="btn btn--ghost btn--sm"
+                  onClick={closeConnection}
+                  title="Disconnect"
+                  aria-label="Disconnect"
+                >
+                  <Unplug size={13} />
+                  <span>Disconnect</span>
+                </button>
+              </div>
               <div className="app__sidebar-search">
                 <span className="app__sidebar-search-icon" aria-hidden="true"><Search size={13} /></span>
                 <input
@@ -1132,6 +1215,7 @@ export default function App() {
               onQueryTime={setQueryTime}
               onDocCount={setDocCount}
               updateTab={updateTab}
+              onImported={refreshConnection}
             />
           </ErrorBoundary>
         ) : (
@@ -1205,12 +1289,14 @@ export default function App() {
           database={dumpTarget.database}
           collections={dumpTarget.collections}
           onClose={() => setDumpTarget(null)}
+          onDumped={refreshConnection}
         />
       )}
       {restoreTarget && (
         <RestoreWizard
           connectionId={restoreTarget.connectionId}
           onClose={() => setRestoreTarget(null)}
+          onRestored={refreshConnection}
         />
       )}
     </div>
@@ -1225,6 +1311,7 @@ function TabPane({
   onQueryTime,
   onDocCount,
   updateTab,
+  onImported,
 }: {
   tab: Tab;
   profile: ProfileSummary | null;
@@ -1232,6 +1319,7 @@ function TabPane({
   onQueryTime: (ms: number) => void;
   onDocCount: (count: number) => void;
   updateTab: (id: string, patch: Partial<Tab>) => void;
+  onImported?: () => void;
 }) {
   const handleResult = useCallback(
     (page: DocumentPage | null) => {
@@ -1257,6 +1345,7 @@ function TabPane({
           /* tab strip handles close */
         }}
         onResult={handleResult}
+        onImported={onImported}
       />
     );
   }

@@ -7,7 +7,7 @@ use bson::{Bson, Document};
 use std::sync::{Arc, Mutex};
 
 use super::core::DocumentSink;
-use super::io_util::WriteTarget;
+use super::io_util::WriteSink;
 use crate::error::{AppError, AppResult};
 
 #[derive(Clone, Copy)]
@@ -19,7 +19,7 @@ pub enum JsonShape {
 }
 
 pub struct JsonSink {
-    target: Option<WriteTarget>,
+    target: Option<WriteSink>,
     output_slot: Arc<Mutex<Option<String>>>,
     shape: JsonShape,
     canonical: bool,
@@ -28,7 +28,7 @@ pub struct JsonSink {
 
 impl JsonSink {
     pub fn new(
-        target: WriteTarget,
+        target: WriteSink,
         output_slot: Arc<Mutex<Option<String>>>,
         shape: JsonShape,
         canonical: bool,
@@ -42,7 +42,7 @@ impl JsonSink {
         }
     }
 
-    fn target_mut(&mut self) -> AppResult<&mut WriteTarget> {
+    fn target_mut(&mut self) -> AppResult<&mut WriteSink> {
         self.target
             .as_mut()
             .ok_or_else(|| AppError::Internal("json sink already finalized".into()))
@@ -99,7 +99,7 @@ impl DocumentSink for JsonSink {
             .target
             .take()
             .ok_or_else(|| AppError::Internal("json sink already finalized".into()))?;
-        let text = target.commit()?;
+        let text = target.finish()?;
         if let Some(text) = text {
             *self.output_slot.lock().map_err(lock_err)? = Some(text);
         }
@@ -165,7 +165,7 @@ mod tests {
     async fn canonical_json_array_round_trips_bson_types() {
         let slot = output_slot();
         let mut sink = JsonSink::new(
-            WriteTarget::Buffer(Vec::new()),
+            WriteSink::Plain(crate::mongo::import_export::io_util::WriteTarget::Buffer(Vec::new())),
             slot.clone(),
             JsonShape::Array,
             true,
@@ -185,7 +185,7 @@ mod tests {
     async fn relaxed_ndjson_round_trips_bson_types() {
         let slot = output_slot();
         let mut sink = JsonSink::new(
-            WriteTarget::Buffer(Vec::new()),
+            WriteSink::Plain(crate::mongo::import_export::io_util::WriteTarget::Buffer(Vec::new())),
             slot.clone(),
             JsonShape::Ndjson,
             false,
