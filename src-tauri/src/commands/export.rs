@@ -24,6 +24,7 @@ use crate::mongo::import_export::mapping::{FieldMappingEntry, FieldMappingTransf
 use crate::mongo::import_export::placeholders::{resolve_path, PlaceholderContext};
 use crate::mongo::import_export::source_cursor::CursorSource;
 use crate::mongo::import_export::source_mem::VecSource;
+use crate::mongo::job_store::{JobKind, JobMeta, JobStatus};
 use crate::state::AppState;
 
 const COLUMN_SAMPLE: u32 = 200;
@@ -243,15 +244,27 @@ pub async fn export_documents(
         transforms.push(Box::new(m));
     }
 
+    // Track in the global job store.
+    let mut meta = JobMeta::new(
+        request.job_id.clone(),
+        JobKind::Export,
+        request.connection_id.clone(),
+        request.database.clone(),
+    );
+    meta.collections = vec![request.collection.clone()];
+    meta.output_path = file_path.clone();
+    state.jobs.create_job(meta).await;
+    state.jobs.update_status(&request.job_id, JobStatus::Running, "Export started".into()).await;
+
     // Register the job for cancellation, run, then unregister.
     let cancel_flag = state
-        .import_export_jobs
+        .jobs
         .register(request.job_id.clone())
         .await;
     let ctx = JobContext {
         job_id: request.job_id.clone(),
         cancel_flag,
-        app_handle: Some(app),
+        app_handle: Some(app.clone()),
         progress_observer: None,
         throttle_ms: 250,
         max_errors: 10_000,
@@ -259,8 +272,21 @@ pub async fn export_documents(
     };
 
     let report = run_pipeline(source, transforms, sink, ctx).await;
-    state.import_export_jobs.unregister(&request.job_id).await;
-    let report = report?;
+    state.jobs.unregister(&request.job_id).await;
+    let report = match report {
+        Ok(r) => r,
+        Err(e) => {
+            state.jobs.update_status(&request.job_id, JobStatus::Failed, e.to_string()).await;
+            return Err(e);
+        }
+    };
+
+    let status = if report.cancelled {
+        JobStatus::Cancelled
+    } else {
+        JobStatus::Done
+    };
+    state.jobs.update_status(&request.job_id, status, format!("Exported {} documents", report.processed)).await;
 
     let clipboard_text = output_slot
         .lock()
@@ -306,7 +332,7 @@ fn resolve_destination_placeholders(
 /// Cancel a running import/export job by id.
 #[tauri::command]
 pub async fn cancel_import_export(job_id: String, state: State<'_, AppState>) -> AppResult<bool> {
-    Ok(state.import_export_jobs.cancel(&job_id).await)
+    Ok(state.jobs.cancel(&job_id).await)
 }
 
 #[tauri::command]
@@ -333,14 +359,24 @@ pub async fn copy_documents(
         inserted.clone(),
     ));
 
+    let mut meta = JobMeta::new(
+        request.job_id.clone(),
+        JobKind::Export,
+        request.connection_id.clone(),
+        request.database.clone(),
+    );
+    meta.collections = vec![request.collection.clone(), request.target.collection.clone()];
+    state.jobs.create_job(meta).await;
+    state.jobs.update_status(&request.job_id, JobStatus::Running, "Copy started".into()).await;
+
     let cancel_flag = state
-        .import_export_jobs
+        .jobs
         .register(request.job_id.clone())
         .await;
     let ctx = JobContext {
         job_id: request.job_id.clone(),
         cancel_flag,
-        app_handle: Some(app),
+        app_handle: Some(app.clone()),
         progress_observer: None,
         throttle_ms: 250,
         max_errors: 10_000,
@@ -348,8 +384,21 @@ pub async fn copy_documents(
     };
 
     let report = run_pipeline(source, Vec::new(), sink, ctx).await;
-    state.import_export_jobs.unregister(&request.job_id).await;
-    let report = report?;
+    state.jobs.unregister(&request.job_id).await;
+    let report = match report {
+        Ok(r) => r,
+        Err(e) => {
+            state.jobs.update_status(&request.job_id, JobStatus::Failed, e.to_string()).await;
+            return Err(e);
+        }
+    };
+
+    let status = if report.cancelled {
+        JobStatus::Cancelled
+    } else {
+        JobStatus::Done
+    };
+    state.jobs.update_status(&request.job_id, status, format!("Copied {} documents", report.processed)).await;
 
     Ok(CopyResult {
         job_id: report.job_id,

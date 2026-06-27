@@ -97,6 +97,52 @@ pub fn emit_connection_closed(
     )
 }
 
+/// Payload for the `job-status-changed` event.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobStatusChangedPayload {
+    pub job_id: String,
+    pub status: String,
+    pub message: String,
+    pub finished_at: Option<String>,
+}
+
+/// Emit when a job transitions status (Queued→Running→Done/Failed/Cancelled).
+pub fn emit_job_status_changed(app: &AppHandle, job_id: &str, status: &str, message: &str, finished_at: Option<String>) {
+    let _ = app.emit(
+        "job-status-changed",
+        JobStatusChangedPayload {
+            job_id: job_id.to_string(),
+            status: status.to_string(),
+            message: message.to_string(),
+            finished_at,
+        },
+    );
+}
+
+/// Payload for the `job-log-entry` event.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobLogEntryPayload {
+    pub job_id: String,
+    pub timestamp: String,
+    pub level: String,
+    pub message: String,
+}
+
+/// Emit a single job log line. Best-effort: never blocks the job.
+pub fn emit_job_log_entry(app: &AppHandle, job_id: &str, timestamp: &str, level: &str, message: &str) {
+    let _ = app.emit(
+        "job-log-entry",
+        JobLogEntryPayload {
+            job_id: job_id.to_string(),
+            timestamp: timestamp.to_string(),
+            level: level.to_string(),
+            message: message.to_string(),
+        },
+    );
+}
+
 fn chrono_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()

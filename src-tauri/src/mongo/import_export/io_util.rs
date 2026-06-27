@@ -108,7 +108,7 @@ impl AtomicFileWriter {
     }
 }
 
-fn part_path_for(final_path: &Path) -> PathBuf {
+pub(crate) fn part_path_for(final_path: &Path) -> PathBuf {
     let mut os = final_path.as_os_str().to_owned();
     os.push(".part");
     PathBuf::from(os)

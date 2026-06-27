@@ -6,6 +6,8 @@ use std::sync::{
 };
 use tokio::sync::RwLock;
 
+pub mod bson_sink;
+pub mod bson_source;
 pub mod collection_sink;
 pub mod core;
 pub mod csv;

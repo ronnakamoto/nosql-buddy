@@ -431,6 +431,126 @@ export interface CopyResult {
   cancelled: boolean;
 }
 
+// ─── Jobs ─────────────────────────────────────────────────────────
+
+export type JobKind = "dump" | "restore" | "export" | "import";
+export type JobStatus = "queued" | "running" | "done" | "failed" | "cancelled";
+
+export interface ScheduleConfig {
+  cron: string;
+  enabled: boolean;
+  retentionCount: number | null;
+  nextRunAt: string | null;
+}
+
+export interface JobMeta {
+  jobId: string;
+  kind: JobKind;
+  status: JobStatus;
+  connectionId: string;
+  database: string;
+  collections: string[];
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  outputPath: string | null;
+  sourcePath: string | null;
+  schedule: ScheduleConfig | null;
+  processed: number;
+  total: number | null;
+  errors: number;
+  message: string;
+}
+
+export interface JobFilterRequest {
+  connectionId?: string | null;
+  database?: string | null;
+  kind?: string | null;
+  status?: string | null;
+  limit?: number | null;
+}
+
+export interface JobListResponse {
+  jobs: JobMeta[];
+}
+
+export interface JobLogEntry {
+  timestamp: string;
+  level: "info" | "warn" | "error";
+  message: string;
+}
+
+export interface JobDetailResponse {
+  jobId: string;
+  kind: JobKind;
+  status: JobStatus;
+  connectionId: string;
+  database: string;
+  collections: string[];
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  outputPath: string | null;
+  sourcePath: string | null;
+  schedule: ScheduleConfig | null;
+  processed: number;
+  total: number | null;
+  errors: number;
+  message: string;
+  logs: JobLogEntry[];
+}
+
+// ─── Dump / Restore ───────────────────────────────────────────────
+
+export type ConflictStrategy = "drop" | "skip" | "upsert";
+
+export interface CollectionMapping {
+  source: string;
+  target: string;
+  enabled: boolean;
+}
+
+export interface DumpRequest {
+  connectionId: string;
+  database: string;
+  collections: string[];
+  destinationDir: string;
+  jobId: string;
+}
+
+export interface DumpResult {
+  jobId: string;
+  processed: number;
+  errors: number;
+  cancelled: boolean;
+  files: string[];
+}
+
+export interface RestoreRequest {
+  connectionId: string;
+  sourceDir: string;
+  targetDatabase: string;
+  createDatabase: boolean;
+  collectionMap: CollectionMapping[];
+  conflictStrategy: ConflictStrategy;
+  jobId: string;
+}
+
+export interface RestoreResult {
+  jobId: string;
+  processed: number;
+  inserted: number;
+  errors: number;
+  cancelled: boolean;
+}
+
+export interface ArchivePreviewEntry {
+  sourceName: string;
+  targetName: string;
+  approximateCount: number;
+  sizeBytes: number;
+}
+
 export interface AppInfo {
   platform: string;
   arch: string;
@@ -1114,6 +1234,27 @@ const commands = {
     invoke<PreviewImportResult>("preview_import", { request }),
   runImport: (request: ImportRequest) =>
     invoke<ImportResult>("run_import", { request }),
+
+  // --- Jobs ---
+  listJobs: (request: JobFilterRequest) =>
+    invoke<JobListResponse>("list_jobs", { request }),
+  getJob: (jobId: string) =>
+    invoke<JobDetailResponse>("get_job", { jobId }),
+  cancelJob: (jobId: string) =>
+    invoke<boolean>("cancel_job", { jobId }),
+  deleteJob: (jobId: string) =>
+    invoke<boolean>("delete_job", { jobId }),
+  rerunJob: (jobId: string) =>
+    invoke<JobMeta>("rerun_job", { jobId }),
+
+  // --- Dump / Restore ---
+  dumpDatabase: (request: DumpRequest) =>
+    invoke<DumpResult>("dump_database", { request }),
+  previewArchive: (sourceDir: string) =>
+    invoke<ArchivePreviewEntry[]>("preview_archive", { sourceDir }),
+  restoreDatabase: (request: RestoreRequest) =>
+    invoke<RestoreResult>("restore_database", { request }),
+
   shellAutocomplete: (request: {
     connectionId: string;
     textBeforeCursor: string;

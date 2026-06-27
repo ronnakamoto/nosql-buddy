@@ -64,3 +64,33 @@ export async function onImportExportProgress(
     handler(event.payload),
   );
 }
+
+export interface JobStatusChangedPayload {
+  jobId: string;
+  status: string;
+  message: string;
+  finishedAt: string | null;
+}
+
+export async function onJobStatusChanged(
+  handler: (payload: JobStatusChangedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<JobStatusChangedPayload>("job-status-changed", (event) =>
+    handler(event.payload),
+  );
+}
+
+export interface JobLogEntryPayload {
+  jobId: string;
+  timestamp: string;
+  level: string;
+  message: string;
+}
+
+export async function onJobLogEntry(
+  handler: (payload: JobLogEntryPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<JobLogEntryPayload>("job-log-entry", (event) =>
+    handler(event.payload),
+  );
+}

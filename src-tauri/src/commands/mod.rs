@@ -5,9 +5,12 @@
 
 pub mod connections;
 pub mod driver_code;
+pub mod dump;
 pub mod export;
 pub mod import;
+pub mod jobs;
 pub mod mongo;
+pub mod restore;
 pub mod settings;
 pub mod shell;
 pub mod sql;

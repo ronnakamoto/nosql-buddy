@@ -21,6 +21,10 @@ import { ToastStack, useToasts } from "./components/Toast";
 import { ToastProvider } from "./context/ToastContext";
 import AuditPanel from "./components/AuditPanel";
 import ErrorBoundary from "./components/ErrorBoundary";
+import { JobsHub } from "./features/jobs/JobsHub";
+import { DumpWizard } from "./features/backupRestore/DumpWizard";
+import { RestoreWizard } from "./features/backupRestore/RestoreWizard";
+import type { CollectionItem } from "./features/backupRestore/CollectionCheckList";
 import {
   Search,
   Terminal,
@@ -38,6 +42,9 @@ import {
   Trash2,
   Plug,
   Unplug,
+  HardDrive,
+  Download,
+  Upload,
 } from "lucide-react";
 
 type AuditView = "chooser" | "dev" | "production" | "settings";
@@ -47,7 +54,8 @@ type Tab =
   | { id: string; kind: "indexes"; connectionId: string; database: string; collection: string }
   | { id: string; kind: "schema"; connectionId: string; database: string; collection: string }
   | { id: string; kind: "shell"; connectionId: string; database: string; collection: string }
-  | { id: string; kind: "audit"; auditMode: AuditMode; auditView: AuditView };
+  | { id: string; kind: "audit"; auditMode: AuditMode; auditView: AuditView }
+  | { id: string; kind: "jobs"; connectionId?: string | null };
 
 interface ActiveConnection {
   handle: ConnectionHandle;
@@ -68,10 +76,12 @@ function NewTabMenu({
   onNewQuery,
   onNewShell,
   onOpenAudit,
+  onOpenJobs,
 }: {
   onNewQuery: () => void;
   onNewShell: () => void;
   onOpenAudit: () => void;
+  onOpenJobs: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ top: number; left: number | null; right: number | null }>({ top: 0, left: 0, right: null });
@@ -161,6 +171,15 @@ function NewTabMenu({
             <span className="new-tab-menu__icon" aria-hidden="true"><ShieldCheck size={14} /></span>
             <span className="new-tab-menu__label">Audit Log</span>
             <span className="new-tab-menu__hint">ZK tamper-evident log</span>
+          </button>
+          <button
+            className="new-tab-menu__item"
+            role="menuitem"
+            onClick={() => { setOpen(false); onOpenJobs(); }}
+          >
+            <span className="new-tab-menu__icon" aria-hidden="true"><HardDrive size={14} /></span>
+            <span className="new-tab-menu__label">Jobs</span>
+            <span className="new-tab-menu__hint">Dump, restore, export, import</span>
           </button>
         </div>
       )}
@@ -260,6 +279,83 @@ function ConnectionRowMenu({
           <div className="row-menu__sep" role="separator" />
           <button className="row-menu__item row-menu__item--danger" role="menuitem" onClick={run(onDelete)}>
             <Trash2 size={14} aria-hidden="true" /> Delete
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ─── Per-database overflow menu ───────────────────────────────────
+function DatabaseRowMenu({
+  onDump,
+  onRestore,
+}: {
+  onDump: () => void;
+  onRestore: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left: number | null; right: number | null }>({ top: 0, left: null, right: null });
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  const place = useCallback(() => {
+    const btn = triggerRef.current;
+    if (!btn) return;
+    const r = btn.getBoundingClientRect();
+    const width = 184;
+    const top = r.bottom + 4;
+    if (r.right - width < 8) setPos({ top, left: r.left, right: null });
+    else setPos({ top, left: null, right: window.innerWidth - r.right });
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    place();
+    const onDown = (e: MouseEvent) => {
+      if (menuRef.current?.contains(e.target as Node)) return;
+      if (triggerRef.current?.contains(e.target as Node)) return;
+      setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("resize", place);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", place);
+    };
+  }, [open, place]);
+
+  const run = (fn: () => void) => () => { setOpen(false); fn(); };
+
+  return (
+    <>
+      <button
+        ref={triggerRef}
+        className="conn-row__more"
+        style={{ marginLeft: 4, opacity: open ? 1 : undefined }}
+        aria-label="Database actions"
+        aria-expanded={open}
+        title="Actions"
+        onClick={(e) => { e.stopPropagation(); if (!open) place(); setOpen((o) => !o); }}
+      >
+        <MoreHorizontal size={13} />
+      </button>
+      {open && (
+        <div
+          ref={menuRef}
+          className="row-menu"
+          role="menu"
+          style={{ position: "fixed", top: pos.top, left: pos.left ?? undefined, right: pos.right ?? undefined }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button className="row-menu__item" role="menuitem" onClick={run(onDump)}>
+            <Download size={14} aria-hidden="true" /> Dump database
+          </button>
+          <button className="row-menu__item" role="menuitem" onClick={run(onRestore)}>
+            <Upload size={14} aria-hidden="true" /> Restore to database
           </button>
         </div>
       )}
@@ -461,6 +557,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [queryTime, setQueryTime] = useState<number | null>(null);
   const [docCount, setDocCount] = useState<number | null>(null);
+  const [dumpTarget, setDumpTarget] = useState<{ connectionId: string; database: string; collections: CollectionItem[] } | null>(null);
+  const [restoreTarget, setRestoreTarget] = useState<{ connectionId: string; database: string } | null>(null);
   const toasts = useToasts();
 
   // Initial load
@@ -756,6 +854,21 @@ export default function App() {
                 <span className="tree-group__icon" aria-hidden="true"><Database size={13} /></span>
                 <span className="tree-group__label">{db.name}</span>
                 <span className="tree-group__count">{collections.length} collections</span>
+                {active && (
+                  <DatabaseRowMenu
+                    onDump={() => {
+                      const items: CollectionItem[] = collections.map((c) => ({
+                        name: c.name,
+                        documentCount: c.documentCount,
+                        sizeBytes: c.sizeBytes,
+                      }));
+                      setDumpTarget({ connectionId: active.handle.connectionId, database: db.name, collections: items });
+                    }}
+                    onRestore={() => {
+                      setRestoreTarget({ connectionId: active.handle.connectionId, database: db.name });
+                    }}
+                  />
+                )}
               </div>
               {collections.length === 0 && (
                 <div className="tree-item" style={{ color: "var(--ink-faint)", cursor: "default" }}>
@@ -945,7 +1058,9 @@ export default function App() {
                       ? <LayoutGrid size={14} />
                       : t.kind === "shell"
                         ? <Terminal size={14} />
-                        : <ShieldCheck size={14} />}
+                        : t.kind === "jobs"
+                          ? <HardDrive size={14} />
+                          : <ShieldCheck size={14} />}
               </span>
               <span className="tab__label">
                 {t.kind === "query"
@@ -956,7 +1071,9 @@ export default function App() {
                       ? `${t.database}.${t.collection}`
                       : t.kind === "shell"
                         ? t.database
-                        : "Audit Log"}
+                        : t.kind === "jobs"
+                          ? "Jobs"
+                          : "Audit Log"}
               </span>
               <span className="tab__kind" aria-hidden="true">
                 {t.kind === "query"
@@ -967,7 +1084,9 @@ export default function App() {
                       ? "Schema"
                       : t.kind === "shell"
                         ? "Shell"
-                        : "ZK"}
+                        : t.kind === "jobs"
+                          ? "Jobs"
+                          : "ZK"}
               </span>
               <span
                 className="tab__close"
@@ -993,6 +1112,11 @@ export default function App() {
               onOpenAudit={() => {
                 const id = `audit-${Date.now()}`;
                 setTabs((prev) => [...prev, { id, kind: "audit", auditMode: "dev", auditView: "chooser" }]);
+                setActiveTabId(id);
+              }}
+              onOpenJobs={() => {
+                const id = `jobs-${Date.now()}`;
+                setTabs((prev) => [...prev, { id, kind: "jobs", connectionId: active?.handle.connectionId ?? null }]);
                 setActiveTabId(id);
               }}
             />
@@ -1075,6 +1199,20 @@ export default function App() {
         items={paletteItems}
       />
       <ToastStack toasts={toasts.toasts} onDismiss={toasts.dismiss} />
+      {dumpTarget && (
+        <DumpWizard
+          connectionId={dumpTarget.connectionId}
+          database={dumpTarget.database}
+          collections={dumpTarget.collections}
+          onClose={() => setDumpTarget(null)}
+        />
+      )}
+      {restoreTarget && (
+        <RestoreWizard
+          connectionId={restoreTarget.connectionId}
+          onClose={() => setRestoreTarget(null)}
+        />
+      )}
     </div>
     </ToastProvider>
   );
@@ -1150,6 +1288,9 @@ function TabPane({
         onViewChange={(auditView) => updateTab(tab.id, { auditView })}
       />
     );
+  }
+  if (tab.kind === "jobs") {
+    return <JobsHub connectionId={tab.connectionId} />;
   }
   return (
     <SchemaTab

@@ -1,4 +1,9 @@
-//! MongoDB collection sink for import jobs.
+//! MongoDB collection sink for import / restore jobs.
+//!
+//! Two modes:
+//! - `Insert` — batch `insert_many` (fast, fails on duplicates).
+//! - `Upsert` — `replace_one` with `upsert:true` per document (slower,
+//!   overwrites existing documents by `_id`).
 
 use async_trait::async_trait;
 use bson::Document;
@@ -8,11 +13,18 @@ use std::sync::Arc;
 use super::core::DocumentSink;
 use crate::error::AppResult;
 
+#[derive(Debug, Clone, Copy)]
+pub enum InsertMode {
+    Insert,
+    Upsert,
+}
+
 pub struct CollectionSink {
     collection: mongodb::Collection<Document>,
     batch: Vec<Document>,
     batch_size: usize,
     inserted: Arc<AtomicU64>,
+    mode: InsertMode,
 }
 
 impl CollectionSink {
@@ -26,7 +38,13 @@ impl CollectionSink {
             batch: Vec::with_capacity(batch_size.clamp(1, 10_000)),
             batch_size: batch_size.max(1),
             inserted,
+            mode: InsertMode::Insert,
         }
+    }
+
+    pub fn with_mode(mut self, mode: InsertMode) -> Self {
+        self.mode = mode;
+        self
     }
 
     async fn flush(&mut self) -> AppResult<()> {
@@ -34,9 +52,26 @@ impl CollectionSink {
             return Ok(());
         }
         let docs = std::mem::take(&mut self.batch);
-        let count = docs.len() as u64;
-        self.collection.insert_many(docs).await?;
-        self.inserted.fetch_add(count, Ordering::Relaxed);
+        match self.mode {
+            InsertMode::Insert => {
+                let count = docs.len() as u64;
+                self.collection.insert_many(docs).await?;
+                self.inserted.fetch_add(count, Ordering::Relaxed);
+            }
+            InsertMode::Upsert => {
+                for doc in docs {
+                    let filter = match doc.get("_id") {
+                        Some(id) => bson::doc! { "_id": id },
+                        None => bson::doc! {}, // no _id → always insert
+                    };
+                    let opts = mongodb::options::ReplaceOptions::builder()
+                        .upsert(true)
+                        .build();
+                    self.collection.replace_one(filter, doc).with_options(opts).await?;
+                    self.inserted.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
         Ok(())
     }
 }

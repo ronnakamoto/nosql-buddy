@@ -17,6 +17,7 @@ use crate::mongo::import_export::csv_source::CsvSource;
 use crate::mongo::import_export::io_util::validate_source_path;
 use crate::mongo::import_export::json_source::{JsonImportShape, JsonSource};
 use crate::mongo::import_export::mapping::{FieldMappingEntry, FieldMappingTransform};
+use crate::mongo::job_store::{JobKind, JobMeta, JobStatus};
 use crate::state::AppState;
 
 const DEFAULT_BATCH_SIZE: usize = 1000;
@@ -163,14 +164,25 @@ pub async fn run_import(
         }
     }
 
+    let mut meta = JobMeta::new(
+        request.job_id.clone(),
+        JobKind::Import,
+        request.connection_id.clone(),
+        request.database.clone(),
+    );
+    meta.collections = vec![request.collection.clone()];
+    meta.source_path = request.source.path.clone();
+    state.jobs.create_job(meta).await;
+    state.jobs.update_status(&request.job_id, JobStatus::Running, "Import started".into()).await;
+
     let cancel_flag = state
-        .import_export_jobs
+        .jobs
         .register(request.job_id.clone())
         .await;
     let ctx = JobContext {
         job_id: request.job_id.clone(),
         cancel_flag,
-        app_handle: Some(app),
+        app_handle: Some(app.clone()),
         progress_observer: None,
         throttle_ms: 250,
         max_errors: 10_000,
@@ -178,8 +190,22 @@ pub async fn run_import(
     };
 
     let report = run_pipeline(source, transforms, sink, ctx).await;
-    state.import_export_jobs.unregister(&request.job_id).await;
-    let report = report?;
+    state.jobs.unregister(&request.job_id).await;
+    let report = match report {
+        Ok(r) => r,
+        Err(e) => {
+            state.jobs.update_status(&request.job_id, JobStatus::Failed, e.to_string()).await;
+            return Err(e);
+        }
+    };
+
+    let status = if report.cancelled {
+        JobStatus::Cancelled
+    } else {
+        JobStatus::Done
+    };
+    let msg = format!("Imported {} documents, {} errors", inserted.load(Ordering::Relaxed), report.errors);
+    state.jobs.update_status(&request.job_id, status, msg).await;
 
     Ok(ImportResult {
         job_id: report.job_id,
