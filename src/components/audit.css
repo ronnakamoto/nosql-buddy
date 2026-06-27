@@ -142,6 +142,224 @@
   }
 }
 
+/* ─── Stepper (dev flow single-focus workflow) ─────────────────── */
+
+.audit-stage {
+  display: flex;
+  flex-direction: column;
+}
+
+.audit-stepper {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.audit-stepper__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.audit-stepper__marker {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  border: 1.5px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--ink-faint);
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.audit-stepper__item.is-active .audit-stepper__marker {
+  background: var(--accent-500);
+  border-color: var(--accent-500);
+  color: #fff;
+  box-shadow: 0 0 0 4px color-mix(in oklch, var(--accent-500) 18%, transparent);
+}
+
+.audit-stepper__item.is-done .audit-stepper__marker {
+  background: var(--success-500);
+  border-color: var(--success-500);
+  color: #fff;
+}
+
+.audit-stepper__copy {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.audit-stepper__label {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--ink-faint);
+  white-space: nowrap;
+  transition: color 0.2s ease;
+}
+
+.audit-stepper__item.is-active .audit-stepper__label,
+.audit-stepper__item.is-done .audit-stepper__label {
+  color: var(--ink);
+}
+
+.audit-stepper__desc {
+  font-size: 0.6875rem;
+  color: var(--ink-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.audit-stepper__connector {
+  flex: 1;
+  height: 2px;
+  min-width: var(--space-4);
+  border-radius: 999px;
+  background: var(--border);
+  transition: background 0.3s ease;
+}
+
+.audit-stepper__connector.is-done {
+  background: var(--success-500);
+}
+
+/* Stage body: focused action column + guidance aside */
+.audit-stage__body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  gap: var(--space-5);
+  padding: var(--space-4);
+}
+
+.audit-stage__main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.audit-stage__step {
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  color: var(--accent-600);
+}
+
+.audit-stage__stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: var(--space-3);
+}
+
+.audit-stage__meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-xs);
+  color: var(--ink-faint);
+}
+
+.audit-stage__meta span:last-child {
+  font-family: var(--font-mono);
+  letter-spacing: var(--letter-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audit-stage__action {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.audit-stage__action > span {
+  font-size: var(--font-size-xs);
+  color: var(--ink-faint);
+  line-height: var(--line-height-tight);
+}
+
+.audit-stage__busy {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-xs);
+  color: var(--ink-muted);
+}
+
+.audit-stage__result {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.audit-stage__aside {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  align-self: start;
+}
+
+.audit-stage__aside-label {
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  color: var(--ink-faint);
+}
+
+.audit-stage__aside strong {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.audit-stage__aside p {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--ink-muted);
+  line-height: var(--line-height-normal);
+}
+
+@media (max-width: 760px) {
+  .audit-stage__body {
+    grid-template-columns: 1fr;
+    gap: var(--space-4);
+  }
+  .audit-stepper__desc {
+    display: none;
+  }
+  .audit-stepper__connector {
+    min-width: var(--space-3);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .audit-stepper__marker,
+  .audit-stepper__label,
+  .audit-stepper__connector {
+    transition: none;
+  }
+}
+
 .audit-view {
   display: flex;
   flex-direction: column;

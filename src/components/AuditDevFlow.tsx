@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect, useCallback, useRef } from "react";
+import { useMemo, useState, useEffect, useCallback, useRef, Fragment } from "react";
 import commands, {
   type DevPrerequisites,
   type DevStackStatus,
@@ -14,6 +14,7 @@ import {
   Alert,
   Spinner,
   StatusCard,
+  Stat,
   InlineEmpty,
   EmptyState,
   TxHashLink,
@@ -908,125 +909,182 @@ function DevLiveViewInner() {
         : "warning"
     : "neutral";
 
+  const committed = !!commitResult;
+  const hasRecordedChanges = epochEvents > 0 || closed || lastClosedEpoch !== null;
+  const hasSealedBatch = closed || lastClosedEpoch !== null;
+  const activeStep = committed ? 0 : hasSealedBatch ? 3 : hasRecordedChanges ? 2 : 1;
+  const stepDefs = [
+    { n: 1, label: "Write Data", desc: "Capture MongoDB changes" },
+    { n: 2, label: "Seal Batch", desc: "Lock the recorded events" },
+    { n: 3, label: "Commit to Chain", desc: "Anchor the root on Stellar" },
+  ];
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-4)" }}>
       {error && <Alert tone="danger">{error}</Alert>}
 
-      {/* ─── Workflow step guide ──────────────────────────────────── */}
-      <div className="audit-step-guide">
-        <div className={`audit-step ${epochEvents > 0 ? "audit-step--done" : "audit-step--active"}`}>
-          <span className="audit-step__num">{epochEvents > 0 ? "✓" : "1"}</span>
-          <span className="audit-step__label">Write Data</span>
-        </div>
-        <div className={`audit-step ${epochEvents > 0 && !closed ? "audit-step--active" : closed ? "audit-step--done" : ""}`}>
-          <span className="audit-step__num">{closed ? "✓" : epochEvents > 0 ? "2" : ""}</span>
-          <span className="audit-step__label">Close Batch</span>
-        </div>
-        <div className={`audit-step ${closed || commitResult ? "audit-step--active" : ""} ${commitResult ? "audit-step--done" : ""}`}>
-          <span className="audit-step__num">{commitResult ? "✓" : closed || lastClosedEpoch ? "3" : ""}</span>
-          <span className="audit-step__label">Commit to Chain</span>
-        </div>
-      </div>
-
-      {/* ─── Main stage: epoch + commit ───────────────────────────── */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-4)" }}>
-        <Card>
-          <CardHeader
-            title={`Batch ${current?.epochNumber ?? 0}`}
-            subtitle={closed ? "Sealed and ready to commit" : `${epochEvents} / ${EPOCH_THRESHOLD} changes captured`}
-          />
-          <ProgressBar current={epochEvents} max={EPOCH_THRESHOLD} tone={closed ? "success" : "accent"} />
-          <div style={{ display: "flex", justifyContent: "space-between", marginTop: "var(--space-3)" }}>
-            <span style={{ fontSize: "var(--font-size-xs)", color: "var(--ink-faint)" }}>
-              {closed ? "Sealed" : "Recording MongoDB changes"}
-            </span>
-            <span
-              style={{
-                fontSize: "var(--font-size-xs)",
-                color: "var(--ink-faint)",
-                fontFamily: "var(--font-mono)",
-              }}
-            >
-              fingerprint {current?.rootHex ? shortHash(current.rootHex) : "—"}
-            </span>
+      <Card padded={false} style={{ overflow: "hidden" }}>
+        <div className="audit-stage">
+          <div className="audit-stepper" role="list" aria-label="Audit commit workflow">
+            {stepDefs.map((step, index) => {
+              const done = step.n === 1
+                ? hasRecordedChanges
+                : step.n === 2
+                  ? hasSealedBatch
+                  : committed;
+              const active = activeStep === step.n;
+              return (
+                <Fragment key={step.n}>
+                  <div
+                    className={[
+                      "audit-stepper__item",
+                      active ? "is-active" : "",
+                      done ? "is-done" : "",
+                    ].filter(Boolean).join(" ")}
+                    role="listitem"
+                    aria-current={active ? "step" : undefined}
+                  >
+                    <span className="audit-stepper__marker">{done ? "✓" : step.n}</span>
+                    <span className="audit-stepper__copy">
+                      <span className="audit-stepper__label">{step.label}</span>
+                      <span className="audit-stepper__desc">{step.desc}</span>
+                    </span>
+                  </div>
+                  {index < stepDefs.length - 1 && (
+                    <span
+                      className={[
+                        "audit-stepper__connector",
+                        (step.n === 1 && hasRecordedChanges) || (step.n === 2 && hasSealedBatch)
+                          ? "is-done"
+                          : "",
+                      ].filter(Boolean).join(" ")}
+                      aria-hidden="true"
+                    />
+                  )}
+                </Fragment>
+              );
+            })}
           </div>
-          {epochEvents === 0 && !closed && (
-            <div style={{ marginTop: "var(--space-3)" }}>
-              <Alert tone="info">
-                Insert, update, or delete a document through <code>{AUDITED_MONGO_URI}</code>. The audit stack watches that replica set, not the single-node dev DB on port 27017. The batch seals itself at {EPOCH_THRESHOLD} events, or close it manually.
-              </Alert>
-            </div>
-          )}
-          {!closed && (
-            <div style={{ marginTop: "var(--space-3)" }}>
-              <Button
-                variant="secondary"
-                loading={closeBusy}
-                disabled={!canClose}
-                onClick={handleCloseEpoch}
-                style={{ width: "100%" }}
-                title={closeDisabledReason ?? "Seal the current batch so it can be committed"}
-              >
-                Seal Batch
-              </Button>
-              {closeDisabledReason && (
-                <div
-                  style={{
-                    marginTop: "var(--space-2)",
-                    fontSize: "var(--font-size-xs)",
-                    color: "var(--ink-faint)",
-                    lineHeight: "var(--line-height-tight)",
-                  }}
-                >
-                  {closeDisabledReason}
+
+          <div className="audit-stage__body">
+            <div className="audit-stage__main">
+              <span className="audit-stage__step">
+                {committed ? "Workflow complete" : `Step ${activeStep} of 3`}
+              </span>
+              <CardHeader
+                title={
+                  committed
+                    ? "Batch committed to Stellar"
+                    : activeStep === 1
+                      ? "Write to the audited MongoDB endpoint"
+                      : activeStep === 2
+                        ? "Seal this batch"
+                        : "Commit the sealed batch"
+                }
+                subtitle={
+                  committed
+                    ? "The committed root can now be verified independently."
+                    : activeStep === 1
+                      ? "Make one or more writes, then the batch can be sealed."
+                      : activeStep === 2
+                        ? "Lock the captured events before anchoring them on-chain."
+                        : lastClosedEpoch
+                          ? `Batch #${lastClosedEpoch.epochNumber} is ready to anchor on-chain.`
+                          : "Anchor the sealed batch on-chain."
+                }
+              />
+
+              <div className="audit-stage__stats">
+                <Stat label="Batch" value={current?.epochNumber ?? 0} />
+                <Stat label="Events captured" value={`${epochEvents} / ${EPOCH_THRESHOLD}`} />
+                <Stat label="Fingerprint" value={current?.rootHex ? shortHash(current.rootHex) : "—"} mono />
+              </div>
+
+              <ProgressBar current={epochEvents} max={EPOCH_THRESHOLD} tone={hasSealedBatch ? "success" : "accent"} />
+
+              <div className="audit-stage__meta">
+                <span>{hasSealedBatch ? "Sealed and ready" : "Recording MongoDB changes"}</span>
+                <span>{activeStep === 1 ? AUDITED_MONGO_URI : `fingerprint ${current?.rootHex ? shortHash(current.rootHex) : "—"}`}</span>
+              </div>
+
+              {epochEvents === 0 && !closed && activeStep === 1 && (
+                <Alert tone="info">
+                  Insert, update, or delete a document through <code>{AUDITED_MONGO_URI}</code>. The audit stack watches that replica set, not the single-node dev DB on port 27017.
+                </Alert>
+              )}
+
+              {activeStep === 2 && !closed && (
+                <div className="audit-stage__action">
+                  <Button
+                    variant="primary"
+                    loading={closeBusy}
+                    disabled={!canClose}
+                    onClick={handleCloseEpoch}
+                    style={{ width: "100%" }}
+                    title={closeDisabledReason ?? "Seal the current batch so it can be committed"}
+                  >
+                    Seal Batch
+                  </Button>
+                  {closeDisabledReason && <span>{closeDisabledReason}</span>}
+                </div>
+              )}
+
+              {(activeStep === 3 || committed) && (
+                <div className="audit-stage__action">
+                  {commitBusy && (
+                    <div className="audit-stage__busy">
+                      <Spinner size={13} />
+                      <span>{commitStep}</span>
+                    </div>
+                  )}
+                  {commitResult && !commitBusy && (
+                    <div className="audit-stage__result">
+                      <Badge tone="success" dot>Committed</Badge>
+                      {commitResult.txHash && <KeyValue label="Tx hash" value={<TxHashLink txHash={commitResult.txHash} network="testnet" />} />}
+                      {commitResult.cid && <KeyValue label="IPFS CID" value={commitResult.cid} />}
+                    </div>
+                  )}
+                  {!committed && (
+                    <Button
+                      variant="primary"
+                      loading={commitBusy}
+                      disabled={!canCommit}
+                      onClick={handleCommit}
+                      style={{ width: "100%" }}
+                      title={commitDisabledReason ?? "Commit the closed epoch to Stellar"}
+                    >
+                      Commit Batch
+                    </Button>
+                  )}
+                  {commitDisabledReason && !committed && <span>{commitDisabledReason}</span>}
                 </div>
               )}
             </div>
-          )}
-        </Card>
 
-        <Card>
-          <CardHeader
-            title="Commit to Stellar"
-            subtitle={lastClosedEpoch ? `Batch #${lastClosedEpoch.epochNumber} ready` : "Anchor the sealed batch on-chain"}
-          />
-          {commitBusy && (
-            <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", marginBottom: "var(--space-3)" }}>
-              <Spinner size={13} />
-              <span style={{ fontSize: "var(--font-size-xs)", color: "var(--ink-muted)" }}>{commitStep}</span>
-            </div>
-          )}
-          {commitResult && !commitBusy && (
-            <div style={{ marginBottom: "var(--space-3)", display: "flex", flexDirection: "column", gap: "var(--space-2)" }}>
-              <Badge tone="success" dot>Committed</Badge>
-              {commitResult.txHash && <KeyValue label="Tx hash" value={<TxHashLink txHash={commitResult.txHash} network="testnet" />} />}
-              {commitResult.cid && <KeyValue label="IPFS CID" value={commitResult.cid} />}
-            </div>
-          )}
-          <Button
-            variant="primary"
-            loading={commitBusy}
-            disabled={!canCommit}
-            onClick={handleCommit}
-            style={{ width: "100%" }}
-            title={commitDisabledReason ?? "Commit the closed epoch to Stellar"}
-          >
-            Commit Now
-          </Button>
-          {commitDisabledReason && (
-            <div
-              style={{
-                marginTop: "var(--space-2)",
-                fontSize: "var(--font-size-xs)",
-                color: "var(--ink-faint)",
-                lineHeight: "var(--line-height-tight)",
-              }}
-            >
-              {commitDisabledReason}
-            </div>
-          )}
-        </Card>
-      </div>
+            <aside className="audit-stage__aside" aria-label="Current workflow guidance">
+              <span className="audit-stage__aside-label">Next available action</span>
+              <strong>
+                {committed
+                  ? "Verify the committed root below"
+                  : activeStep === 1
+                    ? "Write to MongoDB through the audited URI"
+                    : activeStep === 2
+                      ? "Seal the captured batch"
+                      : "Commit the sealed root to Stellar"}
+              </strong>
+              <p>
+                {committed
+                  ? "Use the integrity checks below to refresh chain state, collect attester sign-off, or verify oplog completeness."
+                  : activeStep === 1
+                    ? "The stepper advances as soon as a write is captured, so there is no disabled action to hunt for."
+                    : activeStep === 2
+                      ? "Sealing freezes this batch and makes the commitment action available."
+                      : "Committing stores the batch root on-chain and returns the transaction details."}
+              </p>
+            </aside>
+          </div>
+        </div>
+      </Card>
 
       {/* ─── Integrity row ──────────────────────────────────────────── */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "var(--space-4)" }}>
