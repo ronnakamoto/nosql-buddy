@@ -16,6 +16,7 @@ import {
   Spinner,
   KeyValue,
 } from "./AuditUi";
+import { useToast } from "../context/ToastContext";
 
 /**
  * Redesigned audit settings.
@@ -35,8 +36,7 @@ export function AuditSettings({
 }) {
   const [config, setConfig] = useState<AuditModeConfig | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const toast = useToast();
 
   // Mode switch
   const [switching, setSwitching] = useState(false);
@@ -75,7 +75,7 @@ export function AuditSettings({
       setAccountId(acct);
       setHasPinata(onboarding.hasPinata);
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
     } finally {
       setLoading(false);
     }
@@ -101,13 +101,13 @@ export function AuditSettings({
 
   const switchMode = async (mode: AuditMode) => {
     setSwitching(true);
-    setError(null);
+
     try {
       await commands.auditSetAuditMode(mode);
-      setMessage(`Switched to ${mode === "dev" ? "Dev" : "Production"} mode`);
+      toast.push(`Switched to ${mode === "dev" ? "Dev" : "Production"} mode`, "success");
       onModeChanged(mode);
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
     } finally {
       setSwitching(false);
     }
@@ -115,10 +115,10 @@ export function AuditSettings({
 
   const saveProduction = async () => {
     setSavingProd(true);
-    setError(null);
+
     try {
       if (network === "mainnet" && !contractId.trim()) {
-        setError("Mainnet requires a contract ID");
+        toast.push("Mainnet requires a contract ID", "error");
         return;
       }
       await commands.auditSetProductionNetwork(
@@ -126,10 +126,10 @@ export function AuditSettings({
         network === "mainnet" ? contractId.trim() : "",
         network === "mainnet" ? rpcUrl.trim() : "",
       );
-      setMessage("Production network saved");
+      toast.push("Production network saved", "success");
       await refresh();
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
     } finally {
       setSavingProd(false);
     }
@@ -137,19 +137,19 @@ export function AuditSettings({
 
   const importKey = async () => {
     setSavingProd(true);
-    setError(null);
+
     try {
       if (!secretKey.trim()) {
-        setError("Enter a secret key");
+        toast.push("Enter a secret key", "error");
         return;
       }
       const acct = await commands.auditImportProductionKeypair(secretKey.trim());
       setAccountId(acct);
       setSecretKey("");
-      setMessage("Production keypair saved to keychain");
+      toast.push("Production keypair saved to keychain", "success");
       await refresh();
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
     } finally {
       setSavingProd(false);
     }
@@ -157,14 +157,14 @@ export function AuditSettings({
 
   const clearKey = async () => {
     setSavingProd(true);
-    setError(null);
+
     try {
       await commands.auditClearProductionKeypair();
       setAccountId(null);
-      setMessage("Production keypair cleared");
+      toast.push("Production keypair cleared", "success");
       await refresh();
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
     } finally {
       setSavingProd(false);
     }
@@ -172,16 +172,16 @@ export function AuditSettings({
 
   const savePinata = async () => {
     setPinataBusy(true);
-    setError(null);
+
     try {
       await commands.auditSavePinataConfig(pinataKey.trim(), pinataSecret.trim());
       setHasPinata(true);
       setShowPinata(false);
       setPinataKey("");
       setPinataSecret("");
-      setMessage("Pinata credentials updated");
+      toast.push("Pinata credentials updated", "success");
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
     } finally {
       setPinataBusy(false);
     }
@@ -189,12 +189,12 @@ export function AuditSettings({
 
   const stackUp = async () => {
     setStackBusy(true);
-    setError(null);
+
     try {
       await commands.auditDevStackUp();
       await refreshDev();
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
     } finally {
       setStackBusy(false);
     }
@@ -202,12 +202,12 @@ export function AuditSettings({
 
   const stackDown = async () => {
     setStackBusy(true);
-    setError(null);
+
     try {
       await commands.auditDevStackDown();
       await refreshDev();
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
     } finally {
       setStackBusy(false);
     }
@@ -240,9 +240,6 @@ export function AuditSettings({
         <div style={{ flex: 1 }} />
         <Button variant="secondary" onClick={onBack}>Back</Button>
       </div>
-
-      {error && <Alert tone="danger">{error}</Alert>}
-      {message && <Alert tone="success">{message}</Alert>}
 
       {/* ─── Mode ─────────────────────────────────────────────────── */}
       <Card>

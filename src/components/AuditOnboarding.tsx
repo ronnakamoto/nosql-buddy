@@ -1,6 +1,7 @@
 import { useState, useCallback, type ReactNode, type CSSProperties } from "react";
 import commands, { type OnboardingStatus } from "../ipc/commands";
 import { formatError } from "../ipc/commands";
+import { useToast } from "../context/ToastContext";
 
 /**
  * Audit onboarding flow — the "Start Audit Trial" experience.
@@ -20,6 +21,7 @@ export function AuditOnboarding({
 }: {
   onComplete: () => void;
 }) {
+  const toast = useToast();
   const [step, setStep] = useState<SetupStep>("idle");
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<string[]>([]);
@@ -62,13 +64,17 @@ export function AuditOnboarding({
       await fundAndComplete(keypairReady);
     } catch (e) {
       setStep("error");
-      setError(formatError(e));
+      const msg = formatError(e);
+      setError(msg);
+      toast.push(msg, "error");
     }
   }, [addProgress]);
 
   const savePinataAndContinue = useCallback(async () => {
     if (!apiKey.trim() || !apiSecret.trim()) {
-      setError("Please enter both API key and API secret");
+      const msg = "Please enter both API key and API secret";
+      setError(msg);
+      toast.push(msg, "error");
       return;
     }
 
@@ -84,11 +90,13 @@ export function AuditOnboarding({
       const status = await commands.auditCheckOnboarding();
       await fundAndComplete(status.hasKeypair);
     } catch (e) {
-      setError(formatError(e));
+      const msg = formatError(e);
+      setError(msg);
+      toast.push(msg, "error");
     } finally {
       setTestingPinata(false);
     }
-  }, [apiKey, apiSecret, addProgress]);
+  }, [apiKey, apiSecret, addProgress, toast]);
 
   const fundAndComplete = useCallback(
     async (keypairReady: boolean) => {
@@ -133,7 +141,6 @@ export function AuditOnboarding({
           onApiSecretChange={setApiSecret}
           onSave={savePinataAndContinue}
           testing={testingPinata}
-          error={error}
           progress={progress}
         />
       );
@@ -142,7 +149,7 @@ export function AuditOnboarding({
   }
 
   return (
-    <ProgressView step={step} progress={progress} error={error} onRetry={startOnboarding} />
+    <ProgressView step={step} progress={progress} onRetry={startOnboarding} />
   );
 }
 
@@ -219,7 +226,6 @@ function PinataForm({
   onApiSecretChange,
   onSave,
   testing,
-  error,
   progress,
 }: {
   apiKey: string;
@@ -228,7 +234,6 @@ function PinataForm({
   onApiSecretChange: (v: string) => void;
   onSave: () => void;
   testing: boolean;
-  error: string | null;
   progress: string[];
 }) {
   return (
@@ -282,8 +287,6 @@ function PinataForm({
         />
       </FormField>
 
-      {error && <ErrorBanner message={error} />}
-
       <button
         onClick={onSave}
         disabled={testing || !apiKey.trim() || !apiSecret.trim()}
@@ -309,12 +312,10 @@ function PinataForm({
 function ProgressView({
   step,
   progress,
-  error,
   onRetry,
 }: {
   step: SetupStep;
   progress: string[];
-  error: string | null;
   onRetry: () => void;
 }) {
   return (
@@ -344,8 +345,6 @@ function ProgressView({
       </div>
 
       <ProgressList progress={progress} />
-
-      {error && <ErrorBanner message={error} />}
 
       {step === "error" && (
         <button
@@ -414,24 +413,6 @@ function FormField({ label, children }: { label: string; children: ReactNode }) 
         {label}
       </label>
       {children}
-    </div>
-  );
-}
-
-function ErrorBanner({ message }: { message: string }) {
-  return (
-    <div
-      style={{
-        padding: "8px 12px",
-        fontSize: "11px",
-        color: "var(--danger-500, #c00)",
-        background: "var(--surface-2)",
-        border: "1px solid var(--danger-500, #c00)",
-        borderRadius: "var(--radius-sm)",
-        fontFamily: "var(--font-mono)",
-      }}
-    >
-      {message}
     </div>
   );
 }

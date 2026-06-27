@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Modal } from "./Modal";
-import { Alert } from "./Alert";
+import { useToast } from "../context/ToastContext";
 import commands from "../ipc/commands";
 
 export interface InsertDocumentModalProps {
@@ -34,14 +34,13 @@ export function InsertDocumentModal({
 }: InsertDocumentModalProps) {
   const [body, setBody] = useState(DEFAULT_BODY);
   const [submitting, setSubmitting] = useState(false);
-  const [localError, setLocalError] = useState<string | null>(null);
+  const toast = useToast();
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   // Reset when the modal is opened so the previous draft does not leak.
   useEffect(() => {
     if (open) {
       setBody(DEFAULT_BODY);
-      setLocalError(null);
       setSubmitting(false);
     }
   }, [open]);
@@ -49,16 +48,15 @@ export function InsertDocumentModal({
   if (!open) return null;
 
   async function handleInsert() {
-    setLocalError(null);
     let parsed: unknown;
     try {
       parsed = JSON.parse(body);
     } catch (e) {
-      setLocalError(`Invalid JSON: ${describeError(e)}`);
+      toast.push(`Invalid JSON: ${describeError(e)}`, "error");
       return;
     }
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-      setLocalError("Document must be a JSON object.");
+      toast.push("Document must be a JSON object.", "error");
       return;
     }
     setSubmitting(true);
@@ -73,7 +71,7 @@ export function InsertDocumentModal({
       onClose();
     } catch (e) {
       const msg = describeError(e);
-      setLocalError(msg);
+      toast.push(msg, "error");
       onError(msg);
     } finally {
       setSubmitting(false);
@@ -109,9 +107,6 @@ export function InsertDocumentModal({
             resize: "vertical",
           }}
         />
-        {localError && (
-          <Alert tone="danger" style={{ margin: 0 }}>{localError}</Alert>
-        )}
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
           <button
             className="btn btn--sm"

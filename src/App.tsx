@@ -18,6 +18,7 @@ import { IndexTab } from "./features/IndexTab";
 import { SchemaTab } from "./features/SchemaTab";
 import { ShellTab } from "./features/ShellTab";
 import { ToastStack, useToasts } from "./components/Toast";
+import { ToastProvider } from "./context/ToastContext";
 import AuditPanel from "./components/AuditPanel";
 import ErrorBoundary from "./components/ErrorBoundary";
 import {
@@ -829,6 +830,7 @@ export default function App() {
   );
 
   return (
+    <ToastProvider value={toasts}>
     <div className="app">
       <header className="app__titlebar">
         <span className="app__titlebar-brand">NoSQLBuddy</span>
@@ -1074,6 +1076,7 @@ export default function App() {
       />
       <ToastStack toasts={toasts.toasts} onDismiss={toasts.dismiss} />
     </div>
+    </ToastProvider>
   );
 }
 

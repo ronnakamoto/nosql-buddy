@@ -1,6 +1,7 @@
 import { useState } from "react";
 import commands, { type SaveProfileRequest, type TestResult } from "../ipc/commands";
 import { Modal } from "./Modal";
+import { useToast } from "../context/ToastContext";
 
 export interface ConnectionFormProps {
   open: boolean;
@@ -10,6 +11,7 @@ export interface ConnectionFormProps {
 }
 
 export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFormProps) {
+  const toast = useToast();
   const [name, setName] = useState(initial?.name ?? "");
   const [uri, setUri] = useState(
     initial?.uri ?? "mongodb://127.0.0.1:27017/?retryWrites=true",
@@ -20,13 +22,11 @@ export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFo
   const [secret, setSecret] = useState("");
   const [group, setGroup] = useState(initial?.group ?? "");
   const [notes, setNotes] = useState(initial?.notes ?? "");
-  const [error, setError] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
   const [saving, setSaving] = useState(false);
 
   async function handleTest() {
-    setError(null);
     setTestResult(null);
     setTesting(true);
     try {
@@ -39,20 +39,19 @@ export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFo
       });
       setTestResult(result);
     } catch (e) {
-      setError(describeError(e));
+      toast.push(describeError(e), "error");
     } finally {
       setTesting(false);
     }
   }
 
   async function handleSave() {
-    setError(null);
     if (!name.trim()) {
-      setError("Give the connection a name.");
+      toast.push("Give the connection a name.", "error");
       return;
     }
     if (!uri.trim()) {
-      setError("A connection URI is required.");
+      toast.push("A connection URI is required.", "error");
       return;
     }
     setSaving(true);
@@ -69,7 +68,7 @@ export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFo
       onSaved();
       onClose();
     } catch (e) {
-      setError(describeError(e));
+      toast.push(describeError(e), "error");
     } finally {
       setSaving(false);
     }
@@ -95,11 +94,6 @@ export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFo
         </>
       }
     >
-      {error && (
-        <div role="alert" className="field__error" style={{ marginBottom: 8 }}>
-          {error}
-        </div>
-      )}
       {testResult && (
         <div
           role="status"

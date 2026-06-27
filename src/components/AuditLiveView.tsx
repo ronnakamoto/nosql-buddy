@@ -9,6 +9,7 @@ import commands, {
   type Epoch,
   formatError,
 } from "../ipc/commands";
+import { useToast } from "../context/ToastContext";
 
 /**
  * Live audit view — the simplified one-view experience for dev mode.
@@ -33,7 +34,7 @@ export function AuditLiveView({
   const [status, setStatus] = useState<AuditStatus | null>(null);
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [currentEpoch, setCurrentEpoch] = useState<Epoch | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const toast = useToast();
 
   // Commit state
   const [commitLoading, setCommitLoading] = useState(false);
@@ -84,7 +85,7 @@ export function AuditLiveView({
 
   const handleCommit = async () => {
     setCommitLoading(true);
-    setError(null);
+
     setCommitResult(null);
     setPinataResult(null);
     setCommitStep("Freezing root...");
@@ -121,7 +122,7 @@ export function AuditLiveView({
       // Refresh on-chain root.
       refreshOnchainRoot();
     } catch (err) {
-      setError(formatError(err));
+      toast.push(formatError(err), "error");
       setCommitStep("");
     } finally {
       setCommitLoading(false);
@@ -143,12 +144,12 @@ export function AuditLiveView({
 
   const handleVerify = async () => {
     setVerifyLoading(true);
-    setError(null);
+
     try {
       const report = await commands.auditVerifyReaderMode();
       setVerifyReport(report);
     } catch (err) {
-      setError(formatError(err));
+      toast.push(formatError(err), "error");
     } finally {
       setVerifyLoading(false);
     }
@@ -158,7 +159,7 @@ export function AuditLiveView({
     setProofIndex(index);
     setProofLoading(true);
     setProofResult(null);
-    setError(null);
+
     try {
       const result = await commands.auditGenerateProof(index);
       setProofResult(
@@ -173,7 +174,7 @@ export function AuditLiveView({
         ),
       );
     } catch (err) {
-      setError(formatError(err));
+      toast.push(formatError(err), "error");
     } finally {
       setProofLoading(false);
     }
@@ -335,12 +336,6 @@ export function AuditLiveView({
         </SectionCard>
       )}
 
-      {/* Error display */}
-      {error && (
-        <div style={errorBannerStyle}>
-          {error}
-        </div>
-      )}
     </div>
   );
 }
@@ -606,12 +601,4 @@ const btnSecondaryStyle: CSSProperties = {
   whiteSpace: "nowrap",
 };
 
-const errorBannerStyle: CSSProperties = {
-  padding: "8px 12px",
-  fontSize: "11px",
-  color: "var(--danger-500, #c00)",
-  background: "var(--surface-2)",
-  border: "1px solid var(--danger-500, #c00)",
-  borderRadius: "var(--radius-sm)",
-  fontFamily: "var(--font-mono)",
-};
+

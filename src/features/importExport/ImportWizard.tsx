@@ -14,6 +14,7 @@ import commands, {
 } from "../../ipc/commands";
 import { onImportExportProgress } from "../../ipc/events";
 import { Alert } from "../../components/Alert";
+import { useToast } from "../../context/ToastContext";
 import {
   FieldMappingTable,
   discoveredFieldsFromInference,
@@ -65,13 +66,12 @@ export function ImportWizard({
   const [taskName, setTaskName] = useState("");
   const [taskMessage, setTaskMessage] = useState<string | null>(null);
 
+  const toast = useToast();
   const [phase, setPhase] = useState<Phase>("config");
   const [processed, setProcessed] = useState(0);
   const [total, setTotal] = useState<number | null>(null);
   const [preview, setPreview] = useState<PreviewImportResult | null>(null);
   const [result, setResult] = useState<ImportResult | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
   const jobIdRef = useRef<string | null>(null);
 
@@ -152,8 +152,6 @@ export function ImportWizard({
   ]);
 
   const runPreview = useCallback(async () => {
-    setError(null);
-    setMessage(null);
     try {
       // Preview never applies the field mapping — the user needs to see the
       // raw source fields first so they can build the mapping. The mapping is
@@ -169,14 +167,12 @@ export function ImportWizard({
       setMappingEntries(identityMapping(fields));
       setShowMapping(fields.length > 0);
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
       setPhase("error");
     }
-  }, [buildRequest]);
+  }, [buildRequest, toast]);
 
   const runImport = useCallback(async () => {
-    setError(null);
-    setMessage(null);
     const jobId = crypto.randomUUID();
     jobIdRef.current = jobId;
     setProcessed(0);
@@ -189,21 +185,22 @@ export function ImportWizard({
       setResult(next);
       if (next.cancelled) {
         setPhase("config");
-        setMessage("Import cancelled.");
+        toast.push("Import cancelled.", "info");
       } else {
         setPhase("done");
-        setMessage(
+        toast.push(
           `Inserted ${next.inserted.toLocaleString()} document(s). ${next.errors.toLocaleString()} row error(s).`,
+          "success",
         );
         onImported?.();
       }
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
       setPhase("error");
     } finally {
       jobIdRef.current = null;
     }
-  }, [buildRequest, onImported]);
+  }, [buildRequest, onImported, toast]);
 
   const cancel = useCallback(async () => {
     if (jobIdRef.current) {
@@ -609,16 +606,10 @@ export function ImportWizard({
             </div>
           )}
 
-          {message && phase !== "running" && (
-            <Alert tone="success" style={{ margin: 0 }}>{message}</Alert>
-          )}
           {result && result.rowErrors.length > 0 && phase === "done" && (
             <Alert tone="warning" style={{ margin: 0 }}>
               First row error: row {result.rowErrors[0].row ?? "?"}: {result.rowErrors[0].message}
             </Alert>
-          )}
-          {error && (
-            <Alert tone="danger" style={{ margin: 0 }}>{error}</Alert>
           )}
         </div>
 

@@ -24,6 +24,7 @@ import {
 } from "./AuditUi";
 import type { ProofResult, DevSetupParams } from "../ipc/commands";
 import { onAuditSetupProgress } from "../ipc/events";
+import { useToast } from "../context/ToastContext";
 import { FlaskConical, CircleDashed, X, CheckCircle, ExternalLink } from "lucide-react";
 
 /**
@@ -89,7 +90,7 @@ export function AuditDevFlow(_: { onShowSettings: () => void; onSwitchMode: () =
   const [confirmReset, setConfirmReset] = useState(false);
   const [logsBusy, setLogsBusy] = useState(false);
   const [logs, setLogs] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const toast = useToast();
   const [setupModalOpen, setSetupModalOpen] = useState(false);
   const [setupBusy, setSetupBusy] = useState(false);
   const [setupResultLog, setSetupResultLog] = useState<string | null>(null);
@@ -104,7 +105,7 @@ export function AuditDevFlow(_: { onShowSettings: () => void; onSwitchMode: () =
       setPrereqs(p);
       setStack(s);
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
     }
   }, []);
 
@@ -114,13 +115,13 @@ export function AuditDevFlow(_: { onShowSettings: () => void; onSwitchMode: () =
 
   const stackUp = async () => {
     setBusy(true);
-    setError(null);
+
     setLogs(null);
     try {
       await commands.auditDevStackUp();
       await refreshInfra();
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
     } finally {
       setBusy(false);
     }
@@ -146,12 +147,12 @@ export function AuditDevFlow(_: { onShowSettings: () => void; onSwitchMode: () =
 
   const stackDown = async () => {
     setBusy(true);
-    setError(null);
+
     try {
       await commands.auditDevStackDown();
       await pollUntilDown();
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
     } finally {
       setBusy(false);
     }
@@ -160,12 +161,12 @@ export function AuditDevFlow(_: { onShowSettings: () => void; onSwitchMode: () =
   const stackResetData = async () => {
     setResetBusy(true);
     setConfirmReset(false);
-    setError(null);
+
     try {
       await commands.auditDevStackResetData();
       await pollUntilDown();
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
     } finally {
       setResetBusy(false);
     }
@@ -177,7 +178,7 @@ export function AuditDevFlow(_: { onShowSettings: () => void; onSwitchMode: () =
       const l = await commands.auditDevStackLogs(120);
       setLogs(l);
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
     } finally {
       setLogsBusy(false);
     }
@@ -185,7 +186,7 @@ export function AuditDevFlow(_: { onShowSettings: () => void; onSwitchMode: () =
 
   const handleSetup = async (params: DevSetupParams) => {
     setSetupBusy(true);
-    setError(null);
+
     setSetupProgress([]);
     const unlisten = await onAuditSetupProgress((line) =>
       setSetupProgress((prev) => [...prev, line]),
@@ -195,7 +196,7 @@ export function AuditDevFlow(_: { onShowSettings: () => void; onSwitchMode: () =
       setSetupResultLog(res.log);
       await refreshInfra();
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
     } finally {
       unlisten();
       setSetupBusy(false);
@@ -215,8 +216,6 @@ export function AuditDevFlow(_: { onShowSettings: () => void; onSwitchMode: () =
           flex: 1,
         }}
       >
-        {error && <Alert tone="danger">{error}</Alert>}
-
         {/* ─── Stack status bar ───────────────────────────────────────── */}
         <StackStatusBar
           prereqs={prereqs}
@@ -609,7 +608,6 @@ function DevLiveViewInner() {
   const [oplog, setOplog] = useState<OplogReport | null>(null);
   const [proofBusy, setProofBusy] = useState<number | null>(null);
   const [proofResult, setProofResult] = useState<ProofResult | null>(null);
-  const [proofError, setProofError] = useState<string | null>(null);
   const [provenIndex, setProvenIndex] = useState<number | null>(null);
   const [showProofDetails, setShowProofDetails] = useState(false);
   const [copyProofHint, setCopyProofHint] = useState(false);
@@ -620,7 +618,7 @@ function DevLiveViewInner() {
   const [commitBusy, setCommitBusy] = useState(false);
   const [commitStep, setCommitStep] = useState("");
   const [commitResult, setCommitResult] = useState<{ txHash: string; cid: string } | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const toast = useToast();
   // Track the most recently committed epoch so attestation queries the
   // right epoch number (not `current`, which becomes the new open epoch).
   const [committedEpochNum, setCommittedEpochNum] = useState<number | null>(null);
@@ -731,12 +729,12 @@ function DevLiveViewInner() {
     if (!current || current.eventCount === 0) return;
     if (current.endIndex !== null && current.endIndex !== undefined) return;
     setCloseBusy(true);
-    setError(null);
+
     try {
       await commands.auditDevProxyPost(PUBLISHER_PORT, "epoch/close", {});
       await poll();
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
     } finally {
       setCloseBusy(false);
     }
@@ -745,7 +743,7 @@ function DevLiveViewInner() {
   const handleCommit = async () => {
     if (!lastClosedEpoch) return;
     setCommitBusy(true);
-    setError(null);
+
     setCommitResult(null);
     let cid = "";
     try {
@@ -779,7 +777,7 @@ function DevLiveViewInner() {
       poll();
       refreshOnchain();
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
       setCommitStep("");
     } finally {
       setCommitBusy(false);
@@ -789,7 +787,7 @@ function DevLiveViewInner() {
   const handleGenerateProof = async (index: number) => {
     setProofBusy(index);
     setProofResult(null);
-    setProofError(null);
+
     setProvenIndex(null);
     setShowProofDetails(false);
     setCopyProofHint(false);
@@ -804,7 +802,7 @@ function DevLiveViewInner() {
       setProofResult(res as ProofResult);
       setProvenIndex(index);
     } catch (e) {
-      setProofError(formatError(e));
+      toast.push(formatError(e), "error");
     } finally {
       setProofBusy(null);
     }
@@ -841,7 +839,7 @@ function DevLiveViewInner() {
       const r = await commands.auditDevProxyGet(READER_PORT, "reader/verify-oplog");
       setOplog(r as OplogReport);
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
     }
   };
 
@@ -903,8 +901,6 @@ function DevLiveViewInner() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-4)" }}>
-      {error && <Alert tone="danger">{error}</Alert>}
-
       <Card padded={false} style={{ overflow: "hidden" }}>
         <div className="audit-stage">
           <div className="audit-stepper" role="list" aria-label="Audit commit workflow">
@@ -1096,20 +1092,6 @@ function DevLiveViewInner() {
       </div>
 
       {/* ─── Proof result ─────────────────────────────────────────────── */}
-      {proofError && (
-        <Alert tone="danger">
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "var(--space-2)" }}>
-            <span>Proof generation failed: {proofError}</span>
-            <button
-              className="audit-proof-dismiss"
-              onClick={() => setProofError(null)}
-              aria-label="Dismiss"
-            >
-              <X size={14} />
-            </button>
-          </div>
-        </Alert>
-      )}
       {proofResult && (
         <Card>
           <CardHeader

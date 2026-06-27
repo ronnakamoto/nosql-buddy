@@ -10,6 +10,7 @@ import commands, {
   type OplogIntegrityReport,
   formatError,
 } from "../ipc/commands";
+import { useToast } from "../context/ToastContext";
 import {
   Card,
   CardHeader,
@@ -57,7 +58,7 @@ export function AuditLiveViewV2({
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [epochs, setEpochs] = useState<Epoch[]>([]);
   const [currentEpoch, setCurrentEpoch] = useState<Epoch | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const toast = useToast();
 
   const [closeEpochLoading, setCloseEpochLoading] = useState(false);
   const [commitLoading, setCommitLoading] = useState(false);
@@ -135,12 +136,12 @@ export function AuditLiveViewV2({
     if (!currentEpoch || currentEpoch.eventCount === 0) return;
     if (currentEpoch.endIndex !== null && currentEpoch.endIndex !== undefined) return;
     setCloseEpochLoading(true);
-    setError(null);
+
     try {
       await commands.auditCloseEpoch();
       await refresh();
     } catch (err) {
-      setError(formatError(err));
+      toast.push(formatError(err), "error");
     } finally {
       setCloseEpochLoading(false);
     }
@@ -149,7 +150,7 @@ export function AuditLiveViewV2({
   const handleCommit = async () => {
     if (!lastClosedEpoch) return;
     setCommitLoading(true);
-    setError(null);
+
     setCommitResult(null);
     setPinataResult(null);
     setCommitStep("Pinning batch to IPFS via Pinata...");
@@ -168,7 +169,7 @@ export function AuditLiveViewV2({
       refreshOnchainRoot();
       refresh();
     } catch (err) {
-      setError(formatError(err));
+      toast.push(formatError(err), "error");
       setCommitStep("");
     } finally {
       setCommitLoading(false);
@@ -177,12 +178,12 @@ export function AuditLiveViewV2({
 
   const handleVerify = async () => {
     setVerifyLoading(true);
-    setError(null);
+
     try {
       const report = await commands.auditVerifyReaderMode();
       setVerifyReport(report);
     } catch (err) {
-      setError(formatError(err));
+      toast.push(formatError(err), "error");
     } finally {
       setVerifyLoading(false);
     }
@@ -191,12 +192,12 @@ export function AuditLiveViewV2({
   const handleOplogVerify = async () => {
     if (!connectionId) return;
     setOplogLoading(true);
-    setError(null);
+
     try {
       const report = await commands.auditVerifyOplogIntegrity(connectionId);
       setOplogReport(report);
     } catch (err) {
-      setError(formatError(err));
+      toast.push(formatError(err), "error");
     } finally {
       setOplogLoading(false);
     }
@@ -206,7 +207,7 @@ export function AuditLiveViewV2({
     setProofIndex(index);
     setProofLoading(true);
     setProofResult(null);
-    setError(null);
+
     try {
       const result = await commands.auditGenerateProof(index);
       setProofResult(
@@ -217,7 +218,7 @@ export function AuditLiveViewV2({
         ),
       );
     } catch (err) {
-      setError(formatError(err));
+      toast.push(formatError(err), "error");
     } finally {
       setProofLoading(false);
     }
@@ -304,8 +305,6 @@ export function AuditLiveViewV2({
           </Button>
         </div>
       </Card>
-
-      {error && <Alert tone="danger">{error}</Alert>}
 
       {/* ─── Epoch + commit ─────────────────────────────────────────── */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-3)" }}>

@@ -23,6 +23,7 @@ import "prismjs/components/prism-ruby";
 import "prismjs/components/prism-bash";
 import { HighlightedTextarea } from "../components/HighlightedTextarea";
 import { Alert } from "../components/Alert";
+import { useToast } from "../context/ToastContext";
 
 /** Prism grammar name for each driver-code language. Mirrors the map
  *  in DriverCodePanel so the SQL tab's read-only code block shares the
@@ -368,9 +369,8 @@ export function QueryTab({
   const [sqlLanguage, setSqlLanguage] = useState<SqlLanguage>("node-js");
   const [sqlNotice, setSqlNotice] = useState<string | null>(null);
   const [copyNotice, setCopyNotice] = useState<{ text: string; tone: "success" | "warning" } | null>(null);
+  const toast = useToast();
   const [page, setPage] = useState<DocumentPage | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [insertOpen, setInsertOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
@@ -427,10 +427,9 @@ export function QueryTab({
 
   async function run() {
     if (!valid) {
-      setError("Fix the JSON syntax first.");
+      toast.push("Fix the JSON syntax first.", "error");
       return;
     }
-    setError(null);
     setRunning(true);
     // A fresh Run always starts at page 1 and is the only thing that should
     // log a query-history entry; subsequent load-more/jump appends are not
@@ -480,7 +479,7 @@ export function QueryTab({
         setPage(result);
       }
     } catch (e) {
-      setError(describeError(e));
+      toast.push(describeError(e), "error");
     } finally {
       setRunning(false);
     }
@@ -551,7 +550,7 @@ export function QueryTab({
           : result,
       );
     } catch (e) {
-      setError(describeError(e));
+      toast.push(describeError(e), "error");
     } finally {
       setLoadingMore(false);
     }
@@ -676,7 +675,7 @@ export function QueryTab({
       };
     }
     if (!sqlResult) {
-      setError("Run the SQL query first to translate it before exporting.");
+      toast.push("Run the SQL query first to translate it before exporting.", "error");
       return null;
     }
     return {
@@ -725,7 +724,7 @@ export function QueryTab({
 
   async function handleCopySelected() {
     if (!selectedSource || selectedDocuments.length === 0) {
-      setNotice("Select one or more visible rows first.");
+      toast.push("Select one or more visible rows first.", "warning");
       return;
     }
     try {
@@ -748,9 +747,9 @@ export function QueryTab({
       if (result.clipboardText != null) {
         await navigator.clipboard.writeText(result.clipboardText);
       }
-      setNotice(`Copied ${result.processed} selected document(s).`);
+      toast.push(`Copied ${result.processed} selected document(s).`, "success");
     } catch (e) {
-      setError(`Copy selected failed: ${describeError(e)}`);
+      toast.push(`Copy selected failed: ${describeError(e)}`, "error");
     }
   }
 
@@ -774,14 +773,14 @@ export function QueryTab({
         filters: fileFilter(mode as QueryMode),
       });
       if (!path) {
-        setNotice("Save cancelled.");
+        toast.push("Save cancelled.", "info");
         return;
       }
       await writeTextFile(path, currentTextForMode());
-      setNotice(`Saved to ${path}.`);
+      toast.push(`Saved to ${path}.`, "success");
     } catch (e) {
       const msg = describeError(e);
-      setNotice(`Save failed: ${msg}`);
+      toast.push(`Save failed: ${msg}`, "error");
     }
   }
 
@@ -793,7 +792,7 @@ export function QueryTab({
         filters: fileFilter(mode as QueryMode),
       });
       if (!path || typeof path !== "string") {
-        setNotice("Load cancelled.");
+        toast.push("Load cancelled.", "info");
         return;
       }
       const text = await readTextFile(path);
@@ -803,10 +802,10 @@ export function QueryTab({
         // newly loaded pipeline.
         setPipelineKey((k) => k + 1);
       }
-      setNotice(`Loaded from ${path}.`);
+      toast.push(`Loaded from ${path}.`, "success");
     } catch (e) {
       const msg = describeError(e);
-      setNotice(`Load failed: ${msg}`);
+      toast.push(`Load failed: ${msg}`, "error");
     }
   }
 
@@ -851,17 +850,17 @@ export function QueryTab({
       docs[rowIdx] = updated;
       return { ...prev, documents: docs };
     });
-    setNotice(`Saved ${fieldPath}.`);
+    toast.push(`Saved ${fieldPath}.`, "success");
   }
 
   function handleCellError(_rowIdx: number, fieldPath: string, message: string) {
-    setError(`${fieldPath}: ${message}`);
+    toast.push(`${fieldPath}: ${message}`, "error");
   }
 
   function handleDeleteRow(rowIdx: number, doc: Record<string, unknown>) {
     const docId = toFilterId(doc);
     if (docId === undefined) {
-      setError("Cannot delete a document without an `_id`.");
+      toast.push("Cannot delete a document without an `_id`.", "error");
       return;
     }
     setPendingDelete({ idx: rowIdx, docId });
@@ -879,8 +878,9 @@ export function QueryTab({
         JSON.stringify({ _id: docId }),
       );
       if (count === 0) {
-        setError(
+        toast.push(
           "Delete matched 0 documents — the `_id` did not round-trip. Nothing was removed.",
+          "error",
         );
         return;
       }
@@ -892,10 +892,10 @@ export function QueryTab({
         }
         return { ...prev, documents: docs, totalCount: Math.max(0, (prev.totalCount ?? 0) - count) };
       });
-      setNotice(`Deleted ${count} document(s).`);
+      toast.push(`Deleted ${count} document(s).`, "success");
     } catch (e) {
       const msg = describeError(e);
-      setError(`Delete failed: ${msg}`);
+      toast.push(`Delete failed: ${msg}`, "error");
     }
   }
 
@@ -904,13 +904,13 @@ export function QueryTab({
   }
 
   async function handleInserted(id: string) {
-    setNotice(`Inserted document (id=${id || "auto"}).`);
+    toast.push(`Inserted document (id=${id || "auto"}).`, "success");
     // Refresh results so the new row appears.
     await run();
   }
 
   function handleInsertError(message: string) {
-    setError(`Insert failed: ${message}`);
+    toast.push(`Insert failed: ${message}`, "error");
   }
 
   return (
@@ -966,8 +966,8 @@ export function QueryTab({
             mode={mode as QueryMode}
             currentText={currentTextForMode()}
             onLoad={(text) => loadTextForMode(text)}
-            onError={(message) => setError(message)}
-            onNotice={(message) => setNotice(message)}
+            onError={(message) => toast.push(message, "error")}
+            onNotice={(message) => toast.push(message, "success")}
           />
           <button
             className="btn btn--sm"
@@ -1209,12 +1209,6 @@ export function QueryTab({
         </div>
         <div className="split__handle" aria-hidden="true" />
         <div className="pane__body results-pane">
-          {error && (
-            <Alert tone="danger" style={{ margin: 16 }}>{error}</Alert>
-          )}
-          {notice && (
-            <Alert tone="success" style={{ margin: 16 }}>{notice}</Alert>
-          )}
           {page ? (
             <div className="results-view">
               <div className="results-view-toolbar">

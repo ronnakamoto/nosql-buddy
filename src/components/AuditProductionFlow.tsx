@@ -13,6 +13,7 @@ import {
   Spinner,
 } from "./AuditUi";
 import { AuditLiveViewV2 } from "./AuditLiveViewV2";
+import { useToast } from "../context/ToastContext";
 
 /**
  * Production Mode flow — the in-app audit pipeline with the user's own keys.
@@ -26,7 +27,7 @@ import { AuditLiveViewV2 } from "./AuditLiveViewV2";
 export function AuditProductionFlow({ onShowSettings, connectionId }: { onShowSettings: () => void; onSwitchMode: () => void; connectionId?: string | null }) {
   const [config, setConfig] = useState<AuditModeConfig | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const toast = useToast();
 
   // Setup form state
   const [network, setNetwork] = useState<AuditNetwork>("testnet");
@@ -46,7 +47,7 @@ export function AuditProductionFlow({ onShowSettings, connectionId }: { onShowSe
       const acct = await commands.auditGetActiveAccount();
       setAccountId(acct);
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
     } finally {
       setLoading(false);
     }
@@ -58,10 +59,10 @@ export function AuditProductionFlow({ onShowSettings, connectionId }: { onShowSe
 
   const importKey = async () => {
     setSaving(true);
-    setError(null);
+
     try {
       if (!secretKey.trim()) {
-        setError("Enter your Stellar secret key (S...)");
+        toast.push("Enter your Stellar secret key (S...)", "error");
         return;
       }
       const acct = await commands.auditImportProductionKeypair(secretKey.trim());
@@ -69,7 +70,7 @@ export function AuditProductionFlow({ onShowSettings, connectionId }: { onShowSe
       setSecretKey("");
       await refresh();
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
     } finally {
       setSaving(false);
     }
@@ -77,10 +78,10 @@ export function AuditProductionFlow({ onShowSettings, connectionId }: { onShowSe
 
   const saveNetwork = async () => {
     setSaving(true);
-    setError(null);
+
     try {
       if (network === "mainnet" && !contractId.trim()) {
-        setError("Mainnet requires a contract ID");
+        toast.push("Mainnet requires a contract ID", "error");
         return;
       }
       await commands.auditSetProductionNetwork(
@@ -90,7 +91,7 @@ export function AuditProductionFlow({ onShowSettings, connectionId }: { onShowSe
       );
       await refresh();
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
     } finally {
       setSaving(false);
     }
@@ -136,8 +137,6 @@ export function AuditProductionFlow({ onShowSettings, connectionId }: { onShowSe
             flex: 1,
           }}
         >
-          {error && <Alert tone="danger">{error}</Alert>}
-
           <Card>
             <CardHeader
               title="Set up Production Mode"

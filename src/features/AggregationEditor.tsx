@@ -4,7 +4,7 @@ import { ResultsTable } from "../components/ResultsTable";
 import { ExplainTree } from "../components/ExplainTree";
 import { DriverCodePanel } from "../components/DriverCodePanel";
 import type { Language } from "../components/driverCodeTypes";
-import { Alert } from "../components/Alert";
+import { useToast } from "../context/ToastContext";
 
 export interface AggregationEditorProps {
   connectionId: string;
@@ -105,8 +105,7 @@ export function AggregationEditor({
   const [page, setPage] = useState<DocumentPage | null>(null);
   const [explainResult, setExplainResult] = useState<ExplainResult | null>(null);
   const [running, setRunning] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const toast = useToast();
   const [showCodeModal, setShowCodeModal] = useState(false);
   const [showExplainModal, setShowExplainModal] = useState(false);
   const [resolvedUri, setResolvedUri] = useState<string>("");
@@ -242,10 +241,9 @@ export function AggregationEditor({
 
   async function run() {
     if (!allValid) {
-      setError("Fix invalid stage JSON before running.");
+      toast.push("Fix invalid stage JSON before running.", "error");
       return;
     }
-    setError(null);
     setExplainResult(null);
     setRunning(true);
     try {
@@ -257,12 +255,13 @@ export function AggregationEditor({
         limit: 50,
       });
       setPage(result);
-      setNotice(
+      toast.push(
         `${result.documents.length} returned · ${result.executionMs ?? 0} ms`,
+        "success",
       );
       if (onResult) onResult(result);
     } catch (e) {
-      setError(describeError(e));
+      toast.push(describeError(e), "error");
     } finally {
       setRunning(false);
     }
@@ -270,10 +269,9 @@ export function AggregationEditor({
 
   async function runExplain() {
     if (!allValid) {
-      setError("Fix invalid stage JSON before explaining.");
+      toast.push("Fix invalid stage JSON before explaining.", "error");
       return;
     }
-    setError(null);
     setExplainResult(null);
     setRunning(true);
     try {
@@ -285,9 +283,9 @@ export function AggregationEditor({
       );
       setExplainResult(result);
       setShowExplainModal(true);
-      setNotice("Explain completed.");
+      toast.push("Explain completed.", "success");
     } catch (e) {
-      setError(`Explain failed: ${describeError(e)}`);
+      toast.push(`Explain failed: ${describeError(e)}`, "error");
     } finally {
       setRunning(false);
     }
@@ -330,8 +328,6 @@ export function AggregationEditor({
     setExplainResult(null);
     setShowCodeModal(false);
     setShowExplainModal(false);
-    setNotice(null);
-    setError(null);
   }
 
   return (
@@ -397,12 +393,6 @@ export function AggregationEditor({
           )}
         </div>
       </div>
-      {error && (
-        <Alert tone="danger" style={{ margin: "0 var(--space-3) var(--space-2)" }}>{error}</Alert>
-      )}
-      {notice && !error && (
-        <div className="agg-editor__notice">{notice}</div>
-      )}
       <div className="agg-editor__stages">
         {stages.length === 0 ? (
           <div className="empty-state">

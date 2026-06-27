@@ -13,7 +13,7 @@ import commands, {
   type VerificationRecord,
   formatError,
 } from "../ipc/commands";
-import { Alert } from "./AuditUi";
+import { useToast } from "../context/ToastContext";
 import { AuditHeader, type HealthState } from "./AuditHeader";
 import { AuditStatusSection } from "./AuditStatusSection";
 import { AuditChangeFeed } from "./AuditChangeFeed";
@@ -118,12 +118,10 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentEpoch]);
 
-  // ─── Error ────────────────────────────────────────────────────────────
-  const [error, setError] = useState<string | null>(null);
-
   // ─── Reset audit data ─────────────────────────────────────────────────
   const [resetBusy, setResetBusy] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
+  const toast = useToast();
 
   // ─── Polling ─────────────────────────────────────────────────────────
   const refresh = useCallback(async () => {
@@ -226,12 +224,12 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
   const handleCloseEpoch = useCallback(async () => {
     if (!canCloseEpoch) return;
     setCloseEpochLoading(true);
-    setError(null);
+
     try {
       await commands.auditCloseEpoch();
       await refresh();
     } catch (err) {
-      setError(formatError(err));
+      toast.push(formatError(err), "error");
     } finally {
       setCloseEpochLoading(false);
     }
@@ -240,7 +238,7 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
   const handleCommit = useCallback(async () => {
     if (!lastClosedEpoch) return;
     setCommitLoading(true);
-    setError(null);
+
     setCommitResult(null);
     setPinataResult(null);
     setCommitStep("Pinning batch to IPFS via Pinata…");
@@ -257,7 +255,7 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
       refreshOnchainRoot();
       refresh();
     } catch (err) {
-      setError(formatError(err));
+      toast.push(formatError(err), "error");
       setCommitStep("");
     } finally {
       setCommitLoading(false);
@@ -266,13 +264,13 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
 
   const handleVerify = useCallback(async () => {
     setVerifyLoading(true);
-    setError(null);
+
     try {
       const report = await commands.auditVerifyReaderMode();
       setVerifyReport(report);
       await refreshVerificationHistory();
     } catch (err) {
-      setError(formatError(err));
+      toast.push(formatError(err), "error");
     } finally {
       setVerifyLoading(false);
     }
@@ -283,7 +281,7 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
     setProofLoading(true);
     setProofResult(null);
     setCurrentProof(null);
-    setError(null);
+
     // Auto-expand investigation so the proof viz is visible
     setInvestigationCollapsed(false);
     try {
@@ -297,7 +295,7 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
         ),
       );
     } catch (err) {
-      setError(formatError(err));
+      toast.push(formatError(err), "error");
     } finally {
       setProofLoading(false);
     }
@@ -306,12 +304,12 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
   const handleOplogVerify = useCallback(async () => {
     if (!connectionId) return;
     setOplogLoading(true);
-    setError(null);
+
     try {
       const report = await commands.auditVerifyOplogIntegrity(connectionId);
       setOplogReport(report);
     } catch (err) {
-      setError(formatError(err));
+      toast.push(formatError(err), "error");
     } finally {
       setOplogLoading(false);
     }
@@ -319,7 +317,7 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
 
   const handleResetData = useCallback(async () => {
     setResetBusy(true);
-    setError(null);
+
     try {
       await commands.auditResetData();
       setConfirmReset(false);
@@ -333,7 +331,7 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
       await refreshOnchainRoot();
       await refreshVerificationHistory();
     } catch (err) {
-      setError(formatError(err));
+      toast.push(formatError(err), "error");
     } finally {
       setResetBusy(false);
     }
@@ -369,8 +367,6 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
       />
 
       <div className="audit-surface__body">
-        {error && <Alert tone="danger">{error}</Alert>}
-
         {/* ─── Reset audit data ──────────────────────────────────────────── */}
         <div style={{ display: "flex", justifyContent: "flex-end" }}>
           {confirmReset ? (

@@ -6,7 +6,7 @@ import commands, {
   type IndexStats,
 } from "../ipc/commands";
 import { Modal } from "../components/Modal";
-import { Alert } from "../components/Alert";
+import { useToast } from "../context/ToastContext";
 
 export interface IndexTabProps {
   connectionId: string;
@@ -242,8 +242,7 @@ function draftToRequest(
 export function IndexTab({ connectionId, database, collection }: IndexTabProps) {
   const [indexes, setIndexes] = useState<IndexInfo[] | null>(null);
   const [stats, setStats] = useState<IndexStats[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const toast = useToast();
   const [modalOpen, setModalOpen] = useState(false);
   const [draft, setDraft] = useState<DraftState>(emptyDraft());
   const [editingName, setEditingName] = useState<string | null>(null);
@@ -252,7 +251,6 @@ export function IndexTab({ connectionId, database, collection }: IndexTabProps) 
   const [statsUnavailable, setStatsUnavailable] = useState(false);
 
   async function refresh() {
-    setError(null);
     setStatsUnavailable(false);
     try {
       const [idx, st] = await Promise.all([
@@ -264,14 +262,14 @@ export function IndexTab({ connectionId, database, collection }: IndexTabProps) 
           // usable rather than failing the whole tab.
           const msg = describeError(e);
           setStatsUnavailable(true);
-          setError(`Index usage stats unavailable: ${msg}`);
+          toast.push(`Index usage stats unavailable: ${msg}`, "error");
           return null;
         }),
       ]);
       setIndexes(idx);
       setStats(st);
     } catch (e) {
-      setError(describeError(e));
+      toast.push(describeError(e), "error");
     }
   }
 
@@ -314,10 +312,9 @@ export function IndexTab({ connectionId, database, collection }: IndexTabProps) 
   }
 
   async function handleSubmit() {
-    setError(null);
     const result = draftToRequest(draft, connectionId, database, collection);
     if ("error" in result) {
-      setError(result.error);
+      toast.push(result.error, "error");
       return;
     }
     // Editing an existing index means MongoDB cannot apply option changes
@@ -338,11 +335,10 @@ export function IndexTab({ connectionId, database, collection }: IndexTabProps) 
       }
       await commands.createIndex(result);
       setModalOpen(false);
-      setNotice(`Index "${result.name}" saved.`);
-      window.setTimeout(() => setNotice(null), 2500);
+      toast.push(`Index "${result.name}" saved.`, "success");
       await refresh();
     } catch (e) {
-      setError(describeError(e));
+      toast.push(describeError(e), "error");
       // If the drop succeeded but create failed, refresh so the user
       // sees the index is gone and can retry without a stale list.
       if (editingName) await refresh();
@@ -351,14 +347,12 @@ export function IndexTab({ connectionId, database, collection }: IndexTabProps) 
 
   async function handleDrop(name: string) {
     if (!window.confirm(`Drop index ${name}? This cannot be undone.`)) return;
-    setError(null);
     try {
       await commands.dropIndex(connectionId, database, collection, name);
-      setNotice(`Dropped index "${name}".`);
-      window.setTimeout(() => setNotice(null), 2500);
+      toast.push(`Dropped index "${name}".`, "success");
       await refresh();
     } catch (e) {
-      setError(describeError(e));
+      toast.push(describeError(e), "error");
     }
   }
 
@@ -380,13 +374,6 @@ export function IndexTab({ connectionId, database, collection }: IndexTabProps) 
         </div>
       </div>
       <div className="pane__body" style={{ padding: 16, display: "grid", gap: 16 }}>
-        {error && (
-          <Alert tone="danger">{error}</Alert>
-        )}
-        {notice && (
-          <Alert tone="success">{notice}</Alert>
-        )}
-
         <div className="row" style={{ justifyContent: "space-between" }}>
           <button className="btn btn--primary" onClick={openCreate}>
             + New index

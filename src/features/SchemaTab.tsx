@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import commands, { type SchemaField, type SchemaReport } from "../ipc/commands";
-import { Alert } from "../components/Alert";
+import { useToast } from "../context/ToastContext";
 import {
   DateHistogramChart,
   DateStatLine,
@@ -18,17 +18,16 @@ export interface SchemaTabProps {
 
 export function SchemaTab({ connectionId, database, collection }: SchemaTabProps) {
   const [report, setReport] = useState<SchemaReport | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const toast = useToast();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     setReport(null);
-    setError(null);
     setExpanded(new Set());
     commands
       .sampleSchema(connectionId, database, collection)
       .then(setReport)
-      .catch((e) => setError(describeError(e)));
+      .catch((e) => toast.push(describeError(e), "error"));
   }, [connectionId, database, collection]);
 
   const fields = useMemo(
@@ -57,9 +56,6 @@ export function SchemaTab({ connectionId, database, collection }: SchemaTabProps
         </div>
       </div>
       <div className="pane__body" style={{ padding: 16 }}>
-        {error && (
-          <Alert tone="danger">{error}</Alert>
-        )}
         {report && (
           <div className="schema-list">
             {fields.map((f) => (

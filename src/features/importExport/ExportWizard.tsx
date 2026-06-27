@@ -14,6 +14,7 @@ import commands, {
 } from "../../ipc/commands";
 import { onImportExportProgress } from "../../ipc/events";
 import { Alert } from "../../components/Alert";
+import { useToast } from "../../context/ToastContext";
 import {
   FieldMappingTable,
   type DiscoveredField,
@@ -104,18 +105,16 @@ export function ExportWizard({
   const [discoveredFields, setDiscoveredFields] = useState<DiscoveredField[]>([]);
   const [mappingEntries, setMappingEntries] = useState<FieldMappingEntry[]>([]);
   const [mappingLoading, setMappingLoading] = useState(false);
-  const [mappingError, setMappingError] = useState<string | null>(null);
 
   // Saved tasks (localStorage).
   const [tasks, setTasks] = useState<ImportExportTaskSummary[]>([]);
   const [taskName, setTaskName] = useState("");
   const [taskMessage, setTaskMessage] = useState<string | null>(null);
 
+  const toast = useToast();
   const [phase, setPhase] = useState<Phase>("config");
   const [processed, setProcessed] = useState(0);
   const [total, setTotal] = useState<number | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
   const jobIdRef = useRef<string | null>(null);
 
@@ -156,7 +155,6 @@ export function ExportWizard({
   // are a best-effort starting point the user can edit.
   const discoverFields = useCallback(async () => {
     setMappingLoading(true);
-    setMappingError(null);
     try {
       const report = await commands.sampleSchema(connectionId, database, collection);
       const fields = discoveredFieldsFromSchema(report);
@@ -164,14 +162,13 @@ export function ExportWizard({
       setMappingEntries(identityMapping(fields));
       setShowMapping(true);
     } catch (e) {
-      setMappingError(formatError(e));
+      toast.push(formatError(e), "error");
     } finally {
       setMappingLoading(false);
     }
-  }, [connectionId, database, collection]);
+  }, [connectionId, database, collection, toast]);
 
   const runExport = useCallback(async () => {
-    setError(null);
     const jobId = crypto.randomUUID();
     jobIdRef.current = jobId;
     const activeSource = scope === "selected" && selectedSource ? selectedSource : source;
@@ -209,11 +206,12 @@ export function ExportWizard({
         });
         if (result.cancelled) {
           setPhase("config");
-          setMessage("Collection copy cancelled.");
+          toast.push("Collection copy cancelled.", "info");
           return;
         }
-        setMessage(
+        toast.push(
           `Copied ${result.inserted} document(s) to ${targetDatabase.trim()}.${targetCollection.trim()}.`,
+          "success",
         );
         setProcessed(result.processed);
         setPhase("done");
@@ -247,22 +245,23 @@ export function ExportWizard({
 
       if (result.cancelled) {
         setPhase("config");
-        setMessage("Export cancelled.");
+        toast.push("Export cancelled.", "info");
         return;
       }
 
       if (destination === "clipboard" && result.clipboardText != null) {
         await navigator.clipboard.writeText(result.clipboardText);
-        setMessage(`Copied ${result.processed} documents to the clipboard.`);
+        toast.push(`Copied ${result.processed} documents to the clipboard.`, "success");
       } else {
-        setMessage(
+        toast.push(
           `Exported ${result.processed} documents${result.path ? ` to ${result.path}` : ""}.`,
+          "success",
         );
       }
       setProcessed(result.processed);
       setPhase("done");
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
       setPhase("error");
     } finally {
       jobIdRef.current = null;
@@ -284,6 +283,7 @@ export function ExportWizard({
     targetCollection,
     showMapping,
     mappingEntries,
+    toast,
   ]);
 
   const cancel = useCallback(async () => {
@@ -610,9 +610,6 @@ export function ExportWizard({
                   </button>
                 )}
               </div>
-              {mappingError && (
-                <Alert tone="danger" style={{ margin: 0 }}>{mappingError}</Alert>
-              )}
               {showMapping && (
                 <FieldMappingTable
                   fields={discoveredFields}
@@ -722,12 +719,6 @@ export function ExportWizard({
             </div>
           )}
 
-          {message && phase !== "running" && (
-            <Alert tone="success" style={{ margin: 0 }}>{message}</Alert>
-          )}
-          {error && (
-            <Alert tone="danger" style={{ margin: 0 }}>{error}</Alert>
-          )}
         </div>
 
         <div className="modal__footer row row--end" style={{ gap: "var(--space-2)" }}>

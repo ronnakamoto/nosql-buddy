@@ -4,7 +4,8 @@ import commands, {
   type AuditModeConfig,
   formatError,
 } from "../ipc/commands";
-import { Card, Badge, Button, Spinner, Alert, injectAuditKeyframes } from "./AuditUi";
+import { Card, Badge, Button, Spinner, injectAuditKeyframes } from "./AuditUi";
+import { useToast } from "../context/ToastContext";
 import { FlaskConical, CheckCircle, ChevronRight, ShieldCheck } from "lucide-react";
 
 /**
@@ -20,26 +21,25 @@ export function AuditModeChooser({
 }) {
   const [config, setConfig] = useState<AuditModeConfig | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [selecting, setSelecting] = useState<AuditMode | null>(null);
+  const toast = useToast();
 
   useEffect(() => {
     injectAuditKeyframes();
     commands
       .auditGetModeConfig()
       .then((c) => setConfig(c))
-      .catch((e) => setError(formatError(e)))
+      .catch((e) => toast.push(formatError(e), "error"))
       .finally(() => setLoading(false));
   }, []);
 
   const choose = async (mode: AuditMode) => {
     setSelecting(mode);
-    setError(null);
     try {
       await commands.auditSetAuditMode(mode);
       onChoose(mode);
     } catch (e) {
-      setError(formatError(e));
+      toast.push(formatError(e), "error");
       setSelecting(null);
     }
   };
@@ -109,8 +109,6 @@ export function AuditModeChooser({
         <HowItWorks step="2" label="Seal" detail="Seal a batch to create a tamper-evident fingerprint (Merkle root)." />
         <HowItWorks step="3" label="Anchor" detail="Anchor the fingerprint on Stellar so it can be independently verified." />
       </div>
-
-      {error && <Alert tone="danger">{error}</Alert>}
 
       <div
         style={{

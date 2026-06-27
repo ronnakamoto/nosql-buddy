@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { Info, CheckCircle, AlertTriangle, AlertCircle, X } from "lucide-react";
+import { Info, CheckCircle, AlertTriangle, AlertCircle, X, Copy, Check } from "lucide-react";
 
 export type ToastKind = "info" | "success" | "warning" | "error";
 
@@ -127,6 +127,18 @@ function ToastItem({
   };
 
   const Icon = KIND_ICON[toast.kind];
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(async () => {
+    const text = toast.title ? `${toast.title}\n${toast.text}` : toast.text;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // silently ignore clipboard failures
+    }
+  }, [toast.text, toast.title]);
 
   return (
     <div
@@ -145,6 +157,17 @@ function ToastItem({
         {toast.title && <div className="toast__title">{toast.title}</div>}
         <div className="toast__text">{toast.text}</div>
       </div>
+      {toast.kind === "error" && (
+        <button
+          type="button"
+          className="toast__copy"
+          onClick={handleCopy}
+          aria-label={copied ? "Copied to clipboard" : "Copy to clipboard"}
+          title={copied ? "Copied" : "Copy"}
+        >
+          {copied ? <Check size={14} aria-hidden /> : <Copy size={14} aria-hidden />}
+        </button>
+      )}
       <button
         type="button"
         className="toast__close"

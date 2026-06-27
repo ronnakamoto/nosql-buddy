@@ -10,7 +10,7 @@ import commands, {
 import { ResultsTable } from "../components/ResultsTable";
 import { ExplainTree } from "../components/ExplainTree";
 import { DriverCodePanel } from "../components/DriverCodePanel";
-import { Alert } from "../components/Alert";
+import { useToast } from "../context/ToastContext";
 
 export interface ShellTabProps {
   connectionId: string;
@@ -50,7 +50,7 @@ export function ShellTab({
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [activeDb, setActiveDb] = useState<string>(database);
   const [running, setRunning] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const toast = useToast();
   const [lastResponse, setLastResponse] = useState<ShellResponse | null>(null);
   const [resolvedUri, setResolvedUri] = useState<string>("");
   const [codeOpen, setCodeOpen] = useState(false);
@@ -96,7 +96,6 @@ export function ShellTab({
       const source = (text ?? script).trim();
       if (!source || running) return;
       setRunning(true);
-      setError(null);
       try {
         const resp = await commands.evalShell({
           connectionId,
@@ -119,7 +118,7 @@ export function ShellTab({
         setHistoryCursor(-1);
         setScript("");
       } catch (e) {
-        setError(String(e));
+        toast.push(String(e), "error");
       } finally {
         setRunning(false);
       }
@@ -333,7 +332,7 @@ export function ShellTab({
       );
       setExplainRaw(result);
     } catch (e) {
-      setError(String(e));
+      toast.push(String(e), "error");
     }
   }
 
@@ -372,10 +371,6 @@ export function ShellTab({
           Enter to run · Shift+Enter for newline · Up arrow for history
         </span>
       </div>
-
-      {error && (
-        <Alert tone="danger" style={{ margin: "0 var(--space-3) var(--space-2)" }}>{error}</Alert>
-      )}
 
       {codeOpen && lastPipeline && lastCollection && (
         <div className="shell-tab__code">
