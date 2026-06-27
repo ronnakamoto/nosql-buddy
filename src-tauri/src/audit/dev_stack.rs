@@ -303,7 +303,7 @@ fn friendly_compose_error(args: &[&str], stderr: &str) -> String {
         || s.contains("ports are not available")
     {
         return "A required port is already in use. The audit stack needs ports 9173-9175 and \
-                MongoDB needs 27017-27019. Stop whatever is using them (or the existing stack), \
+                MongoDB needs 27018-27020. Stop whatever is using them (or the existing stack), \
                 then try again."
             .to_string();
     }

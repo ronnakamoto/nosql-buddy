@@ -13,10 +13,9 @@
 # owns 27017 for the single-node dev DB, so both stacks can run at once):
 #   mongo2 → localhost:27018   (operator secondary)
 #   mongo3 → localhost:27019   (independent member — the auditor's trust anchor)
-#   mongo1 has NO published host port: it is the operator primary, reached
-#   in-network by the audit services and the seeder. The dev DB keeps 27017.
-#   To inspect mongo1 from the host, use `docker exec` or connect to 27018/27019
-#   with directConnection=true (the set's primary is discoverable from either).
+#   mongo1 → localhost:27020   (operator primary for app writes)
+#   Use mongodb://127.0.0.1:27020/?directConnection=true for changes you want
+#   the audit publisher to capture.
 #
 # Bring up order:
 #   docker compose -f docker-compose.audit-db.yml up -d   # this 3-node set
@@ -26,9 +25,10 @@ name: nosqlbuddy-audit-db
 services:
   mongo1:
     image: mongo:7
-    # No `ports:`: mongo1 is internal-only so it does not collide with the
-    # single-node dev DB on localhost:27017. The audit services and seeder
-    # reach it at mongo1:27017 inside mongo-net.
+    # Published on 27020 so the desktop app can write to the audited primary
+    # without colliding with the single-node dev DB on localhost:27017.
+    ports:
+      - "27020:27017"
     command: ["--replSet", "rs0", "--bind_ip_all"]
     volumes:
       - audit-mongo-data-1:/data/db

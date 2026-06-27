@@ -35,6 +35,7 @@ import { FlaskConical, CircleDashed, X, CheckCircle, ExternalLink } from "lucide
 const PUBLISHER_PORT = 9173;
 const ATTESTER_PORT = 9174;
 const READER_PORT = 9175;
+const AUDITED_MONGO_URI = "mongodb://127.0.0.1:27020/?directConnection=true";
 const POLL_MS = 2500;
 const EPOCH_THRESHOLD = 100;
 
@@ -431,6 +432,19 @@ function StackStatusBar({
           )}
         </div>
       </div>
+      {ready && (
+        <div
+          style={{
+            marginTop: "var(--space-2)",
+            paddingTop: "var(--space-2)",
+            borderTop: "1px solid var(--border)",
+            fontSize: "var(--font-size-xs)",
+            color: "var(--ink-muted)",
+          }}
+        >
+          Use <code>{AUDITED_MONGO_URI}</code> for collection changes you want captured. Port 27017 is the separate single-node dev DB.
+        </div>
+      )}
     </Card>
   );
 }
@@ -939,7 +953,7 @@ function DevLiveViewInner() {
           {epochEvents === 0 && !closed && (
             <div style={{ marginTop: "var(--space-3)" }}>
               <Alert tone="info">
-                Insert, update, or delete a document in any MongoDB collection. Changes are captured automatically. The batch seals itself at {EPOCH_THRESHOLD} events, or close it manually.
+                Insert, update, or delete a document through <code>{AUDITED_MONGO_URI}</code>. The audit stack watches that replica set, not the single-node dev DB on port 27017. The batch seals itself at {EPOCH_THRESHOLD} events, or close it manually.
               </Alert>
             </div>
           )}

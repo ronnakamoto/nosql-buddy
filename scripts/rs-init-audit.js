@@ -7,10 +7,9 @@
 //   mongo3:27017 — secondary (independent — auditor/regulator)
 //
 // These names resolve inside the Docker network, where the audit services run.
-// The host does NOT consume this set directly via topology discovery; if you
-// need to inspect a specific member from the host, connect to its published
-// port with an explicit `?directConnection=true` (e.g. the independent member
-// mongo3 on localhost:27019).
+// The host does NOT consume this set directly via topology discovery. For app
+// writes that should be audited, connect to the primary through:
+//   mongodb://127.0.0.1:27020/?directConnection=true
 
 function waitForHost(host, maxAttempts) {
   for (let i = 0; i < maxAttempts; i++) {
@@ -46,9 +45,13 @@ try {
     replSetInitiate: {
       _id: "rs0",
       members: [
-        { _id: 0, host: "mongo1:27017" },
-        { _id: 1, host: "mongo2:27017" },
-        { _id: 2, host: "mongo3:27017" },
+        // mongo1 is pinned as the preferred primary (priority 2) so the
+        // host-published port 27020 (directConnection=true) always reaches a
+        // writable node. Without this, an election can move PRIMARY to
+        // mongo2/mongo3 and direct writes to mongo1 fail with NotWritablePrimary.
+        { _id: 0, host: "mongo1:27017", priority: 2 },
+        { _id: 1, host: "mongo2:27017", priority: 1 },
+        { _id: 2, host: "mongo3:27017", priority: 1 },
       ],
     },
   });
