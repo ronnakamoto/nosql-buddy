@@ -2954,93 +2954,142 @@
   margin-top: var(--space-1);
 }
 
-/* Visual Explain diagram: collapsible stage tree. */
+/* Visual Explain plan: findings dashboard + collapsible stage tree.
+   Tones use color-mix against semantic tokens so they adapt to both
+   light and dark themes (the prior hardcoded OKLCH only read well on
+   light). Restrained product register: one mono family, 4px badges,
+   no fully-rounded pills. */
 .explain-tree {
   display: flex;
   flex-direction: column;
-  gap: 0;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
 }
 
-.explain-tree__head {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-3) var(--space-4);
+/* Findings dashboard: three diagnostic cells answer the first
+   questions — index strategy, query cost, slowest stage. Hairline
+   dividers separate the cells; they stack on narrow widths. */
+.explain-findings {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   background: var(--surface);
   border-bottom: 1px solid var(--border);
 }
 
-.explain-tree__summary {
+.explain-finding {
+  --finding-tone-ink: var(--ink-muted);
+  padding: var(--space-3) var(--space-4);
+  border-right: 1px solid var(--border);
   display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  font-family: var(--font-sans);
+}
+.explain-finding:last-child {
+  border-right: none;
+}
+.explain-finding--success {
+  --finding-tone-ink: color-mix(in oklch, var(--success-500) 50%, var(--ink));
+}
+.explain-finding--danger {
+  --finding-tone-ink: color-mix(in oklch, var(--danger-500) 50%, var(--ink));
+}
+.explain-finding--warning {
+  --finding-tone-ink: color-mix(in oklch, var(--warning-500) 50%, var(--ink));
 }
 
-.explain-tree__pill {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 11px;
-  background: var(--surface-2);
-  color: var(--ink-muted);
-  border: 1px solid var(--border);
+.explain-finding__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--finding-tone-ink);
+}
+.explain-finding__icon {
+  flex-shrink: 0;
+}
+.explain-finding__label {
+  font-size: var(--font-size-xs);
+  color: var(--ink-faint);
+  letter-spacing: 0;
+}
+.explain-finding__value {
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--finding-tone-ink);
   font-variant-numeric: tabular-nums;
+  line-height: var(--line-height-tight);
+  overflow-wrap: anywhere;
+}
+.explain-finding--neutral .explain-finding__value {
+  color: var(--ink);
+}
+.explain-finding__detail {
+  font-size: var(--font-size-xs);
+  color: var(--ink-muted);
+  line-height: var(--line-height-normal);
+  overflow-wrap: anywhere;
 }
 
-.explain-tree__pill--ok {
-  background: oklch(0.93 0.04 152);
-  color: oklch(0.32 0.12 152);
-  border-color: oklch(0.84 0.05 152);
+.explain-tree__toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
 }
-
-.explain-tree__pill--warn {
-  background: oklch(0.95 0.05 25);
-  color: oklch(0.45 0.18 25);
-  border-color: oklch(0.85 0.08 25);
+.explain-tree__count {
+  font-size: var(--font-size-xs);
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+  margin-right: auto;
 }
-
 .explain-tree__actions {
   display: flex;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
-.explain-tree .explain-node {
-  padding: 4px var(--space-4);
+.explain-tree__body {
+  padding: var(--space-1) 0 var(--space-2);
 }
 
 .explain-empty {
-  padding: var(--space-3);
+  padding: var(--space-4);
   color: var(--ink-muted);
+  font-family: var(--font-sans);
 }
-
 .explain-empty h3 {
   margin: 0 0 var(--space-1);
+  font-size: var(--font-size-md);
+  color: var(--ink);
 }
-
 .explain-empty p {
   margin: 0;
-  font-family: var(--font-sans, system-ui);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
 }
 
 .explain-node {
   position: relative;
-  padding: 4px 0;
 }
 
 .explain-node__head {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
   flex-wrap: wrap;
+  padding: 3px var(--space-4);
+  border-radius: var(--radius-sm);
+  transition: background 120ms ease-out;
+}
+.explain-node__head:hover {
+  background: var(--surface-2);
 }
 
 .explain-node__toggle {
   background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  border: none;
+  border-radius: var(--radius-sm);
   width: 18px;
   height: 18px;
   display: inline-flex;
@@ -3048,95 +3097,138 @@
   justify-content: center;
   cursor: pointer;
   color: var(--ink-muted);
-  font-size: 10px;
   padding: 0;
+  flex-shrink: 0;
+  transition: background 120ms ease-out, color 120ms ease-out;
+}
+.explain-node__toggle:hover {
+  background: var(--surface-3);
+  color: var(--ink);
 }
 
-.explain-node__toggle--leaf {
-  border-color: transparent;
-  background: transparent;
-  cursor: default;
+/* Leaf terminator: a small dot aligned in the toggle's 18px box,
+   instead of a disabled toggle button. */
+.explain-node__leaf {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.explain-node__leaf::before {
+  content: "";
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--border-strong);
+}
+
+/* Bottleneck stage: a warning tint on the row plus a "Slowest" tag.
+   No side-stripe accent; the full-row tint and tag carry the signal. */
+.explain-node--bottleneck > .explain-node__head {
+  background: color-mix(in oklch, var(--warning-500) 10%, transparent);
+}
+.explain-node--bottleneck > .explain-node__head:hover {
+  background: color-mix(in oklch, var(--warning-500) 14%, transparent);
+}
+.explain-node__bottleneck-tag {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  color: color-mix(in oklch, var(--warning-500) 40%, var(--ink));
+  background: color-mix(in oklch, var(--warning-500) 14%, var(--surface));
+  border: 1px solid color-mix(in oklch, var(--warning-500) 24%, var(--border));
+  flex-shrink: 0;
 }
 
 .explain-node__stage {
   font-weight: 600;
-  font-size: 12px;
-  padding: 2px 8px;
-  border-radius: 4px;
+  font-size: var(--font-size-xs);
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   background: var(--surface-2);
   color: var(--ink);
+  flex-shrink: 0;
+  white-space: nowrap;
 }
-
+/* Stage tones derived from semantic tokens via color-mix so the tints
+   and text stay readable in both light and dark themes. */
 .explain-stage--index {
-  background: oklch(0.93 0.04 152);
-  color: oklch(0.32 0.12 152);
-  border-color: oklch(0.84 0.05 152);
+  background: color-mix(in oklch, var(--success-500) 12%, var(--surface));
+  color: color-mix(in oklch, var(--success-500) 40%, var(--ink));
+  border-color: color-mix(in oklch, var(--success-500) 24%, var(--border));
 }
-
 .explain-stage--scan {
-  background: oklch(0.95 0.05 25);
-  color: oklch(0.45 0.18 25);
-  border-color: oklch(0.85 0.08 25);
+  background: color-mix(in oklch, var(--danger-500) 12%, var(--surface));
+  color: color-mix(in oklch, var(--danger-500) 40%, var(--ink));
+  border-color: color-mix(in oklch, var(--danger-500) 24%, var(--border));
 }
-
 .explain-stage--fetch {
-  background: oklch(0.93 0.04 252);
-  color: oklch(0.34 0.16 252);
-  border-color: oklch(0.84 0.05 252);
+  background: color-mix(in oklch, var(--accent-500) 12%, var(--surface));
+  color: color-mix(in oklch, var(--accent-500) 40%, var(--ink));
+  border-color: color-mix(in oklch, var(--accent-500) 24%, var(--border));
 }
-
 .explain-stage--sort {
-  background: oklch(0.93 0.04 50);
-  color: oklch(0.36 0.14 50);
-  border-color: oklch(0.84 0.05 50);
+  background: color-mix(in oklch, var(--warning-500) 14%, var(--surface));
+  color: color-mix(in oklch, var(--warning-500) 40%, var(--ink));
+  border-color: color-mix(in oklch, var(--warning-500) 26%, var(--border));
 }
-
 .explain-stage--limit {
-  background: oklch(0.93 0.04 320);
-  color: oklch(0.34 0.14 320);
-  border-color: oklch(0.84 0.05 320);
+  --stage-tone: oklch(0.7 0.14 320);
+  background: color-mix(in oklch, var(--stage-tone) 12%, var(--surface));
+  color: color-mix(in oklch, var(--stage-tone) 40%, var(--ink));
+  border-color: color-mix(in oklch, var(--stage-tone) 24%, var(--border));
 }
-
 .explain-stage--group {
-  background: oklch(0.93 0.04 280);
-  color: oklch(0.32 0.12 280);
-  border-color: oklch(0.84 0.05 280);
+  --stage-tone: oklch(0.7 0.14 280);
+  background: color-mix(in oklch, var(--stage-tone) 12%, var(--surface));
+  color: color-mix(in oklch, var(--stage-tone) 40%, var(--ink));
+  border-color: color-mix(in oklch, var(--stage-tone) 24%, var(--border));
 }
 
 .explain-node__index {
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   color: var(--ink-muted);
   font-family: var(--font-mono);
   background: var(--surface);
-  border: 1px dashed var(--border);
+  border: 1px solid var(--border);
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .explain-node__stats {
-  font-size: 11px;
-  color: var(--ink-muted);
+  font-size: var(--font-size-xs);
+  color: var(--ink-faint);
   font-variant-numeric: tabular-nums;
-  margin-left: auto;
 }
 
+/* Children connector: a solid hairline aligned to the parent toggle's
+   center (head padding + half the 18px toggle box). */
 .explain-node__children {
-  border-left: 1px dashed var(--border);
-  margin-left: 9px;
-  padding-left: 6px;
-  margin-top: 4px;
+  border-left: 1px solid var(--border);
+  margin-left: calc(var(--space-4) + 9px);
+  padding-left: var(--space-2);
+  margin-top: 2px;
 }
 
 .explain-node__details {
-  margin-top: 4px;
-  font-size: 11px;
+  margin: var(--space-1) 0 var(--space-1) calc(var(--space-4) + 26px);
+  font-size: var(--font-size-xs);
   color: var(--ink-muted);
 }
-
 .explain-node__details summary {
   cursor: pointer;
   user-select: none;
+  color: var(--ink-faint);
+}
+.explain-node__details summary:hover {
+  color: var(--ink-muted);
 }
 
 /* Driver code panel (inside Code modal) */
