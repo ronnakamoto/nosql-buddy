@@ -33,6 +33,7 @@
   --fg-muted: var(--ink-muted);
   --border-soft: var(--border);
   --border-strong: var(--border-strong);
+  --accent-bg: var(--selection);
   --color-danger: var(--danger-500);
 }
 
@@ -691,15 +692,19 @@
   justify-content: center;
   gap: var(--space-2);
   height: 28px;
-  padding: 0 var(--space-3);
+  padding: 0 10px;
   font-size: var(--font-size-sm);
   font-weight: 500;
-  border-radius: var(--radius-sm);
+  letter-spacing: -0.003em;
+  border-radius: var(--radius-md);
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--ink);
-  transition: background 150ms ease-out, border-color 150ms ease-out;
+  transition: background 120ms ease-out, border-color 120ms ease-out,
+    box-shadow 120ms ease-out, color 120ms ease-out;
   cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
 }
 
 .btn:hover {
@@ -708,19 +713,32 @@
 }
 .btn:active {
   background: var(--surface-3);
+  transform: translateY(0.5px);
 }
 .btn[disabled] {
   opacity: 0.5;
   cursor: not-allowed;
+  transform: none;
 }
 
+/* Primary: filled accent with a fine top sheen, the Zed control signature. */
 .btn--primary {
   background: var(--accent-500);
-  border-color: var(--accent-600);
-  color: oklch(0.99 0.002 240);
+  border-color: transparent;
+  color: var(--accent-fg);
+  box-shadow: inset 0 1px 0 0 var(--highlight), 0 1px 2px 0 oklch(0 0 0 / 0.12);
 }
 .btn--primary:hover {
   background: var(--accent-600);
+  border-color: transparent;
+}
+.btn--primary:active {
+  background: var(--accent-700);
+}
+.btn--primary .kbd {
+  background: oklch(1 0 0 / 0.16);
+  border-color: oklch(1 0 0 / 0.24);
+  color: var(--accent-fg);
 }
 .btn--ghost {
   background: transparent;
@@ -730,6 +748,7 @@
 .btn--ghost:hover {
   background: var(--surface-2);
   color: var(--ink);
+  border-color: transparent;
 }
 .btn--danger {
   background: transparent;
@@ -742,13 +761,14 @@
 }
 .btn.is-active {
   background: var(--accent-100);
-  border-color: var(--accent-600);
+  border-color: color-mix(in oklch, var(--accent-500), transparent 55%);
   color: var(--accent-700);
 }
 .btn--sm {
   height: 24px;
   font-size: var(--font-size-xs);
   padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
 }
 
 .app__workspace {
@@ -1350,15 +1370,18 @@
 
 .kbd {
   display: inline-block;
-  padding: 1px 6px;
+  min-width: 16px;
+  padding: 0 5px;
   font-family: var(--font-mono);
-  font-size: 11px;
-  background: var(--surface-2);
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+  background: var(--surface);
   border: 1px solid var(--border);
-  border-bottom-width: 2px;
-  border-radius: 4px;
-  color: var(--ink-muted);
-  letter-spacing: -0.003em;
+  border-radius: var(--radius-sm);
+  color: var(--ink-faint);
+  letter-spacing: var(--letter-mono);
+  box-shadow: inset 0 1px 0 0 var(--highlight);
 }
 
 .statusbar {
@@ -3465,7 +3488,7 @@
 }
 .shell-autocomplete__item--selected {
   background: var(--accent-bg, rgba(99,102,241,0.15));
-  color: var(--accent-fg, var(--fg-default));
+  color: var(--fg-default);
 }
 .shell-autocomplete__label {
   flex: 1;

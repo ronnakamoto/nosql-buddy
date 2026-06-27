@@ -108,13 +108,13 @@
 .audit-step--active .audit-step__num {
   background: var(--accent-500);
   border-color: var(--accent-500);
-  color: white;
+  color: var(--accent-fg);
 }
 
 .audit-step--done .audit-step__num {
   background: var(--success-500);
   border-color: var(--success-500);
-  color: white;
+  color: var(--accent-fg);
 }
 
 .audit-step__label {
@@ -184,14 +184,14 @@
 .audit-stepper__item.is-active .audit-stepper__marker {
   background: var(--accent-500);
   border-color: var(--accent-500);
-  color: #fff;
+  color: var(--accent-fg);
   box-shadow: 0 0 0 4px color-mix(in oklch, var(--accent-500) 18%, transparent);
 }
 
 .audit-stepper__item.is-done .audit-stepper__marker {
   background: var(--success-500);
   border-color: var(--success-500);
-  color: #fff;
+  color: var(--accent-fg);
 }
 
 .audit-stepper__copy {
@@ -605,16 +605,15 @@
   font-size: var(--font-size-sm);
   font-weight: 500;
   text-decoration: none;
-  background: var(--accent-600);
-  color: white;
-  border: 1px solid var(--accent-700);
-  box-shadow: var(--shadow-xs);
+  background: var(--accent-500);
+  color: var(--accent-fg);
+  border: 1px solid transparent;
+  box-shadow: inset 0 1px 0 0 var(--highlight), 0 1px 2px 0 oklch(0 0 0 / 0.12);
   transition: background 0.12s ease, box-shadow 0.12s ease;
 }
 
 .audit-proof-card__primary-link:hover {
-  background: var(--accent-500);
-  box-shadow: var(--shadow-sm);
+  background: var(--accent-600);
 }
 
 .audit-proof-card__pending {
@@ -1171,10 +1170,10 @@ button.audit-proof-card__primary-link:disabled {
 }
 
 .audit-btn--primary {
-  background: var(--accent-600);
-  color: white;
-  border: 1px solid var(--accent-700);
-  box-shadow: var(--shadow-xs);
+  background: var(--accent-500);
+  color: var(--accent-fg);
+  border: 1px solid transparent;
+  box-shadow: inset 0 1px 0 0 var(--highlight), 0 1px 2px 0 oklch(0 0 0 / 0.12);
 }
 
 .audit-btn--secondary {
@@ -1193,6 +1192,24 @@ button.audit-proof-card__primary-link:disabled {
   background: color-mix(in oklch, var(--danger-500) 12%, transparent);
   color: var(--danger-500);
   border: 1px solid color-mix(in oklch, var(--danger-500) 30%, transparent);
+}
+
+.audit-btn--primary:not(:disabled):hover {
+  background: var(--accent-600);
+}
+.audit-btn--primary:not(:disabled):active {
+  background: var(--accent-700);
+}
+.audit-btn--secondary:not(:disabled):hover {
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+}
+.audit-btn--ghost:not(:disabled):hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+.audit-btn--danger:not(:disabled):hover {
+  background: color-mix(in oklch, var(--danger-500) 18%, transparent);
 }
 
 /* ─── Spinner ──────────────────────────────────────────────────── */
@@ -1847,7 +1864,7 @@ button.audit-proof-card__primary-link:disabled {
 .audit-filter-chip--active {
   background: var(--accent-500);
   border-color: var(--accent-500);
-  color: white;
+  color: var(--accent-fg);
 }
 
 .audit-feed-search {
