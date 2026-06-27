@@ -321,24 +321,39 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  margin: var(--space-2);
   padding: 0 var(--space-3);
-  border-bottom: 1px solid var(--border);
+  height: 34px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   color: var(--ink-faint);
+  transition: border-color 150ms ease-out, box-shadow 150ms ease-out;
+}
+.conn-pop__search:focus-within {
+  border-color: var(--border-strong);
+  background: var(--surface);
+  color: var(--ink-muted);
 }
 .conn-pop__search input {
   flex: 1;
-  height: 36px;
+  min-width: 0;
+  height: 100%;
   border: none;
   background: transparent;
   color: var(--ink);
   font-size: var(--font-size-sm);
 }
-.conn-pop__search input:focus { outline: none; }
+.conn-pop__search input:focus,
+.conn-pop__search input:focus-visible {
+  outline: none !important;
+  border-color: transparent !important;
+}
 
 .conn-pop__list {
   flex: 1;
   overflow-y: auto;
-  padding: var(--space-1) 0;
+  padding: var(--space-1) 0 var(--space-2);
 }
 
 .conn-pop__empty {
