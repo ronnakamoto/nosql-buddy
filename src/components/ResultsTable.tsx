@@ -35,7 +35,7 @@ function getScrollParent(el: HTMLElement | null): HTMLElement | null {
   let node = el?.parentElement ?? null;
   while (node && node !== document.body) {
     const oy = getComputedStyle(node).overflowY;
-    if ((oy === "auto" || oy === "scroll") && node.scrollHeight > node.clientHeight) {
+    if (oy === "auto" || oy === "scroll") {
       return node;
     }
     node = node.parentElement;

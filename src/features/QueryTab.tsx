@@ -1208,7 +1208,7 @@ export function QueryTab({
           )}
         </div>
         <div className="split__handle" aria-hidden="true" />
-        <div className="pane__body">
+        <div className="pane__body results-pane">
           {error && (
             <Alert tone="danger" style={{ margin: 16 }}>{error}</Alert>
           )}
@@ -1216,7 +1216,7 @@ export function QueryTab({
             <Alert tone="success" style={{ margin: 16 }}>{notice}</Alert>
           )}
           {page ? (
-            <>
+            <div className="results-view">
               <div className="results-view-toolbar">
                 {(["table", "tree", "json"] as ResultsViewMode[]).map((m) => (
                   <button
@@ -1247,21 +1247,23 @@ export function QueryTab({
                   Clear
                 </button>
               </div>
-              <ResultsTable
-                documents={page.documents as Array<Record<string, unknown>>}
-                connectionId={connectionId}
-                database={database}
-                collection={collection}
-                view={viewMode}
-                editable
-                onCellSaved={handleCellSaved}
-                onCellError={handleCellError}
-                onDeleteRow={handleDeleteRow}
-                selectable
-                selectedRowIds={selectedRowIds}
-                onSelectionChange={setSelectedRowIds}
-                getRowId={getRowId}
-              />
+              <div className="results-view__table">
+                <ResultsTable
+                  documents={page.documents as Array<Record<string, unknown>>}
+                  connectionId={connectionId}
+                  database={database}
+                  collection={collection}
+                  view={viewMode}
+                  editable
+                  onCellSaved={handleCellSaved}
+                  onCellError={handleCellError}
+                  onDeleteRow={handleDeleteRow}
+                  selectable
+                  selectedRowIds={selectedRowIds}
+                  onSelectionChange={setSelectedRowIds}
+                  getRowId={getRowId}
+                />
+              </div>
               <PagingBar
                 total={page.totalCount}
                 totalApprox={!!page.totalCountApprox}
@@ -1272,7 +1274,7 @@ export function QueryTab({
                 onPageSize={handlePageSize}
                 onJump={jumpToPage}
               />
-            </>
+            </div>
           ) : (
             <div className="empty-state">
               <h2>Run to see results</h2>
