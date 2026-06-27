@@ -204,26 +204,8 @@ export function AuditDevFlow(_: { onShowSettings: () => void; onSwitchMode: () =
 
   const ready = prereqs?.auditStackRunning ?? false;
 
-  // Determine workflow step state for the step guide
-  const stepStatus: ("done" | "active" | "todo")[] = [
-    ready ? "done" : "active",
-    ready ? "active" : "todo",
-  ];
-
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "auto" }}>
-      {/* ─── Step guide ─────────────────────────────────────────────── */}
-      <div className="audit-step-guide">
-        <div className={`audit-step audit-step--${stepStatus[0]}`}>
-          <span className="audit-step__num">{stepStatus[0] === "done" ? "✓" : "1"}</span>
-          <span className="audit-step__label">Start Stack</span>
-        </div>
-        <div className={`audit-step audit-step--${stepStatus[1]}`}>
-          <span className="audit-step__num">{stepStatus[0] === "done" ? "2" : ""}</span>
-          <span className="audit-step__label">Audit & Commit</span>
-        </div>
-      </div>
-
       <div
         style={{
           display: "flex",
