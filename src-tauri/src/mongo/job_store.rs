@@ -57,10 +57,18 @@ pub struct JobMeta {
     pub output_path: Option<String>,
     pub source_path: Option<String>,
     pub schedule: Option<ScheduleConfig>,
+    #[serde(default)]
+    /// When this job was spawned by the scheduler, the id of the schedule
+    /// template it originated from. `None` for user-initiated jobs and for
+    /// templates themselves.
+    pub parent_job_id: Option<String>,
     pub processed: u64,
     pub total: Option<u64>,
     pub errors: u64,
     pub message: String,
+    /// Opaque JSON blob storing the original request so the scheduler
+    /// can reconstruct and re-run the job later.
+    pub config_json: Option<String>,
 }
 
 impl JobMeta {
@@ -78,10 +86,12 @@ impl JobMeta {
             output_path: None,
             source_path: None,
             schedule: None,
+            parent_job_id: None,
             processed: 0,
             total: None,
             errors: 0,
             message: String::new(),
+            config_json: None,
         }
     }
 }
@@ -155,7 +165,20 @@ impl JobStore {
     pub async fn create_job(&self, meta: JobMeta) -> String {
         let id = meta.job_id.clone();
         let mut jobs = self.jobs.write().await;
-        // If a job with the same id already exists, remove it.
+        let existing = jobs.iter().find(|j| j.job_id == id).cloned();
+        let mut meta = meta;
+        if let Some(existing) = existing {
+            // Core runners create fresh JobMeta records from request payloads.
+            // Preserve scheduler/template fields that live outside those
+            // requests when a record is re-registered with the same id.
+            if meta.schedule.is_none() {
+                meta.schedule = existing.schedule;
+            }
+            if meta.parent_job_id.is_none() {
+                meta.parent_job_id = existing.parent_job_id;
+            }
+        }
+        // If a job with the same id already exists, replace it.
         jobs.retain(|j| j.job_id != id);
         jobs.push(meta);
         drop(jobs);
@@ -311,6 +334,80 @@ impl JobStore {
         }
         removed
     }
+
+    /// Find jobs with an enabled schedule whose next_run_at is in the past.
+    pub async fn due_jobs(&self) -> Vec<JobMeta> {
+        let now = chrono::Local::now();
+        let jobs = self.jobs.read().await;
+        jobs.iter()
+            .filter(|j| {
+                // Only schedule templates (never the runs they spawn) are due,
+                // and only when not currently executing. A failed/cancelled
+                // template still fires on its next occurrence so a transient
+                // error doesn't silently disable the schedule.
+                j.parent_job_id.is_none()
+                    && j.status != JobStatus::Running
+                    && j.status != JobStatus::Queued
+                    && j.schedule.as_ref().map_or(false, |s| {
+                        s.enabled
+                            && s.next_run_at.as_ref().map_or(false, |t| {
+                                chrono::DateTime::parse_from_rfc3339(t)
+                                    .map_or(false, |dt| dt.with_timezone(&chrono::Local) <= now)
+                            })
+                    })
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Update the next_run_at field for a scheduled job.
+    pub async fn update_next_run(&self, job_id: &str, next_run_at: Option<String>) {
+        let mut jobs = self.jobs.write().await;
+        if let Some(job) = jobs.iter_mut().find(|j| j.job_id == job_id) {
+            if let Some(ref mut schedule) = job.schedule {
+                schedule.next_run_at = next_run_at;
+            }
+        }
+        drop(jobs);
+        self.save().await;
+    }
+
+    /// Remove old finished runs spawned by a schedule template, keeping only
+    /// the most recent `retention_count`. The template itself is never removed.
+    /// Returns the number of deleted runs.
+    pub async fn cleanup_retention(&self, template_job_id: &str, retention_count: usize) -> usize {
+        let mut jobs = self.jobs.write().await;
+        // Finished runs that originated from this template, newest-first.
+        let mut runs: Vec<(String, String)> = jobs
+            .iter()
+            .filter(|j| {
+                j.parent_job_id.as_deref() == Some(template_job_id)
+                    && j.status != JobStatus::Running
+                    && j.status != JobStatus::Queued
+            })
+            .map(|j| (j.job_id.clone(), j.created_at.clone()))
+            .collect();
+        runs.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let to_remove: Vec<String> = runs
+            .iter()
+            .skip(retention_count)
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        let before = jobs.len();
+        jobs.retain(|j| !to_remove.contains(&j.job_id));
+        let removed = before - jobs.len();
+        drop(jobs);
+        if removed > 0 {
+            let mut logs = self.logs.write().await;
+            for id in &to_remove {
+                logs.remove(id);
+            }
+            self.save().await;
+        }
+        removed
+    }
 }
 
 impl Default for JobStore {
@@ -341,10 +438,12 @@ mod tests {
             output_path: None,
             source_path: None,
             schedule: None,
+            parent_job_id: None,
             processed: 0,
             total: None,
             errors: 0,
             message: String::new(),
+            config_json: None,
         }
     }
 
@@ -546,5 +645,113 @@ mod tests {
         assert_eq!(jobs[0].job_id, "del-2");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn due_jobs_returns_only_enabled_past_next_run() {
+        let store = JobStore::new();
+        let past = chrono::Local::now() - chrono::Duration::hours(1);
+        let future = chrono::Local::now() + chrono::Duration::hours(1);
+
+        // Job A: done, enabled, next_run in past → due
+        let mut a = sample_meta(JobKind::Dump, "due-a");
+        a.status = JobStatus::Done;
+        a.schedule = Some(ScheduleConfig {
+            cron: "0 2 * * *".into(),
+            enabled: true,
+            retention_count: Some(5),
+            next_run_at: Some(past.to_rfc3339()),
+        });
+        store.create_job(a).await;
+
+        // Job B: done, enabled, next_run in future → not due
+        let mut b = sample_meta(JobKind::Dump, "due-b");
+        b.status = JobStatus::Done;
+        b.schedule = Some(ScheduleConfig {
+            cron: "0 2 * * *".into(),
+            enabled: true,
+            retention_count: Some(5),
+            next_run_at: Some(future.to_rfc3339()),
+        });
+        store.create_job(b).await;
+
+        // Job C: running, enabled, next_run in past → not due (still running)
+        let mut c = sample_meta(JobKind::Dump, "due-c");
+        c.status = JobStatus::Running;
+        c.schedule = Some(ScheduleConfig {
+            cron: "0 2 * * *".into(),
+            enabled: true,
+            retention_count: Some(5),
+            next_run_at: Some(past.to_rfc3339()),
+        });
+        store.create_job(c).await;
+
+        // Job D: done, disabled, next_run in past → not due
+        let mut d = sample_meta(JobKind::Dump, "due-d");
+        d.status = JobStatus::Done;
+        d.schedule = Some(ScheduleConfig {
+            cron: "0 2 * * *".into(),
+            enabled: false,
+            retention_count: Some(5),
+            next_run_at: Some(past.to_rfc3339()),
+        });
+        store.create_job(d).await;
+
+        let due = store.due_jobs().await;
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].job_id, "due-a");
+    }
+
+    #[tokio::test]
+    async fn update_next_run_sets_next_run_at() {
+        let store = JobStore::new();
+        let mut meta = sample_meta(JobKind::Dump, "next-run");
+        meta.status = JobStatus::Done;
+        meta.schedule = Some(ScheduleConfig {
+            cron: "0 2 * * *".into(),
+            enabled: true,
+            retention_count: Some(5),
+            next_run_at: Some("2024-01-01T00:00:00+00:00".into()),
+        });
+        store.create_job(meta).await;
+
+        let new_time = "2025-06-15T10:00:00+00:00".to_string();
+        store.update_next_run("next-run", Some(new_time.clone())).await;
+
+        let job = store.get("next-run").await.unwrap();
+        assert_eq!(job.schedule.as_ref().unwrap().next_run_at, Some(new_time));
+    }
+
+    #[tokio::test]
+    async fn cleanup_retention_keeps_only_n_most_recent() {
+        let store = JobStore::new();
+        // The template that owns the schedule.
+        let mut template = sample_meta(JobKind::Dump, "tmpl-1");
+        template.status = JobStatus::Done;
+        template.schedule = Some(ScheduleConfig {
+            cron: "0 2 * * *".into(),
+            enabled: true,
+            retention_count: Some(2),
+            next_run_at: None,
+        });
+        store.create_job(template).await;
+        // Five generated runs (children) of that template.
+        for i in 0..5 {
+            let mut meta = sample_meta(JobKind::Dump, &format!("ret-{i}"));
+            meta.status = JobStatus::Done;
+            meta.created_at = format!("2024-01-0{}T00:00:00+00:00", 5 - i); // newest first
+            meta.parent_job_id = Some("tmpl-1".into());
+            store.create_job(meta).await;
+        }
+
+        let deleted = store.cleanup_retention("tmpl-1", 2).await;
+        assert_eq!(deleted, 3);
+
+        let remaining = store.list(JobFilter::default()).await;
+        // Two most-recent runs survive, plus the template itself.
+        assert_eq!(remaining.len(), 3);
+        assert!(remaining.iter().any(|j| j.job_id == "ret-0"));
+        assert!(remaining.iter().any(|j| j.job_id == "ret-1"));
+        assert!(remaining.iter().any(|j| j.job_id == "tmpl-1"));
     }
 }

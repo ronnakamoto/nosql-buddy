@@ -97,12 +97,18 @@ export function DumpWizard({ connectionId, database: initialDatabase = "", colle
         jobId,
       });
       if (schedule) {
-        await commands.updateSchedule({
+        const tmpl = await commands.updateSchedule({
           jobId: res.jobId,
           cron: schedule.cron,
           enabled: schedule.enabled,
           retentionCount: schedule.retentionCount,
         });
+        if (tmpl.schedule?.enabled && tmpl.schedule.nextRunAt) {
+          toast.push(
+            `Schedule saved — next run ${new Date(tmpl.schedule.nextRunAt).toLocaleString()}.`,
+            "success",
+          );
+        }
       }
       setResult(res);
       setPhase("done");
@@ -117,7 +123,7 @@ export function DumpWizard({ connectionId, database: initialDatabase = "", colle
       setPhase("error");
       toast.push(msg, "error");
     }
-  }, [connectionId, database, selected, destination, pathTemplate, format, compression, toast]);
+  }, [connectionId, database, selected, destination, pathTemplate, format, compression, schedule, toast]);
 
   const isReady = database && !loadingColl && collections.length > 0;
 

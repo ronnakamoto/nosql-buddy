@@ -471,6 +471,15 @@ pub fn run() {
             }
             let _ = app_handle;
 
+            // Start the background job scheduler (checks every 60s for
+            // scheduled dump/export jobs whose next_run_at has passed).
+            // Use `async_runtime::spawn` so the scheduler runs inside
+            // Tauri's tokio runtime rather than the main thread.
+            let scheduler_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                crate::mongo::scheduler::start_scheduler(scheduler_handle);
+            });
+
             Ok(())
         })
         .on_window_event(|window, event| {

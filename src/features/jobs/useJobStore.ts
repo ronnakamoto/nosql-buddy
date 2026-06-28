@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import commands, { formatError, type JobFilterRequest, type JobMeta } from "../../ipc/commands";
 import { onJobStatusChanged, onJobLogEntry } from "../../ipc/events";
 
-const POLL_INTERVAL_MS = 2000;
+const POLL_INTERVAL_MS = 15000;
 
 export interface UseJobStoreReturn {
   jobs: JobMeta[];
@@ -14,6 +14,8 @@ export interface UseJobStoreReturn {
   cancelJob: (jobId: string) => Promise<void>;
   deleteJob: (jobId: string) => Promise<void>;
   rerunJob: (jobId: string) => Promise<void>;
+  updateSchedule: (jobId: string, config: { cron: string; enabled: boolean; retentionCount?: number | null }) => Promise<void>;
+  toggleScheduleEnabled: (jobId: string, enabled: boolean) => Promise<void>;
 }
 
 export function useJobStore(): UseJobStoreReturn {
@@ -29,7 +31,34 @@ export function useJobStore(): UseJobStoreReturn {
     setError(null);
     try {
       const res = await commands.listJobs(filter ?? {});
-      setJobs(res.jobs);
+      setJobs((prev) => {
+        // Only replace state if the data actually changed.
+        // This prevents re-renders on every poll tick when nothing
+        // has happened since the last fetch.
+        if (prev.length === res.jobs.length) {
+          let same = true;
+          for (let i = 0; i < prev.length; i++) {
+            const a = prev[i];
+            const b = res.jobs[i];
+            if (
+              a.jobId !== b.jobId ||
+              a.status !== b.status ||
+              a.processed !== b.processed ||
+              a.total !== b.total ||
+              a.errors !== b.errors ||
+              a.message !== b.message ||
+              a.finishedAt !== b.finishedAt ||
+              a.startedAt !== b.startedAt ||
+              a.schedule?.nextRunAt !== b.schedule?.nextRunAt
+            ) {
+              same = false;
+              break;
+            }
+          }
+          if (same) return prev;
+        }
+        return res.jobs;
+      });
     } catch (e) {
       setError(formatError(e));
     } finally {
@@ -62,18 +91,27 @@ export function useJobStore(): UseJobStoreReturn {
     let cancelled = false;
     onJobStatusChanged((payload) => {
       if (cancelled) return;
-      setJobs((prev) =>
-        prev.map((j) =>
-          j.jobId === payload.jobId
-            ? {
-                ...j,
-                status: payload.status as JobMeta["status"],
-                message: payload.message,
-                finishedAt: payload.finishedAt ?? j.finishedAt,
-              }
-            : j,
-        ),
-      );
+      setJobs((prev) => {
+        const idx = prev.findIndex((j) => j.jobId === payload.jobId);
+        if (idx === -1) return prev;
+        const j = prev[idx];
+        const nextStatus = payload.status as JobMeta["status"];
+        if (
+          j.status === nextStatus &&
+          j.message === payload.message &&
+          j.finishedAt === (payload.finishedAt ?? j.finishedAt)
+        ) {
+          return prev; // no change
+        }
+        const next = prev.slice();
+        next[idx] = {
+          ...j,
+          status: nextStatus,
+          message: payload.message,
+          finishedAt: payload.finishedAt ?? j.finishedAt,
+        };
+        return next;
+      });
     }).then((unlisten) => {
       if (!cancelled) unlistenRef.current = unlisten;
       else unlisten();
@@ -128,6 +166,32 @@ export function useJobStore(): UseJobStoreReturn {
     }
   }, []);
 
+  const updateSchedule = useCallback(async (jobId: string, config: { cron: string; enabled: boolean; retentionCount?: number | null }) => {
+    try {
+      const meta = await commands.updateSchedule({ jobId, ...config });
+      setJobs((prev) => prev.map((j) => (j.jobId === jobId ? meta : j)));
+    } catch (e) {
+      setError(formatError(e));
+      throw e;
+    }
+  }, []);
+
+  const toggleScheduleEnabled = useCallback(async (jobId: string, enabled: boolean) => {
+    const job = jobs.find((j) => j.jobId === jobId);
+    if (!job?.schedule) return;
+    try {
+      const meta = await commands.updateSchedule({
+        jobId,
+        cron: job.schedule.cron,
+        enabled,
+        retentionCount: job.schedule.retentionCount,
+      });
+      setJobs((prev) => prev.map((j) => (j.jobId === jobId ? meta : j)));
+    } catch (e) {
+      setError(formatError(e));
+    }
+  }, [jobs]);
+
   return {
     jobs,
     loading,
@@ -138,5 +202,7 @@ export function useJobStore(): UseJobStoreReturn {
     cancelJob,
     deleteJob,
     rerunJob,
+    updateSchedule,
+    toggleScheduleEnabled,
   };
 }

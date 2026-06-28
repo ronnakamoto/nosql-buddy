@@ -49,7 +49,7 @@ pub enum ExportFormat {
     Bson,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DestinationKind {
     File,
@@ -63,7 +63,7 @@ pub enum JsonShapeDto {
     Ndjson,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportSourceDto {
     pub mode: SourceMode,
@@ -74,14 +74,14 @@ pub struct ExportSourceDto {
     pub documents_json: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportDestinationDto {
     pub kind: DestinationKind,
     pub path: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportOptions {
     pub json_shape: JsonShapeDto,
@@ -98,7 +98,7 @@ pub struct ExportOptions {
     pub field_mapping: Option<Vec<FieldMappingEntry>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportRequest {
     pub connection_id: String,
@@ -157,6 +157,11 @@ pub async fn export_documents(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> AppResult<ExportResult> {
+    run_export(&request, state.inner(), &app).await
+}
+
+/// Core export logic callable from both the command handler and the scheduler.
+pub async fn run_export(request: &ExportRequest, state: &AppState, app: &tauri::AppHandle) -> AppResult<ExportResult> {
     let entry = state.clients.get(&request.connection_id).await?;
     let db = entry.client.database(&request.database);
     let coll = db.collection::<Document>(&request.collection);
@@ -198,7 +203,7 @@ pub async fn export_documents(
     // `validate_target_path`. Clipboard exports have no path to resolve.
     let profile_name = state
         .profiles
-        .get(&app, &request.connection_id)
+        .get(app, &request.connection_id)
         .map(|p| p.name)
         .unwrap_or_default();
     let resolved_destination = resolve_destination_placeholders(
@@ -244,8 +249,6 @@ pub async fn export_documents(
     };
 
     // Compose the transform chain: currently just the optional field mapping.
-    // The vec is built here so future phases (masking, etc.) just push more
-    // transforms without touching the sink or source wiring.
     let mut transforms: Vec<Box<dyn crate::mongo::import_export::core::Transform>> = Vec::new();
     if let Some(m) = field_mapping {
         transforms.push(Box::new(m));
@@ -260,6 +263,7 @@ pub async fn export_documents(
     );
     meta.collections = vec![request.collection.clone()];
     meta.output_path = file_path.clone();
+    meta.config_json = Some(serde_json::to_string(request).unwrap_or_default());
     state.jobs.create_job(meta).await;
     state.jobs.update_status(&request.job_id, JobStatus::Running, "Export started".into()).await;
 
@@ -300,7 +304,7 @@ pub async fn export_documents(
         .map_err(|_| AppError::Internal("export output slot mutex poisoned".into()))?
         .take();
 
-    notify_job_completed(&app, &request.job_id, "Export", &format!("Exported {} documents", report.processed));
+    notify_job_completed(app, &request.job_id, "Export", &format!("Exported {} documents", report.processed));
 
     Ok(ExportResult {
         job_id: report.job_id,

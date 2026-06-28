@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Database, Search, Plus, Download, Upload } from "lucide-react";
+import { Database, Search, Plus, Download, Upload, CalendarClock } from "lucide-react";
 import { useJobStore } from "./useJobStore";
 import { JobListItem } from "./JobListItem";
+import { EditScheduleModal } from "./EditScheduleModal";
 import { Alert } from "../../components/Alert";
 import { DumpWizard } from "../backupRestore/DumpWizard";
 import { RestoreWizard } from "../backupRestore/RestoreWizard";
@@ -11,24 +12,40 @@ interface JobsHubProps {
 }
 
 export function JobsHub({ connectionId }: JobsHubProps) {
-  const { jobs, loading, error, startPolling, stopPolling, cancelJob, deleteJob, rerunJob } =
-    useJobStore();
+  const {
+    jobs,
+    loading,
+    error,
+    startPolling,
+    stopPolling,
+    cancelJob,
+    deleteJob,
+    rerunJob,
+    updateSchedule,
+    toggleScheduleEnabled,
+  } = useJobStore();
   const [filterKind, setFilterKind] = useState<string>("");
   const [filterStatus, setFilterStatus] = useState<string>("");
   const [search, setSearch] = useState("");
+  const [view, setView] = useState<"all" | "scheduled">("all");
   const [wizard, setWizard] = useState<"dump" | "restore" | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [editingScheduleId, setEditingScheduleId] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
-    startPolling({
-      connectionId: connectionId ?? null,
-      kind: filterKind || null,
-      status: filterStatus || null,
-    });
+    startPolling(
+      view === "scheduled"
+        ? { connectionId: connectionId ?? null }
+        : {
+            connectionId: connectionId ?? null,
+            kind: filterKind || null,
+            status: filterStatus || null,
+          },
+    );
     return () => stopPolling();
-  }, [connectionId, filterKind, filterStatus, startPolling, stopPolling]);
+  }, [connectionId, filterKind, filterStatus, view, startPolling, stopPolling]);
 
   // Close new-job dropdown on outside click.
   useEffect(() => {
@@ -42,7 +59,7 @@ export function JobsHub({ connectionId }: JobsHubProps) {
     return () => document.removeEventListener("mousedown", onDown);
   }, [menuOpen]);
 
-  const filtered = jobs.filter((j) => {
+  const matchesSearch = (j: typeof jobs[number]) => {
     if (!search) return true;
     const q = search.toLowerCase();
     return (
@@ -51,7 +68,13 @@ export function JobsHub({ connectionId }: JobsHubProps) {
       j.kind.toLowerCase().includes(q) ||
       j.message.toLowerCase().includes(q)
     );
-  });
+  };
+
+  // Schedule templates are jobs that carry a schedule config.
+  const templates = jobs.filter((j) => j.schedule != null && matchesSearch(j));
+  const runsFor = (templateId: string) =>
+    jobs.filter((j) => j.parentJobId === templateId);
+  const filtered = jobs.filter(matchesSearch);
 
   const openDump = useCallback(() => {
     setMenuOpen(false);
@@ -71,6 +94,25 @@ export function JobsHub({ connectionId }: JobsHubProps) {
           Jobs Hub
         </h2>
         <div className="jobs-hub__filters">
+          <div className="jobs-hub__view-toggle" role="tablist" aria-label="Job view">
+            <button
+              role="tab"
+              aria-selected={view === "all"}
+              className={`btn btn--sm ${view === "all" ? "is-active" : ""}`}
+              onClick={() => setView("all")}
+            >
+              All jobs
+            </button>
+            <button
+              role="tab"
+              aria-selected={view === "scheduled"}
+              className={`btn btn--sm ${view === "scheduled" ? "is-active" : ""}`}
+              onClick={() => setView("scheduled")}
+            >
+              Scheduled
+            </button>
+          </div>
+          {view === "all" && (
           <select
             className="field__select"
             value={filterKind}
@@ -83,6 +125,8 @@ export function JobsHub({ connectionId }: JobsHubProps) {
             <option value="export">Export</option>
             <option value="import">Import</option>
           </select>
+          )}
+          {view === "all" && (
           <select
             className="field__select"
             value={filterStatus}
@@ -96,6 +140,7 @@ export function JobsHub({ connectionId }: JobsHubProps) {
             <option value="failed">Failed</option>
             <option value="cancelled">Cancelled</option>
           </select>
+          )}
           <div className="jobs-hub__search">
             <Search size={14} className="jobs-hub__search-icon" aria-hidden="true" />
             <input
@@ -154,6 +199,36 @@ export function JobsHub({ connectionId }: JobsHubProps) {
       {error && <Alert tone="danger">{error}</Alert>}
 
       <div className="jobs-hub__list">
+        {view === "scheduled" ? (
+          <>
+            {templates.length === 0 && !loading && (
+              <div className="jobs-hub__empty">
+                <CalendarClock size={32} aria-hidden="true" />
+                <p>No scheduled jobs.</p>
+                <p className="jobs-hub__empty-hint">
+                  Enable a schedule in the Dump or Export wizard to run a job
+                  automatically on a recurring basis.
+                </p>
+              </div>
+            )}
+            {templates.map((job) => (
+              <JobListItem
+                key={job.jobId}
+                job={job}
+                scheduledRuns={runsFor(job.jobId)}
+                onCancel={cancelJob}
+                onDelete={deleteJob}
+                onRerun={rerunJob}
+                onToggleSchedule={toggleScheduleEnabled}
+                onEditSchedule={setEditingScheduleId}
+              />
+            ))}
+            {loading && templates.length === 0 && (
+              <div className="jobs-hub__loading">Loading jobs...</div>
+            )}
+          </>
+        ) : (
+          <>
         {filtered.length === 0 && !loading && (
           <div className="jobs-hub__empty">
             <Database size={32} aria-hidden="true" />
@@ -182,10 +257,14 @@ export function JobsHub({ connectionId }: JobsHubProps) {
             onCancel={cancelJob}
             onDelete={deleteJob}
             onRerun={rerunJob}
+            onToggleSchedule={toggleScheduleEnabled}
+            onEditSchedule={setEditingScheduleId}
           />
         ))}
         {loading && filtered.length === 0 && (
           <div className="jobs-hub__loading">Loading jobs...</div>
+        )}
+          </>
         )}
       </div>
 
@@ -194,6 +273,16 @@ export function JobsHub({ connectionId }: JobsHubProps) {
       )}
       {wizard === "restore" && connectionId && (
         <RestoreWizard connectionId={connectionId} onClose={() => setWizard(null)} />
+      )}
+
+      {editingScheduleId && (
+        <EditScheduleModal
+          open={true}
+          jobId={editingScheduleId}
+          schedule={jobs.find((j) => j.jobId === editingScheduleId)?.schedule!}
+          onClose={() => setEditingScheduleId(null)}
+          onSave={updateSchedule}
+        />
       )}
     </div>
   );

@@ -111,6 +111,10 @@ pub async fn rerun_job(job_id: String, state: State<'_, AppState>) -> AppResult<
     new_meta.total = None;
     new_meta.errors = 0;
     new_meta.message = "Queued for rerun".into();
+    // A manual rerun is a one-off: never carry the schedule (which would
+    // create a duplicate template) or the parent link.
+    new_meta.schedule = None;
+    new_meta.parent_job_id = None;
 
     state.jobs.create_job(new_meta.clone()).await;
     state.jobs.log_info(&new_meta.job_id, "Queued for rerun").await;

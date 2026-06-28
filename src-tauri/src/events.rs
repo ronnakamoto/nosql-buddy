@@ -144,7 +144,7 @@ pub fn emit_job_log_entry(app: &AppHandle, job_id: &str, timestamp: &str, level:
     );
 }
 
-fn chrono_now() -> String {
+pub fn chrono_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

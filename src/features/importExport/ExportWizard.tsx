@@ -15,6 +15,8 @@ import commands, {
 import { onImportExportProgress } from "../../ipc/events";
 import { Alert } from "../../components/Alert";
 import { useToast } from "../../context/ToastContext";
+import { SchedulePanel } from "../backupRestore/SchedulePanel";
+import type { ScheduleConfig } from "../../ipc/commands";
 import {
   FieldMappingTable,
   type DiscoveredField,
@@ -101,6 +103,7 @@ export function ExportWizard({
   const [csvArrayMode, setCsvArrayMode] = useState<import("../../ipc/commands").CsvArrayMode | null>(null);
   const [targetDatabase, setTargetDatabase] = useState(database);
   const [targetCollection, setTargetCollection] = useState(`${collection}_copy`);
+  const [schedule, setSchedule] = useState<ScheduleConfig | null>(null);
 
   // Field mapping: discovered fields (from a schema sample) + the user's edits.
   const [showMapping, setShowMapping] = useState(false);
@@ -264,6 +267,26 @@ export function ExportWizard({
       }
       setProcessed(result.processed);
       setPhase("done");
+
+      if (schedule && destination === "file") {
+        try {
+          const tmpl = await commands.updateSchedule({
+            jobId: result.jobId,
+            cron: schedule.cron,
+            enabled: schedule.enabled,
+            retentionCount: schedule.retentionCount,
+          });
+          if (tmpl.schedule?.enabled && tmpl.schedule.nextRunAt) {
+            toast.push(
+              `Schedule saved — next run ${new Date(tmpl.schedule.nextRunAt).toLocaleString()}.`,
+              "success",
+            );
+          }
+        } catch (e) {
+          // The export itself succeeded; surface the scheduling failure.
+          toast.push(`Export saved, but scheduling failed: ${formatError(e)}`, "warning");
+        }
+      }
     } catch (e) {
       toast.push(formatError(e), "error");
       setPhase("error");
@@ -289,6 +312,7 @@ export function ExportWizard({
     targetCollection,
     showMapping,
     mappingEntries,
+    schedule,
     toast,
   ]);
 
@@ -548,6 +572,10 @@ export function ExportWizard({
                 <code>{sampleTemplate}</code> → <code>{sampleResolved}</code>.
               </span>
             </div>
+          )}
+
+          {destination === "file" && phase === "config" && (
+            <SchedulePanel value={schedule} onChange={setSchedule} />
           )}
 
           {destination !== "collection" && format === "json" && (

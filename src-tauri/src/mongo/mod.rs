@@ -9,6 +9,7 @@ pub mod credentials;
 pub mod import_export;
 pub mod job_store;
 pub mod profiles;
+pub mod scheduler;
 pub mod query_code;
 pub mod redaction;
 pub mod schema;

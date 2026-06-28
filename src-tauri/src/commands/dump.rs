@@ -23,7 +23,7 @@ pub enum DumpFormat {
     Json,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DumpRequest {
     pub connection_id: String,
@@ -52,6 +52,11 @@ pub async fn dump_database(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> AppResult<DumpResult> {
+    run_dump(&request, state.inner(), &app).await
+}
+
+/// Core dump logic callable from both the command handler and the scheduler.
+pub async fn run_dump(request: &DumpRequest, state: &AppState, app: &tauri::AppHandle) -> AppResult<DumpResult> {
     let entry = state.clients.get(&request.connection_id).await?;
     let db = entry.client.database(&request.database);
 
@@ -80,12 +85,13 @@ pub async fn dump_database(
     );
     meta.collections = collections.clone();
     meta.output_path = Some(request.destination_dir.clone());
+    meta.config_json = Some(serde_json::to_string(request).unwrap_or_default());
     state.jobs.create_job(meta).await;
     state
         .jobs
         .update_status(&request.job_id, JobStatus::Running, "Dump started".into())
         .await;
-    emit_job_status_changed(&app, &request.job_id, "running", "Dump started", None);
+    emit_job_status_changed(app, &request.job_id, "running", "Dump started", None);
 
     let cancel_flag = state.jobs.register(request.job_id.clone()).await;
 
@@ -149,13 +155,13 @@ pub async fn dump_database(
                 files.push(file_path.to_string_lossy().to_string());
                 let msg = format!("Dumped {coll_name}: {} docs", r.processed);
                 state.jobs.log_info(&request.job_id, &msg).await;
-                emit_job_log_entry(&app, &request.job_id, &chrono_now(), "info", &msg);
+                emit_job_log_entry(app, &request.job_id, &chrono_now(), "info", &msg);
             }
             Err(e) => {
                 total_errors += 1;
                 let msg = format!("Failed to dump {coll_name}: {e}");
                 state.jobs.log_error(&request.job_id, &msg).await;
-                emit_job_log_entry(&app, &request.job_id, &chrono_now(), "error", &msg);
+                emit_job_log_entry(app, &request.job_id, &chrono_now(), "error", &msg);
             }
         }
     }
@@ -176,16 +182,16 @@ pub async fn dump_database(
         .update_status(&request.job_id, status, msg.clone())
         .await;
     emit_job_status_changed(
-        &app,
+        app,
         &request.job_id,
         &format!("{status:?}").to_lowercase(),
         &msg,
         finished.clone(),
     );
-    notify_job_completed(&app, &request.job_id, "Dump", &msg);
+    notify_job_completed(app, &request.job_id, "Dump", &msg);
 
     Ok(DumpResult {
-        job_id: request.job_id,
+        job_id: request.job_id.clone(),
         processed: total_processed,
         errors: total_errors,
         cancelled,

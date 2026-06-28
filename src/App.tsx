@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import commands, {
   type AppInfo,
   type AppSettings,
@@ -651,7 +651,7 @@ export default function App() {
     }
   }
 
-  async function openProfile(profile: ProfileSummary) {
+  const openProfile = useCallback(async (profile: ProfileSummary) => {
     setError(null);
     try {
       const handle = await commands.openConnection(profile.id);
@@ -672,9 +672,9 @@ export default function App() {
     } catch (e) {
       toasts.push(describeError(e), "error");
     }
-  }
+  }, [toasts]);
 
-  async function refreshConnection() {
+  const refreshConnection = useCallback(async () => {
     if (!active) return;
     try {
       const handle = await commands.openConnection(active.profile.id);
@@ -690,9 +690,9 @@ export default function App() {
     } catch (e) {
       toasts.push(describeError(e), "error");
     }
-  }
+  }, [active, toasts]);
 
-  async function refreshDatabase(database: string) {
+  const refreshDatabase = useCallback(async (database: string) => {
     if (!active) return;
     try {
       const cols = await commands.listCollections(active.handle.connectionId, database);
@@ -703,9 +703,9 @@ export default function App() {
     } catch (e) {
       toasts.push(describeError(e), "error");
     }
-  }
+  }, [active, toasts]);
 
-  async function closeConnection() {
+  const closeConnection = useCallback(async () => {
     if (!active) return;
     try {
       await commands.closeConnection(active.handle.connectionId);
@@ -715,11 +715,11 @@ export default function App() {
     setActive(null);
     setTabs([]);
     setActiveTabId(null);
-  }
+  }, [active]);
 
   // Switch the active connection: close the current handle (and its tabs),
   // then open the chosen profile. Re-selecting the active one is a no-op.
-  async function switchConnection(profile: ProfileSummary) {
+  const switchConnection = useCallback(async (profile: ProfileSummary) => {
     if (active?.profile.id === profile.id) return;
     if (active) {
       try {
@@ -731,15 +731,15 @@ export default function App() {
       setActiveTabId(null);
     }
     await openProfile(profile);
-  }
+  }, [active, openProfile]);
 
-  function openAddConnection() {
+  const openAddConnection = useCallback(() => {
     setConnFormInitial(undefined);
     setConnFormKey((k) => k + 1);
     setConnectionFormOpen(true);
-  }
+  }, []);
 
-  async function editConnection(profile: ProfileSummary) {
+  const editConnection = useCallback(async (profile: ProfileSummary) => {
     let uri = profile.maskedUri;
     try {
       uri = await commands.resolveProfileUri(profile.id);
@@ -756,9 +756,9 @@ export default function App() {
     });
     setConnFormKey((k) => k + 1);
     setConnectionFormOpen(true);
-  }
+  }, []);
 
-  async function duplicateConnection(profile: ProfileSummary) {
+  const duplicateConnection = useCallback(async (profile: ProfileSummary) => {
     let uri = profile.maskedUri;
     try {
       uri = await commands.resolveProfileUri(profile.id);
@@ -774,9 +774,9 @@ export default function App() {
     });
     setConnFormKey((k) => k + 1);
     setConnectionFormOpen(true);
-  }
+  }, []);
 
-  async function setTheme(theme: AppSettings["theme"]) {
+  const setTheme = useCallback(async (theme: AppSettings["theme"]) => {
     try {
       const next = { ...(settings ?? { lastConnectionId: null }), theme };
       await commands.updateSettings(next);
@@ -785,9 +785,9 @@ export default function App() {
     } catch (e) {
       toasts.push(describeError(e), "error");
     }
-  }
+  }, [settings, toasts]);
 
-  async function deleteProfile(profile: ProfileSummary) {
+  const deleteProfile = useCallback(async (profile: ProfileSummary) => {
     if (!window.confirm(`Delete connection "${profile.name}"?`)) return;
     try {
       await commands.deleteProfile(profile.id);
@@ -796,27 +796,30 @@ export default function App() {
     } catch (e) {
       toasts.push(describeError(e), "error");
     }
-  }
+  }, [toasts]);
 
-  function openQueryTab(connectionId: string, database: string, collection: string) {
+  const openQueryTab = useCallback((connectionId: string, database: string, collection: string) => {
     const id = `q:${connectionId}:${database}:${collection}:${Date.now()}`;
     const tab: Tab = { id, kind: "query", connectionId, database, collection };
     setTabs((current) => [...current, tab]);
     setActiveTabId(id);
-  }
-  function openIndexTab(connectionId: string, database: string, collection: string) {
+  }, []);
+
+  const openIndexTab = useCallback((connectionId: string, database: string, collection: string) => {
     const id = `i:${connectionId}:${database}:${collection}:${Date.now()}`;
     const tab: Tab = { id, kind: "indexes", connectionId, database, collection };
     setTabs((current) => [...current, tab]);
     setActiveTabId(id);
-  }
-  function openSchemaTab(connectionId: string, database: string, collection: string) {
+  }, []);
+
+  const openSchemaTab = useCallback((connectionId: string, database: string, collection: string) => {
     const id = `s:${connectionId}:${database}:${collection}:${Date.now()}`;
     const tab: Tab = { id, kind: "schema", connectionId, database, collection };
     setTabs((current) => [...current, tab]);
     setActiveTabId(id);
-  }
-  function openShellTab(connectionId: string, database: string) {
+  }, []);
+
+  const openShellTab = useCallback((connectionId: string, database: string) => {
     const id = `sh:${connectionId}:${database}:${Date.now()}`;
     const tab: Tab = {
       id,
@@ -827,8 +830,9 @@ export default function App() {
     };
     setTabs((current) => [...current, tab]);
     setActiveTabId(id);
-  }
-  function closeTab(id: string) {
+  }, []);
+
+  const closeTab = useCallback((id: string) => {
     setTabs((current) => {
       const next = current.filter((t) => t.id !== id);
       if (id === activeTabId) {
@@ -836,7 +840,7 @@ export default function App() {
       }
       return next;
     });
-  }
+  }, [activeTabId]);
 
   const updateTab = useCallback((id: string, patch: Partial<Tab>) => {
     setTabs((current) =>
@@ -881,8 +885,7 @@ export default function App() {
       }
     }
     return items;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, tabs]);
+  }, [active, tabs, closeConnection, openQueryTab]);
 
   const tree = useMemo(() => {
     if (!active) return null;
@@ -994,8 +997,15 @@ export default function App() {
         })}
       </div>
     );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, treeFilter]);
+  }, [
+    active,
+    treeFilter,
+    refreshingDb,
+    refreshDatabase,
+    openQueryTab,
+    openIndexTab,
+    openSchemaTab,
+  ]);
 
   const activeTab = useMemo(
     () => tabs.find((t) => t.id === activeTabId) ?? null,
@@ -1304,7 +1314,7 @@ export default function App() {
   );
 }
 
-function TabPane({
+const TabPane = memo(function TabPane({
   tab,
   profile,
   connectionId,
@@ -1334,6 +1344,8 @@ function TabPane({
     [onQueryTime, onDocCount],
   );
 
+  const noop = useCallback(() => {}, []);
+
   if (tab.kind === "query") {
     return (
       <QueryTab
@@ -1341,9 +1353,7 @@ function TabPane({
         database={tab.database}
         collection={tab.collection}
         profile={profile}
-        onClose={() => {
-          /* tab strip handles close */
-        }}
+        onClose={noop}
         onResult={handleResult}
         onImported={onImported}
       />
@@ -1388,7 +1398,7 @@ function TabPane({
       collection={tab.collection}
     />
   );
-}
+});
 
 function applyTheme(theme: "system" | "light" | "dark") {
   const root = document.documentElement;

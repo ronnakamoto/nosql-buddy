@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import {
   Download,
   Upload,
@@ -9,6 +9,10 @@ import {
   Trash2,
   ChevronDown,
   ChevronRight,
+  CalendarClock,
+  Pause,
+  Play,
+  Pencil,
 } from "lucide-react";
 import type { JobMeta } from "../../ipc/commands";
 import { JobLogViewer } from "./JobLogViewer";
@@ -18,6 +22,10 @@ interface JobListItemProps {
   onCancel: (jobId: string) => void;
   onDelete: (jobId: string) => void;
   onRerun: (jobId: string) => void;
+  onToggleSchedule?: (jobId: string, enabled: boolean) => void;
+  onEditSchedule?: (jobId: string) => void;
+  /** Generated runs spawned by this schedule template (Scheduled view only). */
+  scheduledRuns?: JobMeta[];
 }
 
 function kindIcon(kind: JobMeta["kind"]) {
@@ -46,6 +54,21 @@ function kindLabel(kind: JobMeta["kind"]): string {
   }
 }
 
+function formatRelative(date: Date): string {
+  const now = new Date();
+  const diff = date.getTime() - now.getTime();
+  const seconds = Math.round(diff / 1000);
+  const minutes = Math.round(seconds / 60);
+  const hours = Math.round(minutes / 60);
+  const days = Math.round(hours / 24);
+
+  if (Math.abs(seconds) < 60) return seconds > 0 ? "in moments" : "just now";
+  if (Math.abs(minutes) < 60) return minutes > 0 ? `in ${minutes}m` : `${Math.abs(minutes)}m ago`;
+  if (Math.abs(hours) < 24) return hours > 0 ? `in ${hours}h` : `${Math.abs(hours)}h ago`;
+  if (Math.abs(days) < 7) return days > 0 ? `in ${days}d` : `${Math.abs(days)}d ago`;
+  return date.toLocaleDateString();
+}
+
 function statusClass(status: JobMeta["status"]): string {
   switch (status) {
     case "queued":
@@ -61,10 +84,19 @@ function statusClass(status: JobMeta["status"]): string {
   }
 }
 
-export function JobListItem({ job, onCancel, onDelete, onRerun }: JobListItemProps) {
+export const JobListItem = memo(function JobListItem({
+  job,
+  onCancel,
+  onDelete,
+  onRerun,
+  onToggleSchedule,
+  onEditSchedule,
+  scheduledRuns,
+}: JobListItemProps) {
   const [expanded, setExpanded] = useState(false);
   const progress = job.total && job.total > 0 ? (job.processed / job.total) * 100 : 0;
   const isActive = job.status === "running" || job.status === "queued";
+  const hasSchedule = job.schedule != null;
 
   return (
     <div className="job-list-item">
@@ -79,6 +111,16 @@ export function JobListItem({ job, onCancel, onDelete, onRerun }: JobListItemPro
         </span>
         <span className={`job-list-item__status ${statusClass(job.status)}`}>
           {job.status}
+        </span>
+        <span className="job-list-item__next-run">
+          {job.schedule?.enabled && job.schedule.nextRunAt ? (
+            <span title={`Next run: ${new Date(job.schedule.nextRunAt).toLocaleString()}`}>
+              <CalendarClock size={12} aria-hidden="true" />
+              {formatRelative(new Date(job.schedule.nextRunAt))}
+            </span>
+          ) : (
+            "—"
+          )}
         </span>
         <span className="job-list-item__progress-cell">
           <span className="job-progress-track">
@@ -163,11 +205,100 @@ export function JobListItem({ job, onCancel, onDelete, onRerun }: JobListItemPro
             {job.errors > 0 && (
               <span className="job-meta--errors">{job.errors.toLocaleString()} error(s)</span>
             )}
+            {job.schedule && (
+              <span className="job-meta--schedule">
+                Schedule: {job.schedule.enabled ? "enabled" : "disabled"}
+                {job.schedule.enabled && job.schedule.nextRunAt && (
+                  <> — next run {formatRelative(new Date(job.schedule.nextRunAt))}</>
+                )}
+                {job.schedule.retentionCount != null && (
+                  <> — keep last {job.schedule.retentionCount} backups</>
+                )}
+              </span>
+            )}
           </div>
+
+          {hasSchedule && onToggleSchedule && onEditSchedule && (
+            <div className="job-list-item__schedule-actions">
+              <button
+                className="btn btn--sm btn--ghost"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggleSchedule(job.jobId, !job.schedule!.enabled);
+                }}
+                title={job.schedule!.enabled ? "Pause schedule" : "Resume schedule"}
+              >
+                {job.schedule!.enabled ? <Pause size={14} /> : <Play size={14} />}
+                {job.schedule!.enabled ? "Pause" : "Resume"}
+              </button>
+              <button
+                className="btn btn--sm btn--ghost"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onEditSchedule(job.jobId);
+                }}
+                title="Edit schedule"
+              >
+                <Pencil size={14} />
+                Edit
+              </button>
+            </div>
+          )}
+
+          {scheduledRuns && (
+            <div className="job-runs">
+              <div className="job-runs__title">
+                Recent runs ({scheduledRuns.length})
+              </div>
+              {scheduledRuns.length === 0 ? (
+                <div className="job-runs__empty">
+                  No runs yet. The next run is{" "}
+                  {job.schedule?.enabled && job.schedule.nextRunAt
+                    ? formatRelative(new Date(job.schedule.nextRunAt))
+                    : "not scheduled"}
+                  .
+                </div>
+              ) : (
+                <ul className="job-runs__list">
+                  {scheduledRuns
+                    .slice()
+                    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+                    .map((run) => (
+                      <li key={run.jobId} className="job-runs__item">
+                        <span className={`job-runs__status ${statusClass(run.status)}`}>
+                          {run.status}
+                        </span>
+                        <span className="job-runs__time">
+                          {new Date(run.finishedAt ?? run.createdAt).toLocaleString()}
+                        </span>
+                        <span className="job-runs__count">
+                          {run.processed.toLocaleString()} docs
+                          {run.errors > 0 ? `, ${run.errors} error(s)` : ""}
+                        </span>
+                        {!(run.status === "running" || run.status === "queued") && (
+                          <button
+                            className="btn btn--sm btn--ghost"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onDelete(run.jobId);
+                            }}
+                            title="Delete this run"
+                            aria-label="Delete this run"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        )}
+                      </li>
+                    ))}
+                </ul>
+              )}
+            </div>
+          )}
+
           {job.message && <div className="job-list-item__message">{job.message}</div>}
           <JobLogViewer jobId={job.jobId} />
         </div>
       )}
     </div>
   );
-}
+});

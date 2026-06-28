@@ -460,6 +460,7 @@ export interface JobMeta {
   outputPath: string | null;
   sourcePath: string | null;
   schedule: ScheduleConfig | null;
+  parentJobId: string | null;
   processed: number;
   total: number | null;
   errors: number;
@@ -497,6 +498,7 @@ export interface JobDetailResponse {
   outputPath: string | null;
   sourcePath: string | null;
   schedule: ScheduleConfig | null;
+  parentJobId: string | null;
   processed: number;
   total: number | null;
   errors: number;

@@ -1708,9 +1708,9 @@ input[type="checkbox"] {
   -webkit-appearance: none;
   width: 16px;
   height: 16px;
-  border: 1.5px solid var(--border-strong);
+  border: 2px solid var(--ink-muted);
   border-radius: 3px;
-  background: var(--surface);
+  background: var(--surface-2);
   cursor: pointer;
   display: inline-grid;
   place-content: center;
@@ -4152,6 +4152,25 @@ input[type="checkbox"]:disabled {
   flex-wrap: wrap;
 }
 
+.jobs-hub__view-toggle {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.jobs-hub__view-toggle .btn {
+  border: none;
+  background: transparent;
+}
+
+.jobs-hub__view-toggle .btn.is-active {
+  background: var(--surface);
+  box-shadow: var(--shadow-xs);
+}
+
 .jobs-hub__search {
   position: relative;
   display: flex;
@@ -4213,7 +4232,7 @@ input[type="checkbox"]:disabled {
 
 .job-list-item__row {
   display: grid;
-  grid-template-columns: 20px 64px 1fr 80px 140px 120px;
+  grid-template-columns: 20px 64px 1fr 80px 80px 140px 120px;
   align-items: center;
   gap: var(--space-2);
   padding: var(--space-2) var(--space-3);
@@ -4357,12 +4376,92 @@ input[type="checkbox"]:disabled {
   font-weight: 600;
 }
 
+.job-meta--schedule {
+  color: var(--accent-600);
+  font-weight: 500;
+}
+
+.job-list-item__next-run {
+  font-size: var(--font-size-xs);
+  color: var(--ink-muted);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .job-list-item__message {
   font-size: var(--font-size-sm);
   color: var(--ink-muted);
 }
 
-/* Log viewer */
+.job-list-item__schedule-actions {
+  display: flex;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+  margin-top: var(--space-2);
+}
+
+.job-runs {
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+
+.job-runs__title {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--ink-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: var(--space-2);
+}
+
+.job-runs__empty {
+  font-size: var(--font-size-sm);
+  color: var(--ink-muted);
+}
+
+.job-runs__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.job-runs__item {
+  display: grid;
+  grid-template-columns: 80px 1fr auto 28px;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 4px var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+}
+
+.job-runs__item:hover {
+  background: var(--surface-2);
+}
+
+.job-runs__status {
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.job-runs__time {
+  color: var(--ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.job-runs__count {
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+}
 .job-log-viewer {
   max-height: 240px;
   overflow-y: auto;
@@ -4601,7 +4700,7 @@ input[type="checkbox"]:disabled {
 /* Responsive: collapse progress text on narrow widths */
 @media (max-width: 900px) {
   .job-list-item__row {
-    grid-template-columns: 20px 64px 1fr 80px 100px 96px;
+    grid-template-columns: 20px 64px 1fr 80px 64px 100px 96px;
   }
   .job-progress-text {
     display: none;
@@ -4610,7 +4709,7 @@ input[type="checkbox"]:disabled {
 
 @media (max-width: 720px) {
   .job-list-item__row {
-    grid-template-columns: 20px 64px 1fr 80px 80px;
+    grid-template-columns: 20px 64px 1fr 80px 64px 80px;
   }
   .job-list-item__progress-cell {
     display: none;
