@@ -26,6 +26,7 @@ import { useCollectionSchema } from "../hooks/useCollectionSchema";
 import { InfoPopover } from "../components/InfoPopover";
 import { Alert } from "../components/Alert";
 import { useToast } from "../context/ToastContext";
+import { Minus, Maximize2, X } from "lucide-react";
 
 /** Prism grammar name for each driver-code language. Mirrors the map
  *  in DriverCodePanel so the SQL tab's read-only code block shares the
@@ -68,6 +69,7 @@ export interface QueryTabProps {
 }
 
 type Mode = "find" | "aggregate" | "sql" | "update" | "insert";
+type ResultsPanelState = "expanded" | "minimized" | "closed";
 
 const SQL_LANGUAGES: SqlLanguage[] = [
   "node-js",
@@ -396,6 +398,7 @@ export function QueryTab({
   const [exportSource, setExportSource] = useState<ExportSourceDto | null>(null);
   const [pendingDelete, setPendingDelete] = useState<{ idx: number; docId: unknown } | null>(null);
   const [viewMode, setViewMode] = useState<ResultsViewMode>("table");
+  const [resultsPanelState, setResultsPanelState] = useState<ResultsPanelState>("expanded");
   const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(() => new Set());
 
   // ─── Schema for autocomplete ────────────────────────────────────────
@@ -477,6 +480,7 @@ export function QueryTab({
           countMode: "estimated",
         });
         setPage(result);
+        setResultsPanelState("expanded");
       } else if (mode === "aggregate") {
         const result = await commands.aggregatePage({
           connectionId,
@@ -487,6 +491,7 @@ export function QueryTab({
           countMode: "none",
         });
         setPage(result);
+        setResultsPanelState("expanded");
       } else if (mode === "update") {
         const result = await commands.updateDocuments({
           connectionId,
@@ -552,6 +557,7 @@ export function QueryTab({
           countMode: "none",
         });
         setPage(result);
+        setResultsPanelState("expanded");
         break;
       }
       case "update": {
@@ -1146,6 +1152,8 @@ export function QueryTab({
     }
   }
 
+  const resultsSummary = page ? formatResultSummary(page, loadingMore) : "No results yet";
+
   return (
     <div className="pane">
       <div className="pane__header">
@@ -1244,6 +1252,15 @@ export function QueryTab({
           >
             Export…
           </button>
+          {resultsPanelState === "closed" && page && (
+            <button
+              className="btn btn--sm"
+              onClick={() => setResultsPanelState("expanded")}
+              title="Show the current query results"
+            >
+              Show results
+            </button>
+          )}
           <PaneActionsMenu
             items={[
               {
@@ -1277,7 +1294,7 @@ export function QueryTab({
           )}
         </div>
       </div>
-      <div className="split">
+      <div className={`split split--results-${resultsPanelState}`}>
         <div className="editor">
           {mode === "find" && (
             <div className="pane__body" style={{ display: "grid", gridTemplateRows: "1fr 1fr 1fr" }}>
@@ -1573,91 +1590,135 @@ export function QueryTab({
             </div>
           )}
         </div>
-        <div className="split__handle" aria-hidden="true" />
-        <div className="pane__body results-pane">
-          {page ? (
-            <div className="results-view">
-              <div className="results-view-toolbar">
-                {(["table", "tree", "json"] as ResultsViewMode[]).map((m) => (
+        {resultsPanelState !== "closed" && <div className="split__handle" aria-hidden="true" />}
+        {resultsPanelState !== "closed" && (
+          <div className="pane__body results-pane">
+            {resultsPanelState === "minimized" ? (
+              <div className="results-minibar" role="region" aria-label="Minimized results panel">
+                <div className="results-minibar__text">
+                  <strong>Results minimized</strong>
+                  <span>{resultsSummary}</span>
+                </div>
+                <div className="results-minibar__actions">
                   <button
-                    key={m}
-                    className={`btn btn--sm ${viewMode === m ? "is-active" : ""}`}
-                    onClick={() => setViewMode(m)}
-                    aria-pressed={viewMode === m}
+                    className="btn btn--sm btn--icon"
+                    onClick={() => setResultsPanelState("expanded")}
+                    title="Show results"
+                    aria-label="Show results"
                   >
-                    {m[0].toUpperCase() + m.slice(1)}
+                    <Maximize2 size={14} aria-hidden />
                   </button>
-                ))}
-                <span style={{ fontSize: 12, color: "var(--ink-muted)", marginLeft: "auto" }}>
-                  {selectedDocuments.length} selected
-                </span>
-                <button
-                  className="btn btn--sm"
-                  disabled={selectedDocuments.length === 0}
-                  onClick={() => void handleCopySelected()}
-                  title="Copy selected documents as JSON"
-                >
-                  Copy selected
-                </button>
-                <button
-                  className="btn btn--sm btn--danger"
-                  disabled={selectedDocuments.length === 0}
-                  onClick={() => void handleBulkDeleteSelected()}
-                  title="Delete all selected documents"
-                >
-                  Delete selected
-                </button>
-                <button
-                  className="btn btn--sm"
-                  disabled={selectedDocuments.length === 0}
-                  onClick={() => void handleBulkUpdateSelected()}
-                  title="Update all selected documents with a $set operation"
-                >
-                  Update selected
-                </button>
-                <button
-                  className="btn btn--sm"
-                  disabled={selectedDocuments.length === 0}
-                  onClick={() => setSelectedRowIds(new Set())}
-                >
-                  Clear
-                </button>
+                  <button
+                    className="btn btn--sm btn--icon"
+                    onClick={() => setResultsPanelState("closed")}
+                    title="Close results"
+                    aria-label="Close results"
+                  >
+                    <X size={14} aria-hidden />
+                  </button>
+                </div>
               </div>
-              <div className="results-view__table">
-                <ResultsTable
-                  documents={page.documents as Array<Record<string, unknown>>}
-                  connectionId={connectionId}
-                  database={database}
-                  collection={collection}
-                  view={viewMode}
-                  editable
-                  onCellSaved={handleCellSaved}
-                  onCellError={handleCellError}
-                  onDeleteRow={handleDeleteRow}
-                  selectable
-                  selectedRowIds={selectedRowIds}
-                  onSelectionChange={setSelectedRowIds}
-                  getRowId={getRowId}
+            ) : page ? (
+              <div className="results-view">
+                <div className="results-view-toolbar">
+                  {(["table", "tree", "json"] as ResultsViewMode[]).map((m) => (
+                    <button
+                      key={m}
+                      className={`btn btn--sm ${viewMode === m ? "is-active" : ""}`}
+                      onClick={() => setViewMode(m)}
+                      aria-pressed={viewMode === m}
+                    >
+                      {m[0].toUpperCase() + m.slice(1)}
+                    </button>
+                  ))}
+                  <span style={{ fontSize: 12, color: "var(--ink-muted)", marginLeft: "auto" }}>
+                    {selectedDocuments.length} selected
+                  </span>
+                  <button
+                    className="btn btn--sm"
+                    disabled={selectedDocuments.length === 0}
+                    onClick={() => void handleCopySelected()}
+                    title="Copy selected documents as JSON"
+                  >
+                    Copy selected
+                  </button>
+                  <button
+                    className="btn btn--sm btn--danger"
+                    disabled={selectedDocuments.length === 0}
+                    onClick={() => void handleBulkDeleteSelected()}
+                    title="Delete all selected documents"
+                  >
+                    Delete selected
+                  </button>
+                  <button
+                    className="btn btn--sm"
+                    disabled={selectedDocuments.length === 0}
+                    onClick={() => void handleBulkUpdateSelected()}
+                    title="Update all selected documents with a $set operation"
+                  >
+                    Update selected
+                  </button>
+                  <button
+                    className="btn btn--sm"
+                    disabled={selectedDocuments.length === 0}
+                    onClick={() => setSelectedRowIds(new Set())}
+                  >
+                    Clear
+                  </button>
+                  <span className="results-view-toolbar__divider" aria-hidden="true" />
+                  <button
+                    className="btn btn--sm btn--icon"
+                    onClick={() => setResultsPanelState("minimized")}
+                    title="Minimize results and give the query editor more space"
+                    aria-label="Minimize results"
+                  >
+                    <Minus size={14} aria-hidden />
+                  </button>
+                  <button
+                    className="btn btn--sm btn--icon"
+                    onClick={() => setResultsPanelState("closed")}
+                    title="Close results and give the query editor all available space"
+                    aria-label="Close results"
+                  >
+                    <X size={14} aria-hidden />
+                  </button>
+                </div>
+                <div className="results-view__table">
+                  <ResultsTable
+                    documents={page.documents as Array<Record<string, unknown>>}
+                    connectionId={connectionId}
+                    database={database}
+                    collection={collection}
+                    view={viewMode}
+                    editable
+                    onCellSaved={handleCellSaved}
+                    onCellError={handleCellError}
+                    onDeleteRow={handleDeleteRow}
+                    selectable
+                    selectedRowIds={selectedRowIds}
+                    onSelectionChange={setSelectedRowIds}
+                    getRowId={getRowId}
+                  />
+                </div>
+                <PagingBar
+                  total={page.totalCount}
+                  totalApprox={!!page.totalCountApprox}
+                  hasMore={page.hasMore}
+                  loadingPage={loadingMore}
+                  pageSize={pageSize}
+                  currentPage={currentPage}
+                  onPageSize={handlePageSize}
+                  onJump={jumpToPage}
                 />
               </div>
-              <PagingBar
-                total={page.totalCount}
-                totalApprox={!!page.totalCountApprox}
-                hasMore={page.hasMore}
-                loadingPage={loadingMore}
-                pageSize={pageSize}
-                currentPage={currentPage}
-                onPageSize={handlePageSize}
-                onJump={jumpToPage}
-              />
-            </div>
-          ) : (
-            <div className="empty-state">
-              <h2>Run to see results</h2>
-              <p>The query, projection, sort, and limit are all JSON.</p>
-            </div>
-          )}
-        </div>
+            ) : (
+              <div className="empty-state">
+                <h2>Run to see results</h2>
+                <p>The query, projection, sort, and limit are all JSON.</p>
+              </div>
+            )}
+          </div>
+        )}
       </div>
       <InsertDocumentModal
         open={insertOpen}
