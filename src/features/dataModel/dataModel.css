@@ -752,3 +752,290 @@
   color: var(--ink-faint);
   margin: 0;
 }
+
+/* ─── Inspector panel ──────────────────────────────────────────────────── */
+
+.data-model__inspector {
+  width: 320px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  overflow: auto;
+}
+
+.data-model__inspector-section {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.data-model__inspector-section:last-child {
+  border-bottom: none;
+}
+
+.data-model__inspector-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.data-model__inspector-heading .data-model__section-title {
+  margin: 0;
+}
+
+.data-model__inspector-empty {
+  padding: 16px 10px;
+  font-size: var(--font-size-sm);
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
+.data-model__inspector-edges {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+}
+
+.data-model__edge-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: var(--radius-md);
+  background: transparent;
+  border: 1px solid transparent;
+  font-size: var(--font-size-sm);
+  text-align: left;
+  cursor: pointer;
+  width: 100%;
+  font-family: inherit;
+  color: inherit;
+}
+
+.data-model__edge-row:hover {
+  background: var(--surface-2);
+}
+
+.data-model__edge-row.is-selected {
+  border-color: var(--accent-400);
+  background: color-mix(in oklch, var(--accent-500) 10%, var(--surface));
+}
+
+.data-model__edge-row.is-confirmed {
+  border-left: 3px solid var(--success-500);
+  padding-left: 6px;
+}
+
+.data-model__edge-row.is-hidden {
+  opacity: 0.55;
+}
+
+.data-model__edge-from,
+.data-model__edge-to {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  min-width: 64px;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.data-model__edge-field {
+  font-family: var(--font-mono);
+  color: var(--ink-muted);
+  font-size: var(--font-size-xs);
+  min-width: 60px;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.data-model__edge-kind {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-100);
+  color: var(--accent-700);
+}
+
+.data-model__edge-confidence {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 90px;
+}
+
+.data-model__edge-detail-link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 6px 0 8px;
+  font-size: var(--font-size-sm);
+}
+
+.data-model__link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--accent-600);
+  cursor: pointer;
+  font-size: inherit;
+}
+
+.data-model__link-btn:hover {
+  text-decoration: underline;
+  color: var(--accent-700);
+}
+
+.data-model__edge-detail-field {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--ink-muted);
+}
+
+.data-model__edge-detail-confidence {
+  font-size: var(--font-size-sm);
+  margin-bottom: 8px;
+}
+
+.data-model__edge-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.data-model__signals-title {
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--ink-muted);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.data-model__signals-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.data-model__signal-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: var(--font-size-xs);
+}
+
+.data-model__signal-kind {
+  flex-shrink: 0;
+}
+
+.data-model__signal-detail {
+  flex: 1;
+  color: var(--ink-muted);
+  line-height: 1.4;
+}
+
+.data-model__signal-weight {
+  color: var(--ink-faint);
+  flex-shrink: 0;
+}
+
+.data-model__signals-empty {
+  font-size: var(--font-size-xs);
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
+.data-model__stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 12px;
+  margin: 6px 0 0;
+}
+
+.data-model__stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.data-model__stat dt {
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--ink-faint);
+  font-weight: 600;
+}
+
+.data-model__stat dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--ink);
+}
+
+.data-model__collection-warnings {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.data-model__collection-warning {
+  font-size: var(--font-size-xs);
+  color: color-mix(in oklch, var(--warning-500) 70%, var(--ink));
+  background: color-mix(in oklch, var(--warning-500) 15%, var(--surface));
+  border-radius: var(--radius-sm);
+  padding: 4px 6px;
+}
+
+/* Scan progress bar in the top bar. */
+.data-model__progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--font-size-xs);
+  color: var(--ink-muted);
+  min-width: 180px;
+}
+
+.data-model__progress-bar {
+  flex: 1;
+  height: 4px;
+  background: var(--surface-2);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.data-model__progress-fill {
+  height: 100%;
+  background: var(--accent-500);
+  transition: width 120ms ease-out;
+}
+
+.data-model__progress-text {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Signal kind badges reused from the global kind-badge tokens. */
+.kind-badge--objectid { background: var(--accent-100); color: var(--accent-700); }
+.kind-badge--naming { background: var(--surface-2); color: var(--ink-muted); }
+.kind-badge--lookup { background: color-mix(in oklch, var(--success-500) 18%, var(--surface)); color: color-mix(in oklch, var(--success-500) 75%, var(--ink)); }
+.kind-badge--index { background: color-mix(in oklch, var(--warning-500) 18%, var(--surface)); color: color-mix(in oklch, var(--warning-500) 75%, var(--ink)); }
+.kind-badge--appschema { background: var(--accent-100); color: var(--accent-700); }
+.kind-badge--default { background: var(--surface-2); color: var(--ink-muted); }
+

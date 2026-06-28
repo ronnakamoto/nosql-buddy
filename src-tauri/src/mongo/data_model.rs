@@ -4,12 +4,15 @@
 //! relationships table.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use bson::{doc, Bson, Document};
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Manager};
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
+use crate::events::{emit_data_model_progress, emit_data_model_updated, DataModelProgressPayload};
 use crate::mongo::client_registry::classify_collection_name;
 use crate::mongo::relationship::{
     detect_relationships, AppSchemaSignal, LookupSignal, ObjectIdMatchSignal, RelationshipConfig,
@@ -54,22 +57,24 @@ pub struct SignalConfig {
 
 /// Scan a database and build a `DataModelGraph`. `lookup_signals` and
 /// `app_schema_signals` are provided by the caller (query history / views /
-/// optional schema overlay). Returns the graph and a per-collection warning list.
+/// optional schema overlay). When `app_handle` is `Some`, per-collection
+/// progress is emitted on the `data-model-progress` event and a final
+/// `data-model-updated` tick is emitted on success. Returns the graph and a
+/// per-collection warning list.
 #[allow(clippy::too_many_arguments)]
 pub async fn scan_database_model(
     client: &mongodb::Client,
     config: &ScanConfig,
     lookup_signals: &[LookupSignal],
     app_schema_signals: &[AppSchemaSignal],
+    app_handle: Option<&AppHandle>,
 ) -> AppResult<DataModelGraph> {
     let db = client.database(&config.database);
-    let total = config.collections.len();
-    let mut nodes: Vec<CollectionShape> = Vec::with_capacity(total);
+    let total = config.collections.len() as u32;
+    let mut nodes: Vec<CollectionShape> = Vec::with_capacity(config.collections.len());
     let mut warnings: Vec<String> = Vec::new();
 
-    for (i, _name) in config.collections.iter().enumerate() {
-        let _ = i; // progress is emitted via Tauri events in a future iteration
-        let name = _name;
+    for (i, name) in config.collections.iter().enumerate() {
         let kind: CollectionKind = classify_collection_name(client, &config.database, name).await;
         let coll = db.collection::<Document>(name);
         let sample = config.sample_size.clamp(1, 10_000) as i64;
@@ -80,6 +85,7 @@ pub async fn scan_database_model(
             Ok(cursor) => cursor.try_collect().await.unwrap_or_default(),
             Err(e) => {
                 warnings.push(format!("{}: sample failed: {}", name, e));
+                emit_progress(app_handle, &config.database, name, (i + 1) as u32, total, Some(e.to_string()));
                 continue;
             }
         };
@@ -108,6 +114,7 @@ pub async fn scan_database_model(
             &docs,
             indexes,
         ));
+        emit_progress(app_handle, &config.database, name, (i + 1) as u32, total, None);
     }
 
     let mut object_id_signals: Vec<ObjectIdMatchSignal> = Vec::new();
@@ -127,7 +134,7 @@ pub async fn scan_database_model(
 
     let edges = detect_relationships(&nodes, &object_id_signals, lookup_signals, app_schema_signals, &rel_config);
 
-    Ok(DataModelGraph {
+    let graph = DataModelGraph {
         database: config.database.clone(),
         nodes,
         edges,
@@ -135,7 +142,34 @@ pub async fn scan_database_model(
         sample_size: config.sample_size,
         confidence_threshold: config.confidence_threshold,
         warnings,
-    })
+    };
+
+    if let Some(app) = app_handle {
+        emit_data_model_updated(app, &config.database);
+    }
+    Ok(graph)
+}
+
+fn emit_progress(
+    app: Option<&AppHandle>,
+    database: &str,
+    collection: &str,
+    done: u32,
+    total: u32,
+    error: Option<String>,
+) {
+    if let Some(app) = app {
+        emit_data_model_progress(
+            app,
+            DataModelProgressPayload {
+                database: database.to_string(),
+                collection: collection.to_string(),
+                done,
+                total,
+                error,
+            },
+        );
+    }
 }
 
 /// List indexes for a single collection.
@@ -370,5 +404,203 @@ async fn count_id_matches(
         .count_documents(doc! { "_id": { "$in": bson_ids } })
         .await?;
     Ok(count)
+}
+
+// ─── Graph cache ───────────────────────────────────────────────────────────
+//
+// The most recent `DataModelGraph` per database is cached as JSON under
+// `<app_data_dir>/data-models/<database>.json`. This lets the diagram tab
+// restore the last scan on reopen (without re-sampling) and gives Phase 5
+// snapshots a place to grow from. The cache is best-effort: I/O failures are
+// surfaced to the caller but never abort an in-flight scan.
+
+/// Resolve the cache directory for data-model graphs. Creates it if missing.
+pub fn cache_dir(app: &AppHandle) -> AppResult<PathBuf> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::Internal(format!("resolve app data dir: {e}")))?;
+    let dir = base.join("data-models");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+fn cache_path(app: &AppHandle, database: &str) -> AppResult<PathBuf> {
+    Ok(cache_dir(app)?.join(format!("{}.json", sanitize_db_name(database))))
+}
+
+/// Best-effort save: write the graph to the per-database cache file.
+pub fn save_graph_cache(app: &AppHandle, graph: &DataModelGraph) -> AppResult<()> {
+    let path = cache_path(app, &graph.database)?;
+    let json = serde_json::to_string_pretty(graph)?;
+    std::fs::write(&path, json)?;
+    Ok(())
+}
+
+/// Load the cached graph for `database`, if any. Returns `Ok(None)` when no
+/// cache file exists (first open, or cache cleared).
+pub fn load_graph_cache(app: &AppHandle, database: &str) -> AppResult<Option<DataModelGraph>> {
+    let path = cache_path(app, database)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    let graph: DataModelGraph = serde_json::from_str(&raw)?;
+    Ok(Some(graph))
+}
+
+/// Apply a user override (confirm / hide) to one edge of the cached graph,
+/// persist the updated graph, and return it. Returns `NotFound` if the edge id
+/// is not present.
+pub fn apply_edge_override(
+    app: &AppHandle,
+    database: &str,
+    edge_id: &str,
+    confirmed: Option<bool>,
+    hidden: Option<bool>,
+) -> AppResult<DataModelGraph> {
+    let Some(mut graph) = load_graph_cache(app, database)? else {
+        return Err(AppError::NotFound(format!(
+            "no cached data model for database '{database}'"
+        )));
+    };
+    override_edge(&mut graph, edge_id, confirmed, hidden)?;
+    save_graph_cache(app, &graph)?;
+    emit_data_model_updated(app, database);
+    Ok(graph)
+}
+
+/// Pure in-place edge override. Mutates `graph.edges` for the matching id.
+/// Confirming an edge clears its `hidden` flag (a confirmed edge is shown).
+pub fn override_edge(
+    graph: &mut DataModelGraph,
+    edge_id: &str,
+    confirmed: Option<bool>,
+    hidden: Option<bool>,
+) -> AppResult<()> {
+    let edge = graph
+        .edges
+        .iter_mut()
+        .find(|e| e.id == edge_id)
+        .ok_or_else(|| AppError::NotFound(format!("relationship '{edge_id}' not found")))?;
+    if let Some(c) = confirmed {
+        edge.confirmed = c;
+        if c {
+            edge.hidden = false;
+        }
+    }
+    if let Some(h) = hidden {
+        edge.hidden = h;
+    }
+    Ok(())
+}
+
+/// Strip path separators from a database name so it is safe to use as a file
+/// name. MongoDB database names cannot contain `/` or `\`, but be defensive.
+fn sanitize_db_name(database: &str) -> String {
+    database.replace(['/', '\\', ':'], "_")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mongo::relationship::{RelationshipEdge, RelationshipKind, RelationshipSignal};
+    use crate::mongo::shape::{CollectionShape, ShapeNode};
+    use crate::mongo::types::CollectionKind;
+
+    fn empty_graph(database: &str, edges: Vec<RelationshipEdge>) -> DataModelGraph {
+        DataModelGraph {
+            database: database.to_string(),
+            nodes: vec![CollectionShape {
+                database: database.to_string(),
+                collection: "c".to_string(),
+                kind: CollectionKind::Collection,
+                document_count: Some(0),
+                sampled_documents: 0,
+                root: ShapeNode {
+                    name: "_root".to_string(),
+                    path: "".to_string(),
+                    types: Default::default(),
+                    presence: 1.0,
+                    null_ratio: 0.0,
+                    cardinality: None,
+                    children: Vec::new(),
+                    array_item: None,
+                    top_values: None,
+                    numeric_stats: None,
+                    date_stats: None,
+                },
+                max_depth: 0,
+                warnings: Vec::new(),
+                indexes: Vec::new(),
+            }],
+            edges,
+            generated_at: "now".to_string(),
+            sample_size: 0,
+            confidence_threshold: 0.4,
+            warnings: Vec::new(),
+        }
+    }
+
+    fn edge(id: &str, confidence: f64) -> RelationshipEdge {
+        RelationshipEdge {
+            id: id.to_string(),
+            from_collection: "orders".to_string(),
+            to_collection: "users".to_string(),
+            from_field: "userId".to_string(),
+            to_field: "_id".to_string(),
+            kind: RelationshipKind::ManyToOne,
+            confidence,
+            signals: vec![RelationshipSignal {
+                kind: crate::mongo::relationship::SignalKind::NamingConvention,
+                detail: "userId → users".to_string(),
+                weight: 0.3,
+            }],
+            via_collection: None,
+            confirmed: false,
+            hidden: false,
+        }
+    }
+
+    #[test]
+    fn override_edge_confirm_sets_confirmed_and_unhides() {
+        let mut graph = empty_graph("db", vec![edge("e1", 0.5)]);
+        override_edge(&mut graph, "e1", Some(true), None).unwrap();
+        let e = &graph.edges[0];
+        assert!(e.confirmed);
+        assert!(!e.hidden);
+    }
+
+    #[test]
+    fn override_edge_hide_sets_hidden() {
+        let mut graph = empty_graph("db", vec![edge("e1", 0.5)]);
+        override_edge(&mut graph, "e1", None, Some(true)).unwrap();
+        assert!(graph.edges[0].hidden);
+        assert!(!graph.edges[0].confirmed);
+    }
+
+    #[test]
+    fn override_edge_confirm_then_hide_keeps_confirmed() {
+        let mut graph = empty_graph("db", vec![edge("e1", 0.5)]);
+        override_edge(&mut graph, "e1", Some(true), None).unwrap();
+        // Hiding after confirming should hide but preserve the confirmed flag.
+        override_edge(&mut graph, "e1", None, Some(true)).unwrap();
+        assert!(graph.edges[0].hidden);
+        assert!(graph.edges[0].confirmed);
+    }
+
+    #[test]
+    fn override_edge_unknown_id_returns_not_found() {
+        let mut graph = empty_graph("db", vec![edge("e1", 0.5)]);
+        let err = override_edge(&mut graph, "missing", Some(true), None).unwrap_err();
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[test]
+    fn sanitize_db_name_strips_separators() {
+        assert_eq!(sanitize_db_name("shop"), "shop");
+        assert_eq!(sanitize_db_name("a/b"), "a_b");
+        assert_eq!(sanitize_db_name("a\\b:c"), "a_b_c");
+    }
 }
 

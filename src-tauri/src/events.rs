@@ -144,6 +144,45 @@ pub fn emit_job_log_entry(app: &AppHandle, job_id: &str, timestamp: &str, level:
     );
 }
 
+/// Payload for the `data-model-progress` event: one step of a multi-collection
+/// data-model scan. Emitted per collection as the scan iterates, plus a final
+/// step with `done == total` when the scan completes. Best-effort: emission
+/// failures never abort the scan.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataModelProgressPayload {
+    pub database: String,
+    pub collection: String,
+    pub done: u32,
+    pub total: u32,
+    pub error: Option<String>,
+}
+
+/// Emit a single data-model scan progress step. Best-effort.
+pub fn emit_data_model_progress(app: &AppHandle, payload: DataModelProgressPayload) {
+    let _ = app.emit("data-model-progress", payload);
+}
+
+/// Payload for the `data-model-updated` event: emitted when a scan finishes or
+/// an edge override is applied, carrying the new graph so the frontend can
+/// refresh without a round-trip. Best-effort.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataModelUpdatedPayload {
+    pub database: String,
+}
+
+/// Emit a data-model-updated tick so the frontend reloads the cached graph.
+/// Best-effort: emission failures never abort the calling command.
+pub fn emit_data_model_updated(app: &AppHandle, database: &str) {
+    let _ = app.emit(
+        "data-model-updated",
+        DataModelUpdatedPayload {
+            database: database.to_string(),
+        },
+    );
+}
+
 pub fn chrono_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()

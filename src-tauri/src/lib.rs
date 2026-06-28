@@ -195,6 +195,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::ping,
             commands::data_model::scan_data_model,
+            commands::data_model::get_data_model,
+            commands::data_model::update_relationship,
             commands::system::app_info,
             commands::settings::get_settings,
             commands::settings::update_settings,

@@ -17,11 +17,14 @@ import commands, {
   type DataModelGraph,
   type RelationshipEdge,
 } from "../../ipc/commands";
+import { onDataModelProgress, onDataModelUpdated } from "../../ipc/events";
 import { useToast } from "../../context/ToastContext";
 import { ShapeTreeView } from "./ShapeTreeView";
 import { DiagramCanvas } from "./DiagramCanvas";
+import { DataModelInspector } from "./DataModelInspector";
 import { InfoPopover } from "../../components/InfoPopover";
 import { graphToJson, graphToMermaid, graphToSvg, svgToPngBytes } from "./exportGraph";
+import { extractLookupSignals } from "./lookupSignals";
 
 export interface DataModelTabProps {
   connectionId: string;
@@ -41,6 +44,7 @@ export function DataModelTab({ connectionId, database }: DataModelTabProps) {
   const [selectorSearch, setSelectorSearch] = useState("");
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; total: number; collection: string } | null>(null);
   const toast = useToast();
 
   // Most recent laid-out (and user-dragged) nodes/edges reported by the canvas.
@@ -55,6 +59,18 @@ export function DataModelTab({ connectionId, database }: DataModelTabProps) {
     setSelected(new Set());
     setGraph(null);
     setSelectedNode(null);
+    // Restore the last cached scan for this database so the tab isn't blank on reopen.
+    commands
+      .getDataModel(database)
+      .then((cached) => {
+        if (cached) {
+          setGraph(cached);
+          if (cached.nodes.length > 0) setSelectedNode(cached.nodes[0].collection);
+        }
+      })
+      .catch(() => {
+        /* no cache yet — benign */
+      });
     commands
       .listCollections(connectionId, database)
       .then((cols) => {
@@ -72,7 +88,42 @@ export function DataModelTab({ connectionId, database }: DataModelTabProps) {
         setSelected(defaults);
       })
       .catch((e) => toast.push(formatError(e), "error"));
-  }, [connectionId, database]);
+  }, [connectionId, database]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Live scan progress — drives the top-bar progress bar.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    onDataModelProgress((p) => {
+      if (p.database !== database) return;
+      setProgress({ done: p.done, total: p.total, collection: p.collection });
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, [database]);
+
+  // Reload the cached graph when the backend signals an update (scan done or
+  // edge override applied). This keeps the canvas in sync without the command
+  // having to return the full graph over IPC for every override.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    onDataModelUpdated((p) => {
+      if (p.database !== database) return;
+      commands
+        .getDataModel(database)
+        .then((cached) => {
+          if (cached) setGraph(cached);
+        })
+        .catch((e) => toast.push(formatError(e), "error"));
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, [database]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Close the export dropdown on outside click.
   useEffect(() => {
@@ -93,6 +144,10 @@ export function DataModelTab({ connectionId, database }: DataModelTabProps) {
     }
     setScanning(true);
     setGraph(null);
+    setProgress({ done: 0, total: selected.size, collection: "" });
+    // Pull $lookup signals from the user's query history (localStorage). The
+    // history is connection-scoped, so only lookups against this DB qualify.
+    const lookupSignals = extractLookupSignals(connectionId, database);
     try {
       const g = await commands.scanDataModel({
         connectionId,
@@ -102,21 +157,29 @@ export function DataModelTab({ connectionId, database }: DataModelTabProps) {
         signals: {
           objectIdMatch: true,
           naming: true,
-          lookup: false,
+          lookup: lookupSignals.length > 0,
           index: true,
           appSchema: false,
         },
         confidenceThreshold,
         appSchemaPath: null,
+        lookupSignals,
       });
       setGraph(g);
       if (g.nodes.length > 0) {
         setSelectedNode(g.nodes[0].collection);
       }
+      if (lookupSignals.length > 0) {
+        toast.push(
+          `Scan complete · ${lookupSignals.length} $lookup signal${lookupSignals.length === 1 ? "" : "s"} from history`,
+          "success",
+        );
+      }
     } catch (e) {
       toast.push(formatError(e), "error");
     } finally {
       setScanning(false);
+      setProgress(null);
     }
   };
 
@@ -155,9 +218,23 @@ export function DataModelTab({ connectionId, database }: DataModelTabProps) {
     [graph, selectedNode],
   );
 
+  // Edges the user might want to see in the inspector: at or above the
+  // confidence threshold, including hidden ones (so they can be un-hidden).
+  // Confirmed edges are always included regardless of confidence.
+  const inspectorEdges = useMemo(
+    () =>
+      graph?.edges.filter(
+        (e) => e.confirmed || (!e.hidden && e.confidence >= confidenceThreshold) || e.hidden,
+      ) ?? [],
+    [graph, confidenceThreshold],
+  );
+
+  // Edges drawn on the canvas: non-hidden and (above threshold OR confirmed).
   const visibleEdges = useMemo(
     () =>
-      graph?.edges.filter((e) => !e.hidden && e.confidence >= confidenceThreshold) ?? [],
+      graph?.edges.filter(
+        (e) => !e.hidden && (e.confirmed || e.confidence >= confidenceThreshold),
+      ) ?? [],
     [graph, confidenceThreshold],
   );
 
@@ -165,6 +242,18 @@ export function DataModelTab({ connectionId, database }: DataModelTabProps) {
     if (!graph) return null;
     return { ...graph, edges: visibleEdges };
   }, [graph, visibleEdges]);
+
+  const handleOverrideEdge = useCallback(
+    async (edgeId: string, overrides: { confirmed?: boolean; hidden?: boolean }) => {
+      try {
+        const updated = await commands.updateRelationship(database, edgeId, overrides);
+        setGraph(updated);
+      } catch (e) {
+        toast.push(formatError(e), "error");
+      }
+    },
+    [database, toast],
+  );
 
   const filteredCollections = useMemo(() => {
     const q = selectorSearch.trim().toLowerCase();
@@ -250,8 +339,8 @@ export function DataModelTab({ connectionId, database }: DataModelTabProps) {
       <div className="pane__header">
         <h2 className="pane__title">Data Model — {database}</h2>
         <div className="pane__sub">
-          {scanning
-            ? "Scanning collections…"
+          {scanning && progress
+            ? `Scanning ${progress.done}/${progress.total}: ${progress.collection}…`
             : graph
               ? `${graph.nodes.length} collections · ${visibleEdges.length} relationships`
               : "Select collections and scan"}
@@ -364,6 +453,24 @@ export function DataModelTab({ connectionId, database }: DataModelTabProps) {
           <span className="shape-toolbar__hint">
             {selected.size} selected · {collections?.length ?? 0} total collections
           </span>
+          {scanning && progress && (
+            <div
+              className="data-model__progress"
+              role="status"
+              aria-live="polite"
+              aria-label={`Scanning ${progress.done} of ${progress.total} collections`}
+            >
+              <div className="data-model__progress-bar">
+                <div
+                  className="data-model__progress-fill"
+                  style={{ width: `${progress.total > 0 ? (progress.done / progress.total) * 100 : 0}%` }}
+                />
+              </div>
+              <span className="data-model__progress-text">
+                {progress.done}/{progress.total}
+              </span>
+            </div>
+          )}
         </div>
         <div className="data-model__workspace">
           <div className="data-model__selector">
@@ -462,6 +569,18 @@ export function DataModelTab({ connectionId, database }: DataModelTabProps) {
               </div>
             )}
           </div>
+          {graph && (
+            <DataModelInspector
+              edges={inspectorEdges}
+              selectedCollection={selectedNode}
+              nodes={graph.nodes}
+              onOverrideEdge={handleOverrideEdge}
+              onSelectCollection={(name) => {
+                setSelectedNode(name);
+                setViewMode("shape");
+              }}
+            />
+          )}
         </div>
       </div>
     </div>

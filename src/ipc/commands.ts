@@ -313,6 +313,15 @@ export interface RelationshipEdge {
   hidden?: boolean;
 }
 
+/** A `$lookup`-derived relationship signal parsed from query history. */
+export interface LookupSignal {
+  fromCollection: string;
+  toCollection: string;
+  localField: string;
+  foreignField: string;
+  count: number;
+}
+
 export interface DataModelGraph {
   database: string;
   nodes: CollectionShape[];
@@ -337,13 +346,8 @@ export interface ScanScopeRequest {
   };
   confidenceThreshold: number;
   appSchemaPath?: string | null;
-}
-
-export interface DataModelProgressPayload {
-  collection: string;
-  done: number;
-  total: number;
-  error?: string | null;
+  /** `$lookup` signals parsed from the frontend query history. */
+  lookupSignals?: LookupSignal[];
 }
 
 export interface SqlTranslation {
@@ -1387,6 +1391,19 @@ const commands = {
     invoke<RestoreResult>("restore_database", { request }),
   scanDataModel: (request: ScanScopeRequest) =>
     invoke<DataModelGraph>("scan_data_model", { request }),
+  getDataModel: (database: string) =>
+    invoke<DataModelGraph | null>("get_data_model", { database }),
+  updateRelationship: (
+    database: string,
+    edgeId: string,
+    overrides: { confirmed?: boolean; hidden?: boolean },
+  ) =>
+    invoke<DataModelGraph>("update_relationship", {
+      database,
+      edgeId,
+      confirmed: overrides.confirmed ?? null,
+      hidden: overrides.hidden ?? null,
+    }),
 
   shellAutocomplete: (request: {
     connectionId: string;

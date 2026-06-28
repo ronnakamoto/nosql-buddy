@@ -96,6 +96,7 @@ export async function onJobLogEntry(
 }
 
 export interface DataModelProgressPayload {
+  database: string;
   collection: string;
   done: number;
   total: number;
@@ -106,6 +107,23 @@ export async function onDataModelProgress(
   handler: (payload: DataModelProgressPayload) => void,
 ): Promise<UnlistenFn> {
   return listen<DataModelProgressPayload>("data-model-progress", (event) =>
+    handler(event.payload),
+  );
+}
+
+export interface DataModelUpdatedPayload {
+  database: string;
+}
+
+/**
+ * Subscribe to `data-model-updated` — emitted when a scan completes or an edge
+ * override is applied. The handler receives the database name so it can reload
+ * the cached graph via `getDataModel`.
+ */
+export async function onDataModelUpdated(
+  handler: (payload: DataModelUpdatedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<DataModelUpdatedPayload>("data-model-updated", (event) =>
     handler(event.payload),
   );
 }
