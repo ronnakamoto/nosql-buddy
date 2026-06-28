@@ -5,6 +5,7 @@ import { Alert } from "../../components/Alert";
 import { useToast } from "../../context/ToastContext";
 import { CollectionCheckList, type CollectionItem } from "./CollectionCheckList";
 import { SchedulePanel } from "./SchedulePanel";
+import { InfoPopover } from "../../components/InfoPopover";
 
 export interface DumpWizardProps {
   connectionId: string;
@@ -192,7 +193,11 @@ export function DumpWizard({ connectionId, database: initialDatabase = "", colle
               </div>
 
               <div className="field">
-                <label className="field__label">Format</label>
+                <label className="field__label">Format <InfoPopover label="Dump format help" title="Dump format">
+                <p><strong>BSON</strong> preserves MongoDB data types (ObjectId, Date, Binary).</p>
+                <p><strong>JSON</strong> is human-readable but converts types to strings.</p>
+                <p>Choose BSON for backups, JSON for interoperability.</p>
+              </InfoPopover></label>
                 <div className="row" style={{ gap: "var(--space-2)" }}>
                   {(["bson", "json"] as DumpFormat[]).map((f) => (
                     <button
@@ -208,7 +213,11 @@ export function DumpWizard({ connectionId, database: initialDatabase = "", colle
               </div>
 
               <div className="field">
-                <label className="field__label">Compression</label>
+                <label className="field__label">Compression <InfoPopover label="Compression help" title="Compression">
+                <p><strong>Gzip</strong> balances speed and size.</p>
+                <p><strong>Zstd</strong> offers better compression but is slower.</p>
+                <p><strong>None</strong> is fastest but produces larger files.</p>
+              </InfoPopover></label>
                 <select
                   className="field__select"
                   value={compression}
@@ -221,7 +230,7 @@ export function DumpWizard({ connectionId, database: initialDatabase = "", colle
               </div>
 
               <div className="field">
-                <label className="field__label">Filename template</label>
+                <label className="field__label">Filename template <InfoPopover label="Filename template help" title="Filename template"><p>Use tokens to generate dynamic filenames: <code>{"${db}"}</code>, <code>{"${collection}"}</code>, <code>{"${date}"}</code>, <code>{"${time}"}</code>, <code>{"${profile}"}</code>.</p></InfoPopover></label>
                 <input
                   className="field__input"
                   value={pathTemplate}

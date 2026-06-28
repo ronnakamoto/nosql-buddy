@@ -4,6 +4,7 @@ import commands, {
   type VqbNode,
   type VqbTranslateRequest,
 } from "../ipc/commands";
+import { InfoPopover } from "../components/InfoPopover";
 
 const OPERATORS: { value: string; label: string }[] = [
   { value: "eq", label: "=" },
@@ -265,6 +266,11 @@ function GroupEditor({ node, path, onChange, level, datalistId, hasSchema }: Gro
           <option value="or">Match any (OR)</option>
           <option value="nor">Match none (NOR)</option>
         </select>
+        <InfoPopover label="Group combinator help" title="Group combinator">
+        <p><strong>AND</strong>: all conditions must match.</p>
+        <p><strong>OR</strong>: at least one condition must match.</p>
+        <p><strong>NOR</strong>: none of the conditions may match (inverse of OR).</p>
+      </InfoPopover>
         <span className="vqb__group-meta">{children.length} clause(s)</span>
       </div>
       <div className="vqb__children">

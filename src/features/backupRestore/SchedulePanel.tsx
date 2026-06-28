@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ScheduleConfig } from "../../ipc/commands";
+import { InfoPopover } from "../../components/InfoPopover";
 
 interface SchedulePanelProps {
   value: ScheduleConfig | null;
@@ -167,7 +168,7 @@ export function SchedulePanel({ value, onChange }: SchedulePanelProps) {
       {enabled && (
         <>
           <div className="field">
-            <label className="field__label">Frequency</label>
+            <label className="field__label">Frequency <InfoPopover label="Schedule frequency help" title="Schedule frequency"><p>Choose how often the job runs. Select "Custom cron" for advanced scheduling using cron syntax.</p></InfoPopover></label>
             <select
               className="field__select"
               value={customCron ? "__custom__" : frequency}
@@ -193,7 +194,7 @@ export function SchedulePanel({ value, onChange }: SchedulePanelProps) {
 
           {customCron && (
             <div className="field">
-              <label className="field__label">Cron expression</label>
+              <label className="field__label">Cron expression <InfoPopover label="Cron expression help" title="Cron expression"><p>Format: seconds minutes hours day month weekday. Example: <code>0 0 9 * * *</code> runs daily at 9:00 AM.</p></InfoPopover></label>
               <input
                 className="field__input"
                 value={customCron}
@@ -240,7 +241,7 @@ export function SchedulePanel({ value, onChange }: SchedulePanelProps) {
           )}
 
           <div className="field">
-            <label className="field__label">Retention</label>
+            <label className="field__label">Retention <InfoPopover label="Backup retention help" title="Backup retention"><p>Automatically deletes older backups beyond this count. Set to 1 to keep only the most recent backup. Higher values use more disk space.</p></InfoPopover></label>
             <div className="row" style={{ gap: 8, alignItems: "center" }}>
               <span>Keep last</span>
               <input

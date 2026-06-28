@@ -7,6 +7,7 @@ import type {
 } from "../ipc/commands";
 import { Alert, Badge, Button, StatusCard } from "./AuditUi";
 import { MerklePathViz } from "./MerklePathViz";
+import { InfoPopover } from "./InfoPopover";
 
 /**
  * AuditInvestigation — the forensic toolkit section.
@@ -48,7 +49,11 @@ function RootCompare({
   return (
     <div className="audit-root-compare">
       <div className="audit-root-compare__row">
-        <span className="audit-root-compare__label">Local root</span>
+        <span className="audit-root-compare__label">Local root<InfoPopover label="Help: Root comparison" title="Root comparison">
+            <p><strong>Local root</strong>: Merkle root computed from your current audit log.</p>
+            <p><strong>On-chain root</strong>: root previously committed to the blockchain.</p>
+            <p>A mismatch indicates tampering.</p>
+          </InfoPopover></span>
         <span className="audit-root-compare__hash" title={localRoot}>
           {shortHash(localRoot)}
         </span>

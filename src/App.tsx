@@ -12,6 +12,7 @@ import commands, {
 } from "./ipc/commands";
 import { onMenuAction } from "./ipc/events";
 import { ConnectionForm } from "./components/ConnectionForm";
+import { InfoPopover } from "./components/InfoPopover";
 import { CommandPalette, type CommandPaletteItem } from "./components/CommandPalette";
 import { QueryTab } from "./features/QueryTab";
 import { IndexTab } from "./features/IndexTab";
@@ -1073,6 +1074,11 @@ export default function App() {
                 }`}
               >
                 {active.handle.serverInfo?.topology ?? "unknown"}
+                <InfoPopover label="What is topology?" title="MongoDB topology">
+              <p><strong>Replica set</strong>: high availability with automatic failover.</p>
+              <p><strong>Sharded</strong>: distributes data across multiple servers for horizontal scaling.</p>
+              <p><strong>Single</strong>: a standalone MongoDB instance.</p>
+            </InfoPopover>
               </span>
             </>
           ) : error ? (

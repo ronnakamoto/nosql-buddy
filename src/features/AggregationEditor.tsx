@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import commands, { type DocumentPage, type ExplainResult } from "../ipc/commands";
 import { ResultsTable } from "../components/ResultsTable";
 import { ExplainTree } from "../components/ExplainTree";
+import { InfoPopover } from "../components/InfoPopover";
 import { DriverCodePanel } from "../components/DriverCodePanel";
 import type { Language } from "../components/driverCodeTypes";
 import { useToast } from "../context/ToastContext";
@@ -348,6 +349,7 @@ export function AggregationEditor({
         >
           Explain
         </button>
+        <InfoPopover label="Explain plan help" title="Explain plan"><p>Shows how MongoDB will execute your pipeline without running it. Reveals which indexes are used, execution stages, and performance characteristics. Use to optimize slow queries.</p></InfoPopover>
         <button
           className="btn btn--sm"
           onClick={clearAll}
@@ -377,6 +379,18 @@ export function AggregationEditor({
           >
             + Add stage
           </button>
+          <InfoPopover label="Aggregation stages help" title="Aggregation stages">
+          <ul>
+            <li><strong>$match</strong>: filter documents.</li>
+            <li><strong>$project</strong>: reshape output fields.</li>
+            <li><strong>$group</strong>: aggregate values.</li>
+            <li><strong>$sort</strong>: order results.</li>
+            <li><strong>$limit / $skip</strong>: paginate results.</li>
+            <li><strong>$lookup</strong>: join another collection.</li>
+            <li><strong>$unwind</strong>: flatten arrays into rows.</li>
+            <li><strong>$addFields</strong>: compute new fields.</li>
+          </ul>
+        </InfoPopover>
           {showTemplates && (
             <div className="agg-editor__templates">
               {STAGE_TEMPLATES.map((t) => (

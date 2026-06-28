@@ -15,6 +15,7 @@ import {
   TxHashLink,
 } from "./AuditUi";
 import type { HealthState } from "./AuditHeader";
+import { InfoPopover } from "./InfoPopover";
 
 /**
  * AuditStatusSection — the always-expanded operational summary.
@@ -225,19 +226,23 @@ export function AuditStatusSection({
       {/* Four status rows */}
       <div className="audit-status-grid">
         <div className="audit-status-row">
-          <span className="audit-status-row__label">Integrity</span>
+          <span className="audit-status-row__label">Integrity<InfoPopover label="Help: Audit integrity" title="Audit integrity">
+            <p>Compares the local audit log against the on-chain commitment.</p>
+            <p><strong>Verified</strong>: the log matches the blockchain record.</p>
+            <p><strong>Tamper detected</strong>: data was modified locally.</p>
+          </InfoPopover></span>
           {integrityContent}
         </div>
         <div className="audit-status-row">
-          <span className="audit-status-row__label">Capture</span>
+          <span className="audit-status-row__label">Capture<InfoPopover label="Help: Event capture" title="Event capture"><p>Real-time monitoring of MongoDB insert, update, and delete operations via change streams. Events are cryptographically recorded into the audit log.</p></InfoPopover></span>
           {captureContent}
         </div>
         <div className="audit-status-row">
-          <span className="audit-status-row__label">Batch</span>
+          <span className="audit-status-row__label">Batch<InfoPopover label="Help: Audit batches" title="Audit batches"><p>Events are grouped into batches (epochs). Once a batch reaches its event threshold, it is sealed and committed to the blockchain for permanent verification.</p></InfoPopover></span>
           {batchContent}
         </div>
         <div className="audit-status-row">
-          <span className="audit-status-row__label">On-chain</span>
+          <span className="audit-status-row__label">On-chain<InfoPopover label="Help: On-chain anchoring" title="On-chain anchoring"><p>Sealed batch fingerprints are anchored to the Stellar blockchain. This creates an immutable, timestamped record that can be independently verified.</p></InfoPopover></span>
           {onchainContent}
         </div>
       </div>
@@ -252,31 +257,38 @@ export function AuditStatusSection({
         >
           Verify Integrity
         </Button>
+        <InfoPopover label="Help: Verify integrity" title="Verify integrity"><p>Recomputes the audit log Merkle root and compares it against the on-chain commitment. Run this to detect if local data was tampered with.</p></InfoPopover>
 
         {/* Only show Seal if not already sealed */}
         {!epochClosed && (
-          <Button
-            variant="secondary"
-            loading={closeEpochLoading}
-            disabled={!canCloseEpoch}
-            onClick={onCloseEpoch}
-            title={closeEpochDisabledReason ?? "Seal the current batch so it can be committed"}
-          >
-            Seal Batch
-          </Button>
+          <>
+            <Button
+              variant="secondary"
+              loading={closeEpochLoading}
+              disabled={!canCloseEpoch}
+              onClick={onCloseEpoch}
+              title={closeEpochDisabledReason ?? "Seal the current batch so it can be committed"}
+            >
+              Seal Batch
+            </Button>
+            <InfoPopover label="Help: Seal batch" title="Seal batch"><p>Freezes the current batch of events and computes its cryptographic fingerprint (Merkle root). Sealed batches can no longer accept new events.</p></InfoPopover>
+          </>
         )}
 
         {/* Only show Commit if there's a sealed batch waiting */}
         {lastClosedEpoch && (
-          <Button
-            variant="primary"
-            loading={commitLoading}
-            disabled={!canCommit}
-            onClick={onCommit}
-            title={commitDisabledReason ?? `Commit batch #${lastClosedEpoch.epochNumber} to Stellar`}
-          >
-            {commitLoading ? "Committing…" : `Commit Batch #${lastClosedEpoch.epochNumber}`}
-          </Button>
+          <>
+            <Button
+              variant="primary"
+              loading={commitLoading}
+              disabled={!canCommit}
+              onClick={onCommit}
+              title={commitDisabledReason ?? `Commit batch #${lastClosedEpoch.epochNumber} to Stellar`}
+            >
+              {commitLoading ? "Committing…" : `Commit Batch #${lastClosedEpoch.epochNumber}`}
+            </Button>
+            <InfoPopover label="Help: Commit to blockchain" title="Commit to blockchain"><p>Publishes the sealed batch fingerprint to IPFS and anchors it on the Stellar blockchain. This creates a permanent, verifiable record.</p></InfoPopover>
+          </>
         )}
       </div>
 

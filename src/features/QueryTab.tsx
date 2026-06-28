@@ -22,6 +22,7 @@ import "prismjs/components/prism-csharp";
 import "prismjs/components/prism-ruby";
 import "prismjs/components/prism-bash";
 import { HighlightedTextarea } from "../components/HighlightedTextarea";
+import { InfoPopover } from "../components/InfoPopover";
 import { Alert } from "../components/Alert";
 import { useToast } from "../context/ToastContext";
 
@@ -182,7 +183,7 @@ function PagingBar({
   return (
     <div className="paging-bar" role="navigation" aria-label="Result paging">
       <label className="paging-bar__size" title="Rows per page (re-runs from page 1)">
-        <span>Page size</span>
+        <span>Page size <InfoPopover label="Page size help" title="Page size"><p>Number of documents to load per page. Larger sizes load more data at once but use more memory. Changing this re-runs the query from page 1.</p></InfoPopover></span>
         <select
           value={pageSize}
           onChange={(e) => onPageSize(Number(e.target.value))}
@@ -1076,7 +1077,7 @@ export function QueryTab({
               </div>
               <div>
                 <div className="editor__toolbar">
-                  <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>Projection</span>
+                  <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>Projection <InfoPopover label="Projection help" title="Projection"><p>Specify which fields to return. Use <code>{'{ field: 1 }'}</code> to include fields or <code>{'{ field: 0 }'}</code> to exclude them. Leave empty to return all fields.</p></InfoPopover></span>
                   <span className="kbd">{`{ field: 1 }`}</span>
                 </div>
                 <textarea
@@ -1089,7 +1090,7 @@ export function QueryTab({
               </div>
               <div>
                 <div className="editor__toolbar">
-                  <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>Sort</span>
+                  <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>Sort <InfoPopover label="Sort help" title="Sort"><p>Sort results by one or more fields. Use <code>{'{ field: 1 }'}</code> for ascending or <code>{'{ field: -1 }'}</code> for descending.</p></InfoPopover></span>
                   <span className="kbd">{`{ field: 1 }`}</span>
                 </div>
                 <textarea

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { HelpCircle } from "lucide-react";
 
 export interface InfoPopoverProps {
@@ -11,6 +11,9 @@ export interface InfoPopoverProps {
  * A small click-to-open help popover anchored to a help-icon button. Renders
  * with `position: fixed` so it escapes `overflow` clipping in dense toolbars,
  * matching the placement strategy used by `DatabaseRowMenu` and `NewTabMenu`.
+ *
+ * Boundary detection: if the popover would overflow the viewport bottom or right,
+ * it is flipped above the trigger or shifted left so it stays fully visible.
  */
 export function InfoPopover({ label, title, children }: InfoPopoverProps) {
   const [open, setOpen] = useState(false);
@@ -35,6 +38,48 @@ export function InfoPopover({ label, title, children }: InfoPopoverProps) {
       setPos({ top, left: r.left, right: null });
     }
   }, []);
+
+  // After the popover renders, measure its actual dimensions and flip/shift
+  // if it would overflow the viewport.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const raf = requestAnimationFrame(() => {
+      const btn = triggerRef.current;
+      const popover = popoverRef.current;
+      if (!btn || !popover) return;
+
+      const pRect = popover.getBoundingClientRect();
+      const bRect = btn.getBoundingClientRect();
+      const gap = 6;
+      const margin = 8;
+      const viewportW = window.innerWidth;
+      const viewportH = window.innerHeight;
+
+      let top = pRect.top;
+      let left: number | null = pos.left ?? null;
+      let right: number | null = pos.right ?? null;
+
+      // Flip vertically if below viewport
+      if (pRect.bottom > viewportH - margin) {
+        top = bRect.top - pRect.height - gap;
+        // Safety: if flipped above is off-screen, clamp to top margin
+        top = Math.max(margin, top);
+      }
+
+      // Flip horizontally if right of viewport
+      if (pRect.right > viewportW - margin) {
+        right = margin;
+        left = null;
+      }
+      // Shift right if left is off-screen
+      if (pRect.left < margin && left !== null) {
+        left = margin;
+      }
+
+      setPos({ top, left, right });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [open, pos.left, pos.right]);
 
   useEffect(() => {
     if (!open) return;

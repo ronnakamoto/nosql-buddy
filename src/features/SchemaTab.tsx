@@ -9,6 +9,7 @@ import {
   RatioBar,
   TopValuesChart,
 } from "../components/SchemaCharts";
+import { InfoPopover } from "../components/InfoPopover";
 
 export interface SchemaTabProps {
   connectionId: string;
@@ -53,6 +54,11 @@ export function SchemaTab({ connectionId, database, collection }: SchemaTabProps
         <h2 className="pane__title">Schema — {database}.{collection}</h2>
         <div className="pane__sub">
           {report ? `${report.sampledDocuments} sampled · ${report.fields.length} fields` : "Sampling…"}
+          {report && (
+            <InfoPopover label="Sampled documents" title="Sampled documents">
+              <p>Schema analysis is based on a random sample of documents, not the full collection. Large collections are sampled for performance.</p>
+            </InfoPopover>
+          )}
         </div>
       </div>
       <div className="pane__body" style={{ padding: 16 }}>
@@ -137,11 +143,17 @@ function SchemaFieldRow({
             {field.missingCount > 0 && (
               <span className="schema-field__missing" title={`${field.missingCount} docs missing this field`}>
                 {field.missingCount} missing
+                <InfoPopover label="Missing field" title="Missing field">
+                  <p>Number of documents where this field does not exist at all. This is different from null, where the field exists but has no value.</p>
+                </InfoPopover>
               </span>
             )}
             {(field.nullRatio > 0 || field.missingCount > 0) && " · "}
             <span title={`${nullCount} null values`}>
               {(field.nullRatio * 100).toFixed(1)}% null
+              <InfoPopover label="Null ratio" title="Null ratio">
+                <p>Percentage of sampled documents where this field exists but has a null value. Excludes documents where the field is missing entirely.</p>
+              </InfoPopover>
             </span>
           </span>
         </span>
@@ -150,7 +162,7 @@ function SchemaFieldRow({
         <div className="schema-field__detail">
           {field.topValues && (
             <div className="schema-field__section">
-              <h4 className="schema-field__section-title">Top values</h4>
+              <h4 className="schema-field__section-title">Top values<InfoPopover label="Top values" title="Top values"><p>The most frequently occurring values for this field in the sample, with their counts. Useful for understanding data distribution and cardinality.</p></InfoPopover></h4>
               <TopValuesChart values={field.topValues} />
             </div>
           )}
@@ -158,6 +170,7 @@ function SchemaFieldRow({
             <div className="schema-field__section">
               <h4 className="schema-field__section-title">
                 Numeric distribution
+                <InfoPopover label="Numeric distribution" title="Numeric distribution"><p>Statistical summary (min, mean, max) and histogram showing how numeric values are distributed across ranges.</p></InfoPopover>
               </h4>
               <NumericStatLine stats={field.numericStats} />
               <NumericHistogramChart stats={field.numericStats} />
@@ -165,7 +178,7 @@ function SchemaFieldRow({
           )}
           {field.dateStats && (
             <div className="schema-field__section">
-              <h4 className="schema-field__section-title">Date distribution</h4>
+              <h4 className="schema-field__section-title">Date distribution<InfoPopover label="Date distribution" title="Date distribution"><p>Date range and histogram showing how dates are distributed over time. Useful for identifying time-based patterns.</p></InfoPopover></h4>
               <DateStatLine stats={field.dateStats} />
               <DateHistogramChart stats={field.dateStats} />
             </div>

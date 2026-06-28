@@ -1,6 +1,7 @@
 import { useState } from "react";
 import commands, { type SaveProfileRequest, type TestResult } from "../ipc/commands";
 import { Modal } from "./Modal";
+import { InfoPopover } from "./InfoPopover";
 import { useToast } from "../context/ToastContext";
 
 export interface ConnectionFormProps {
@@ -123,7 +124,7 @@ export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFo
       </div>
       <div className="field">
         <label className="field__label" htmlFor="conn-uri">
-          Connection URI
+          Connection URI <InfoPopover label="What is a connection URI?" title="MongoDB connection URI"><p>A standard MongoDB connection string. Include host, port, credentials, and optional parameters like <code>retryWrites=true</code> or <code>directConnection=true</code>.</p></InfoPopover>
         </label>
         <input
           id="conn-uri"
@@ -141,7 +142,16 @@ export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFo
       </div>
       <div className="field">
         <label className="field__label" htmlFor="conn-auth">
-          Authentication
+          Authentication <InfoPopover label="What is authentication?" title="Authentication mechanism">
+            <p>Choose how MongoDB validates your identity.</p>
+            <ul>
+              <li><strong>SCRAM-SHA-256</strong>: modern default for username and password.</li>
+              <li><strong>x.509</strong>: certificate-based authentication.</li>
+              <li><strong>LDAP</strong>: enterprise directory integration.</li>
+              <li><strong>Kerberos</strong>: Active Directory integration.</li>
+              <li><strong>AWS IAM</strong>: MongoDB Atlas IAM roles.</li>
+            </ul>
+          </InfoPopover>
         </label>
         <select
           id="conn-auth"
@@ -176,7 +186,7 @@ export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFo
       )}
       <div className="field">
         <label className="field__label" htmlFor="conn-group">
-          Group
+          Group <InfoPopover label="What is a connection group?" title="Connection group"><p>Organize related connections (e.g. Production, Staging, Local). Groups appear as collapsible sections in the connection switcher.</p></InfoPopover>
         </label>
         <input
           id="conn-group"

@@ -17,6 +17,7 @@ import {
   KeyValue,
 } from "./AuditUi";
 import { useToast } from "../context/ToastContext";
+import { InfoPopover } from "./InfoPopover";
 
 /**
  * Redesigned audit settings.
@@ -265,7 +266,7 @@ export function AuditSettings({
       {/* ─── Production config ────────────────────────────────────── */}
       <Card>
         <CardHeader title="Production Network" subtitle="Testnet or Mainnet — the double check" />
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-2)", marginBottom: "var(--space-3)" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: "var(--space-2)", marginBottom: "var(--space-3)", alignItems: "center" }}>
           <ModeToggle
             active={network === "testnet"}
             label="Testnet"
@@ -278,13 +279,17 @@ export function AuditSettings({
             hint="Your contract + RPC"
             onClick={() => setNetwork("mainnet")}
           />
+          <InfoPopover label="Help: Stellar network" title="Stellar network">
+          <p><strong>Testnet</strong>: free test network for development.</p>
+          <p><strong>Mainnet</strong>: production network with real transactions and fees.</p>
+        </InfoPopover>
         </div>
 
         {network === "mainnet" && (
           <div style={{ marginBottom: "var(--space-3)" }}>
-            <FieldLabel>Contract ID</FieldLabel>
+            <FieldLabel>Contract ID<InfoPopover label="Help: Stellar contract ID" title="Stellar contract ID"><p>The Soroban smart contract address on Stellar that stores audit roots. Required for mainnet.</p></InfoPopover></FieldLabel>
             <input value={contractId} onChange={(e) => setContractId(e.target.value)} placeholder="C..." style={inputStyle} />
-            <FieldLabel style={{ marginTop: "var(--space-2)" }}>RPC URL</FieldLabel>
+            <FieldLabel style={{ marginTop: "var(--space-2)" }}>RPC URL<InfoPopover label="Help: Stellar RPC URL" title="Stellar RPC URL"><p>Endpoint for communicating with the Stellar network. Default is the public Stellar RPC.</p></InfoPopover></FieldLabel>
             <input value={rpcUrl} onChange={(e) => setRpcUrl(e.target.value)} style={inputStyle} />
             <div style={{ marginTop: "var(--space-2)" }}>
               <Alert tone="warning">Mainnet commits spend real XLM. Ensure your account is funded.</Alert>
@@ -296,7 +301,7 @@ export function AuditSettings({
 
         {/* Keypair */}
         <div style={{ marginTop: "var(--space-4)", paddingTop: "var(--space-3)", borderTop: "1px solid var(--border)" }}>
-          <FieldLabel>Production Keypair</FieldLabel>
+          <FieldLabel>Production Keypair<InfoPopover label="Help: Stellar secret key" title="Stellar secret key"><p>Your Stellar account secret key used to sign on-chain commitment transactions. Stored securely in your OS keychain. Never share this key.</p></InfoPopover></FieldLabel>
           {accountId ? (
             <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", flexWrap: "wrap" }}>
               <Badge tone="success" dot>Saved</Badge>
@@ -335,7 +340,7 @@ export function AuditSettings({
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-2)" }}>
-            <FieldLabel>API Key</FieldLabel>
+            <FieldLabel>API Key<InfoPopover label="Help: Pinata credentials" title="Pinata credentials"><p>Pinata is an IPFS pinning service. Credentials are required to store audit batches permanently on IPFS.</p></InfoPopover></FieldLabel>
             <input value={pinataKey} onChange={(e) => setPinataKey(e.target.value)} placeholder="Pinata API key" style={inputStyle} />
             <FieldLabel>API Secret</FieldLabel>
             <input value={pinataSecret} onChange={(e) => setPinataSecret(e.target.value)} placeholder="Pinata API secret" type="password" style={inputStyle} />

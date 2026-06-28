@@ -14,6 +14,7 @@ import commands, {
 } from "../../ipc/commands";
 import { onImportExportProgress } from "../../ipc/events";
 import { Alert } from "../../components/Alert";
+import { InfoPopover } from "../../components/InfoPopover";
 import { useToast } from "../../context/ToastContext";
 import {
   FieldMappingTable,
@@ -399,7 +400,11 @@ export function ImportWizard({
 
           {format === "json" ? (
             <div className="field">
-              <span className="field__label">JSON shape</span>
+              <span className="field__label">JSON shape <InfoPopover label="JSON shape help" title="JSON shape">
+                <p><strong>Array</strong>: single JSON array with all documents.</p>
+                <p><strong>NDJSON</strong>: one JSON object per line.</p>
+                <p>NDJSON is better for large files and streaming.</p>
+              </InfoPopover></span>
               <div className="row" style={{ gap: "var(--space-2)", flexWrap: "wrap" }}>
                 {(["object", "array", "ndjson"] as JsonImportShape[]).map((shape) => (
                   <button
@@ -422,7 +427,7 @@ export function ImportWizard({
             <>
               <div className="row" style={{ gap: "var(--space-4)", alignItems: "end" }}>
                 <div className="field">
-                  <span className="field__label">Delimiter</span>
+                  <span className="field__label">Delimiter <InfoPopover label="CSV delimiter help" title="CSV delimiter"><p>Character separating CSV fields. Default is comma. Use semicolon for European CSV formats.</p></InfoPopover></span>
                   <input
                     className="field__input"
                     value={csvDelimiter}
@@ -440,13 +445,14 @@ export function ImportWizard({
                     disabled={phase === "running"}
                   />
                   <span style={{ fontSize: 13 }}>First row has headers</span>
+                  <InfoPopover label="CSV headers help" title="CSV headers"><p>Check if the first row contains field names. When checked, the first row maps fields to MongoDB document keys.</p></InfoPopover>
                 </label>
               </div>
             </>
           )}
 
           <div className="field">
-            <span className="field__label">Batch size</span>
+            <span className="field__label">Batch size <InfoPopover label="Import batch size help" title="Import batch size"><p>Number of documents inserted per database operation. Larger batches are faster but use more memory. Default 1000 works well for most cases.</p></InfoPopover></span>
             <input
               className="field__input"
               type="number"

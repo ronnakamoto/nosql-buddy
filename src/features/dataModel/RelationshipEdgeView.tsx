@@ -5,6 +5,7 @@ import {
   type EdgeProps,
 } from "@xyflow/react";
 import type { RelationshipEdge } from "../../ipc/commands";
+import { InfoPopover } from "../../components/InfoPopover";
 
 export interface RelationshipEdgeData {
   edge: RelationshipEdge;
@@ -59,6 +60,12 @@ export function RelationshipEdgeView({
           }}
         >
           {kindLabel(edge.kind)}
+          <InfoPopover label="Relationship cardinality" title="Relationship cardinality">
+            <p><strong>1:1</strong> one-to-one.</p>
+            <p><strong>1:N</strong> one-to-many.</p>
+            <p><strong>N:1</strong> many-to-one.</p>
+            <p><strong>N:N</strong> many-to-many via a join collection.</p>
+          </InfoPopover>
         </div>
       </EdgeLabelRenderer>
     </>

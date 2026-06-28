@@ -8,7 +8,7 @@ import commands, {
 import { useToast } from "../../context/ToastContext";
 import { ShapeTreeView } from "./ShapeTreeView";
 import { DiagramCanvas } from "./DiagramCanvas";
-import { InfoPopover } from "./InfoPopover";
+import { InfoPopover } from "../../components/InfoPopover";
 
 export interface DataModelTabProps {
   connectionId: string;
@@ -184,6 +184,11 @@ export function DataModelTab({ connectionId, database }: DataModelTabProps) {
               <LayoutGrid size={14} /> Shape
             </button>
           </div>
+          <InfoPopover label="View modes" title="View modes">
+            <p><strong>Diagram</strong>: visual node graph of collections and relationships.</p>
+            <p><strong>Relationships</strong>: tabular list of all detected links with confidence scores.</p>
+            <p><strong>Shape</strong>: detailed field-by-field schema for a single collection.</p>
+          </InfoPopover>
           <span className="shape-toolbar__hint">
             {selected.size} selected · {collections?.length ?? 0} total collections
           </span>

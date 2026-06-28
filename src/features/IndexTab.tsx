@@ -6,6 +6,7 @@ import commands, {
   type IndexStats,
 } from "../ipc/commands";
 import { Modal } from "../components/Modal";
+import { InfoPopover } from "../components/InfoPopover";
 import { useToast } from "../context/ToastContext";
 
 export interface IndexTabProps {
@@ -691,6 +692,14 @@ function IndexForm({ draft, setDraft, editing }: IndexFormProps) {
                   </option>
                 ))}
               </select>
+              <InfoPopover label="Index field type" title="Index field type">
+                      <ul>
+                        <li><strong>asc / desc</strong>: standard sorting</li>
+                        <li><strong>text</strong>: full-text search</li>
+                        <li><strong>2dsphere / 2d</strong>: geospatial queries</li>
+                        <li><strong>hashed</strong>: hashed sharding key</li>
+                      </ul>
+                    </InfoPopover>
               <button
                 className="btn btn--sm btn--ghost key-builder__remove"
                 onClick={() => removeField(f.key)}
@@ -716,7 +725,7 @@ function IndexForm({ draft, setDraft, editing }: IndexFormProps) {
               setDraft((prev) => ({ ...prev, unique: e.target.checked }))
             }
           />
-          unique
+          unique <InfoPopover label="Unique index" title="Unique index"><p>Ensures no two documents have the same value for the indexed field(s). MongoDB will reject inserts or updates that would create duplicates.</p></InfoPopover>
         </label>
         <label className="field__checkbox">
           <input
@@ -726,7 +735,7 @@ function IndexForm({ draft, setDraft, editing }: IndexFormProps) {
               setDraft((prev) => ({ ...prev, sparse: e.target.checked }))
             }
           />
-          sparse
+          sparse <InfoPopover label="Sparse index" title="Sparse index"><p>Only indexes documents that have the indexed field. Documents missing the field are excluded from the index, saving space for optional fields.</p></InfoPopover>
         </label>
         <label className="field__checkbox">
           <input
@@ -736,10 +745,10 @@ function IndexForm({ draft, setDraft, editing }: IndexFormProps) {
               setDraft((prev) => ({ ...prev, hidden: e.target.checked }))
             }
           />
-          hidden
+          hidden <InfoPopover label="Hidden index" title="Hidden index"><p>The index exists but is not used by the query planner. Useful for testing whether an index is needed before dropping it.</p></InfoPopover>
         </label>
         <label className="field">
-          <span className="field__label">TTL (seconds)</span>
+          <span className="field__label">TTL (seconds)<InfoPopover label="Time-to-live index" title="Time-to-live index"><p>Automatically removes documents after a specified number of seconds. Requires a date field in the index.</p></InfoPopover></span>
           <input
             className="field__input"
             type="number"
@@ -754,7 +763,7 @@ function IndexForm({ draft, setDraft, editing }: IndexFormProps) {
       </div>
 
       <label className="field">
-        <span className="field__label">Partial filter expression (JSON, optional)</span>
+        <span className="field__label">Partial filter expression (JSON, optional)<InfoPopover label="Partial filter expression" title="Partial filter expression"><p>Index only documents matching this query filter. Reduces index size by excluding documents you don't need to query.</p></InfoPopover></span>
         <textarea
           className="field__input index-form__textarea"
           value={draft.partialFilterExpression}
@@ -768,7 +777,7 @@ function IndexForm({ draft, setDraft, editing }: IndexFormProps) {
       </label>
 
       <label className="field">
-        <span className="field__label">Wildcard projection (JSON, optional)</span>
+        <span className="field__label">Wildcard projection (JSON, optional)<InfoPopover label="Wildcard projection" title="Wildcard projection"><p>For wildcard indexes, restricts which fields are included. Use <code>{'{ "field": 1 }'}</code> to include or <code>{'{ "field": 0 }'}</code> to exclude specific fields.</p></InfoPopover></span>
         <textarea
           className="field__input index-form__textarea"
           value={draft.wildcardProjection}
@@ -797,7 +806,7 @@ function IndexForm({ draft, setDraft, editing }: IndexFormProps) {
             />
           </label>
           <label className="field">
-            <span className="field__label">Strength</span>
+            <span className="field__label">Strength<InfoPopover label="Collation strength" title="Collation strength"><p>Determines how strictly strings are compared. Level 1 ignores accents and case. Level 3 is the default (case and accent sensitive). Level 5 requires exact character-by-character match.</p></InfoPopover></span>
             <select
               className="field__input"
               value={draft.collationStrength}
@@ -811,7 +820,7 @@ function IndexForm({ draft, setDraft, editing }: IndexFormProps) {
             </select>
           </label>
           <label className="field">
-            <span className="field__label">Case first</span>
+            <span className="field__label">Case first<InfoPopover label="Case first" title="Case first"><p>Controls whether uppercase or lowercase letters sort first. "off" uses the default for the locale.</p></InfoPopover></span>
             <select
               className="field__input"
               value={draft.collationCaseFirst}
@@ -827,7 +836,7 @@ function IndexForm({ draft, setDraft, editing }: IndexFormProps) {
         </div>
         <div className="index-form__row">
           <label className="field">
-            <span className="field__label">Alternate</span>
+            <span className="field__label">Alternate<InfoPopover label="Alternate" title="Alternate"><p>Determines how punctuation and spaces are handled. "non-ignorable" treats them as distinct characters. "shifted" ignores them in comparisons.</p></InfoPopover></span>
             <select
               className="field__input"
               value={draft.collationAlternate}
@@ -841,7 +850,7 @@ function IndexForm({ draft, setDraft, editing }: IndexFormProps) {
             </select>
           </label>
           <label className="field">
-            <span className="field__label">Max variable</span>
+            <span className="field__label">Max variable<InfoPopover label="Max variable" title="Max variable"><p>When "alternate" is "shifted", controls which characters are ignored. "punct" ignores punctuation and spaces. "space" ignores only spaces.</p></InfoPopover></span>
             <select
               className="field__input"
               value={draft.collationMaxVariable}
@@ -864,7 +873,7 @@ function IndexForm({ draft, setDraft, editing }: IndexFormProps) {
                 setDraft((prev) => ({ ...prev, collationCaseLevel: e.target.checked }))
               }
             />
-            case level
+            case level <InfoPopover label="Case level" title="Case level"><p>Forces case-sensitive comparison even when strength is set to ignore case. Useful for accent-insensitive but case-sensitive sorting.</p></InfoPopover>
           </label>
           <label className="field__checkbox">
             <input
@@ -874,7 +883,7 @@ function IndexForm({ draft, setDraft, editing }: IndexFormProps) {
                 setDraft((prev) => ({ ...prev, collationNumericOrdering: e.target.checked }))
               }
             />
-            numeric ordering
+            numeric ordering <InfoPopover label="Numeric ordering" title="Numeric ordering"><p>Sorts numbers as numeric values rather than strings. Without this, "10" sorts before "2" because string comparison is character-by-character.</p></InfoPopover>
           </label>
           <label className="field__checkbox">
             <input
@@ -884,7 +893,7 @@ function IndexForm({ draft, setDraft, editing }: IndexFormProps) {
                 setDraft((prev) => ({ ...prev, collationNormalization: e.target.checked }))
               }
             />
-            normalization
+            normalization <InfoPopover label="Normalization" title="Normalization"><p>Normalizes Unicode text before comparison. Check if your data may contain equivalent characters in different Unicode forms.</p></InfoPopover>
           </label>
           <label className="field__checkbox">
             <input
@@ -894,7 +903,7 @@ function IndexForm({ draft, setDraft, editing }: IndexFormProps) {
                 setDraft((prev) => ({ ...prev, collationBackwards: e.target.checked }))
               }
             />
-            backwards
+            backwards <InfoPopover label="Backwards" title="Backwards"><p>Enables accent-insensitive comparison for right-to-left languages like Hebrew or Arabic. Leave unchecked for most use cases.</p></InfoPopover>
           </label>
         </div>
       </fieldset>

@@ -5,6 +5,7 @@ import { Alert } from "../../components/Alert";
 import { Modal } from "../../components/Modal";
 import { useToast } from "../../context/ToastContext";
 import { CollectionMappingTable } from "./CollectionMappingTable";
+import { InfoPopover } from "../../components/InfoPopover";
 
 export interface RestoreWizardProps {
   connectionId: string;
@@ -178,7 +179,11 @@ export function RestoreWizard({ connectionId, onClose, onRestored }: RestoreWiza
         {phase === "preview" && (
           <>
             <div className="field">
-              <label className="field__label">Conflict strategy</label>
+              <label className="field__label">Conflict strategy <InfoPopover label="Conflict strategy help" title="Conflict strategy">
+              <p><strong>Drop</strong>: deletes existing collections before restoring.</p>
+              <p><strong>Skip</strong>: keeps existing data, only restores missing collections.</p>
+              <p><strong>Upsert</strong>: merges data by updating existing and inserting new documents.</p>
+            </InfoPopover></label>
               <select
                 className="field__select"
                 value={conflictStrategy}

@@ -14,6 +14,7 @@ import commands, {
 } from "../../ipc/commands";
 import { onImportExportProgress } from "../../ipc/events";
 import { Alert } from "../../components/Alert";
+import { InfoPopover } from "../../components/InfoPopover";
 import { useToast } from "../../context/ToastContext";
 import { SchedulePanel } from "../backupRestore/SchedulePanel";
 import type { ScheduleConfig } from "../../ipc/commands";
@@ -606,6 +607,7 @@ export function ExportWizard({
                 <span style={{ fontSize: 13 }}>
                   Canonical Extended JSON (exact BSON types, more verbose)
                 </span>
+                <InfoPopover label="Canonical JSON help" title="Canonical JSON"><p>Outputs JSON in a standardized format with consistent key ordering and whitespace. Useful for hashing, diffing, or when exact format matters.</p></InfoPopover>
               </label>
             </>
           )}

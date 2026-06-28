@@ -7,6 +7,7 @@ import {
   NumericStatLine,
   TopValuesChart,
 } from "../../components/SchemaCharts";
+import { InfoPopover } from "../../components/InfoPopover";
 
 export interface ShapeTreeViewProps {
   shape: CollectionShape;
@@ -119,15 +120,17 @@ function ShapeNodeRow({
           {node.presence < 1 && (
             <span className="shape-node__presence" title="Fraction of documents where this path exists">
               {(node.presence * 100).toFixed(0)}% present
+              <InfoPopover label="Field presence" title="Field presence"><p>Percentage of sampled documents that contain this field. Less than 100% indicates an optional field.</p></InfoPopover>
             </span>
           )}
           {node.nullRatio > 0 && (
             <span className="shape-node__null" title="Fraction of documents with an explicit null">
               · {(node.nullRatio * 100).toFixed(1)}% null
+              <InfoPopover label="Null ratio" title="Null ratio"><p>Percentage of documents where this field explicitly has the value null, different from missing entirely.</p></InfoPopover>
             </span>
           )}
           {node.cardinality != null && (
-            <span className="shape-node__cardinality">· {node.cardinality} distinct</span>
+            <span className="shape-node__cardinality">· {node.cardinality} distinct<InfoPopover label="Cardinality" title="Cardinality"><p>Number of unique values for this field. Low cardinality suggests an enum-like field. High cardinality suggests IDs or free-form text.</p></InfoPopover></span>
           )}
           {hasArrayItem && <span className="shape-node__array">· array</span>}
         </span>
