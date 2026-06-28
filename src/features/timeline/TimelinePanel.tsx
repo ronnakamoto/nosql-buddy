@@ -71,6 +71,7 @@ function kindBadgeClass(kind: OperationKind): string {
     case "indexDrop":
     case "collectionCreate":
     case "collectionDrop":
+    case "collectionRename":
       return "timeline-badge--schema";
     default:
       return "timeline-badge--default";

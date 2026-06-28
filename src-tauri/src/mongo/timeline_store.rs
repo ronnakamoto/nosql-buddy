@@ -34,6 +34,7 @@ pub enum OperationKind {
     IndexDrop,
     CollectionCreate,
     CollectionDrop,
+    CollectionRename,
 
     // Bulk operations
     Import,
@@ -424,17 +425,31 @@ impl TimelineStore {
 
     /// Append a new entry and persist.
     pub async fn append(&self, entry: TimelineEntry) {
-        let mut entries = self.entries.write().await;
-        let idx = entries.len();
-        entries.push(entry.clone());
-        drop(entries);
+        self.append_batch(vec![entry]).await;
+    }
+
+    /// Append multiple entries in one write for bulk operations.
+    /// This avoids O(n²) rewrites when recording many entries at once.
+    pub async fn append_batch(&self, entries: Vec<TimelineEntry>) {
+        if entries.is_empty() {
+            return;
+        }
+
+        let mut entries_guard = self.entries.write().await;
+        let start_idx = entries_guard.len();
+        for entry in &entries {
+            entries_guard.push(entry.clone());
+        }
+        drop(entries_guard);
 
         // Update index.
         let mut index = self.index.write().await;
-        index
-            .entry(entry.profile_id.clone())
-            .or_default()
-            .push(idx);
+        for (offset, entry) in entries.iter().enumerate() {
+            index
+                .entry(entry.profile_id.clone())
+                .or_default()
+                .push(start_idx + offset);
+        }
         drop(index);
 
         self.save().await;
@@ -634,6 +649,35 @@ mod tests {
 
         assert!(store.delete("e1").await);
         assert!(store.get("e1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn append_batch_adds_multiple_entries_and_updates_index() {
+        let store = TimelineStore::new();
+        let entries = vec![
+            sample_entry("e1", "p1", OperationKind::Find, "db1", "col1"),
+            sample_entry("e2", "p1", OperationKind::UpdateMany, "db1", "col2"),
+            sample_entry("e3", "p2", OperationKind::Find, "db2", "col1"),
+        ];
+        store.append_batch(entries).await;
+
+        let all = store.list(TimelineFilter::default()).await;
+        assert_eq!(all.len(), 3);
+        // Newest first by created_at.
+        assert_eq!(all[0].id, "e3");
+
+        let p1 = store.list(TimelineFilter {
+            profile_id: Some("p1".into()),
+            ..Default::default()
+        }).await;
+        assert_eq!(p1.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn append_batch_empty_is_noop() {
+        let store = TimelineStore::new();
+        store.append_batch(vec![]).await;
+        assert_eq!(store.len().await, 0);
     }
 
     #[tokio::test]

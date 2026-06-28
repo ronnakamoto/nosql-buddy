@@ -105,21 +105,20 @@ pub async fn record_aggregate(
 }
 
 /// Record an insert operation to the timeline.
+///
+/// The caller must supply the exact kind (`InsertOne` or `InsertMany`); the
+/// count alone is ambiguous because `insertMany` with one document is still
+/// `insertMany`.
 pub async fn record_insert(
     store: &TimelineStore,
     ctx: &RecordContext,
+    kind: OperationKind,
     document_json: &str,
     inserted_count: u64,
     execution_ms: u64,
     errored: bool,
     error_message: Option<String>,
 ) {
-    let kind = if inserted_count > 1 {
-        OperationKind::InsertMany
-    } else {
-        OperationKind::InsertOne
-    };
-
     let entry = TimelineEntry::builder(
         uuid::Uuid::new_v4().to_string(),
         ctx.profile_id.clone(),
@@ -142,9 +141,13 @@ pub async fn record_insert(
 }
 
 /// Record an update operation to the timeline.
+///
+/// The caller must supply the exact kind (`UpdateOne`, `UpdateMany`, or
+/// `ReplaceOne`) because the matched count does not reliably distinguish them.
 pub async fn record_update(
     store: &TimelineStore,
     ctx: &RecordContext,
+    kind: OperationKind,
     filter_json: &str,
     update_json: &str,
     matched_count: u64,
@@ -153,12 +156,6 @@ pub async fn record_update(
     errored: bool,
     error_message: Option<String>,
 ) {
-    let kind = if matched_count > 1 {
-        OperationKind::UpdateMany
-    } else {
-        OperationKind::UpdateOne
-    };
-
     let entry = TimelineEntry::builder(
         uuid::Uuid::new_v4().to_string(),
         ctx.profile_id.clone(),
@@ -183,21 +180,18 @@ pub async fn record_update(
 }
 
 /// Record a delete operation to the timeline.
+///
+/// The caller must supply the exact kind (`DeleteOne` or `DeleteMany`).
 pub async fn record_delete(
     store: &TimelineStore,
     ctx: &RecordContext,
+    kind: OperationKind,
     filter_json: &str,
     deleted_count: u64,
     execution_ms: u64,
     errored: bool,
     error_message: Option<String>,
 ) {
-    let kind = if deleted_count > 1 {
-        OperationKind::DeleteMany
-    } else {
-        OperationKind::DeleteOne
-    };
-
     let entry = TimelineEntry::builder(
         uuid::Uuid::new_v4().to_string(),
         ctx.profile_id.clone(),
@@ -210,6 +204,259 @@ pub async fn record_delete(
     .environment_tag(ctx.environment_tag.clone())
     .query_json(Some(filter_json.to_string()))
     .deleted_count(deleted_count)
+    .execution_ms(execution_ms)
+    .errored(errored)
+    .error_message(error_message)
+    .executed_at(chrono_now())
+    .build();
+
+    store.append(entry).await;
+}
+
+/// Record a replace-one operation to the timeline.
+pub async fn record_replace_one(
+    store: &TimelineStore,
+    ctx: &RecordContext,
+    filter_json: &str,
+    replacement_json: &str,
+    matched_count: u64,
+    modified_count: u64,
+    execution_ms: u64,
+    errored: bool,
+    error_message: Option<String>,
+) {
+    record_update(
+        store,
+        ctx,
+        OperationKind::ReplaceOne,
+        filter_json,
+        replacement_json,
+        matched_count,
+        modified_count,
+        execution_ms,
+        errored,
+        error_message,
+    )
+    .await;
+}
+
+/// Record an insert-many operation to the timeline.
+pub async fn record_insert_many(
+    store: &TimelineStore,
+    ctx: &RecordContext,
+    documents_json: &str,
+    inserted_count: u64,
+    execution_ms: u64,
+    errored: bool,
+    error_message: Option<String>,
+) {
+    record_insert(
+        store,
+        ctx,
+        OperationKind::InsertMany,
+        documents_json,
+        inserted_count,
+        execution_ms,
+        errored,
+        error_message,
+    )
+    .await;
+}
+
+/// Record a collection create operation to the timeline.
+pub async fn record_collection_create(
+    store: &TimelineStore,
+    ctx: &RecordContext,
+    execution_ms: u64,
+    errored: bool,
+    error_message: Option<String>,
+) {
+    let entry = TimelineEntry::builder(
+        uuid::Uuid::new_v4().to_string(),
+        ctx.profile_id.clone(),
+        OperationKind::CollectionCreate,
+    )
+    .connection_id(ctx.connection_id.clone())
+    .database(ctx.database.clone())
+    .collection(ctx.collection.clone())
+    .actor(ctx.actor.clone())
+    .environment_tag(ctx.environment_tag.clone())
+    .execution_ms(execution_ms)
+    .errored(errored)
+    .error_message(error_message)
+    .executed_at(chrono_now())
+    .build();
+
+    store.append(entry).await;
+}
+
+/// Record a collection drop operation to the timeline.
+pub async fn record_collection_drop(
+    store: &TimelineStore,
+    ctx: &RecordContext,
+    execution_ms: u64,
+    errored: bool,
+    error_message: Option<String>,
+) {
+    let entry = TimelineEntry::builder(
+        uuid::Uuid::new_v4().to_string(),
+        ctx.profile_id.clone(),
+        OperationKind::CollectionDrop,
+    )
+    .connection_id(ctx.connection_id.clone())
+    .database(ctx.database.clone())
+    .collection(ctx.collection.clone())
+    .actor(ctx.actor.clone())
+    .environment_tag(ctx.environment_tag.clone())
+    .execution_ms(execution_ms)
+    .errored(errored)
+    .error_message(error_message)
+    .executed_at(chrono_now())
+    .build();
+
+    store.append(entry).await;
+}
+
+/// Record a collection rename operation to the timeline.
+pub async fn record_collection_rename(
+    store: &TimelineStore,
+    ctx: &RecordContext,
+    target_collection: &str,
+    execution_ms: u64,
+    errored: bool,
+    error_message: Option<String>,
+) {
+    let entry = TimelineEntry::builder(
+        uuid::Uuid::new_v4().to_string(),
+        ctx.profile_id.clone(),
+        OperationKind::CollectionRename,
+    )
+    .connection_id(ctx.connection_id.clone())
+    .database(ctx.database.clone())
+    .collection(ctx.collection.clone())
+    .actor(ctx.actor.clone())
+    .environment_tag(ctx.environment_tag.clone())
+    .query_json(Some(target_collection.to_string()))
+    .execution_ms(execution_ms)
+    .errored(errored)
+    .error_message(error_message)
+    .executed_at(chrono_now())
+    .build();
+
+    store.append(entry).await;
+}
+
+/// Record an import operation to the timeline.
+pub async fn record_import(
+    store: &TimelineStore,
+    ctx: &RecordContext,
+    source_summary_json: &str,
+    inserted_count: u64,
+    execution_ms: u64,
+    errored: bool,
+    error_message: Option<String>,
+) {
+    let entry = TimelineEntry::builder(
+        uuid::Uuid::new_v4().to_string(),
+        ctx.profile_id.clone(),
+        OperationKind::Import,
+    )
+    .connection_id(ctx.connection_id.clone())
+    .database(ctx.database.clone())
+    .collection(ctx.collection.clone())
+    .actor(ctx.actor.clone())
+    .environment_tag(ctx.environment_tag.clone())
+    .query_json(Some(source_summary_json.to_string()))
+    .inserted_count(inserted_count)
+    .execution_ms(execution_ms)
+    .errored(errored)
+    .error_message(error_message)
+    .executed_at(chrono_now())
+    .build();
+
+    store.append(entry).await;
+}
+
+/// Record an export operation to the timeline.
+pub async fn record_export(
+    store: &TimelineStore,
+    ctx: &RecordContext,
+    source_summary_json: &str,
+    exported_count: u64,
+    execution_ms: u64,
+    errored: bool,
+    error_message: Option<String>,
+) {
+    let entry = TimelineEntry::builder(
+        uuid::Uuid::new_v4().to_string(),
+        ctx.profile_id.clone(),
+        OperationKind::Export,
+    )
+    .connection_id(ctx.connection_id.clone())
+    .database(ctx.database.clone())
+    .collection(ctx.collection.clone())
+    .actor(ctx.actor.clone())
+    .environment_tag(ctx.environment_tag.clone())
+    .query_json(Some(source_summary_json.to_string()))
+    .returned_count(exported_count)
+    .execution_ms(execution_ms)
+    .errored(errored)
+    .error_message(error_message)
+    .executed_at(chrono_now())
+    .build();
+
+    store.append(entry).await;
+}
+
+/// Record a dump operation for a single collection to the timeline.
+pub async fn record_dump_collection(
+    store: &TimelineStore,
+    ctx: &RecordContext,
+    dumped_count: u64,
+    execution_ms: u64,
+    errored: bool,
+    error_message: Option<String>,
+) {
+    let entry = TimelineEntry::builder(
+        uuid::Uuid::new_v4().to_string(),
+        ctx.profile_id.clone(),
+        OperationKind::Dump,
+    )
+    .connection_id(ctx.connection_id.clone())
+    .database(ctx.database.clone())
+    .collection(ctx.collection.clone())
+    .actor(ctx.actor.clone())
+    .environment_tag(ctx.environment_tag.clone())
+    .returned_count(dumped_count)
+    .execution_ms(execution_ms)
+    .errored(errored)
+    .error_message(error_message)
+    .executed_at(chrono_now())
+    .build();
+
+    store.append(entry).await;
+}
+
+/// Record a restore operation for a single collection to the timeline.
+pub async fn record_restore_collection(
+    store: &TimelineStore,
+    ctx: &RecordContext,
+    inserted_count: u64,
+    execution_ms: u64,
+    errored: bool,
+    error_message: Option<String>,
+) {
+    let entry = TimelineEntry::builder(
+        uuid::Uuid::new_v4().to_string(),
+        ctx.profile_id.clone(),
+        OperationKind::Restore,
+    )
+    .connection_id(ctx.connection_id.clone())
+    .database(ctx.database.clone())
+    .collection(ctx.collection.clone())
+    .actor(ctx.actor.clone())
+    .environment_tag(ctx.environment_tag.clone())
+    .inserted_count(inserted_count)
     .execution_ms(execution_ms)
     .errored(errored)
     .error_message(error_message)
@@ -328,8 +575,28 @@ mod tests {
         let store = TimelineStore::new();
         let ctx = test_ctx("p1");
 
-        record_insert(&store, &ctx, r#"{"name":"A"}"#, 1, 50, false, None).await;
-        record_insert(&store, &ctx, r#"[{"name":"A"},{"name":"B"}]"#, 2, 80, false, None).await;
+        record_insert(
+            &store,
+            &ctx,
+            OperationKind::InsertOne,
+            r#"{"name":"A"}"#,
+            1,
+            50,
+            false,
+            None,
+        )
+        .await;
+        record_insert(
+            &store,
+            &ctx,
+            OperationKind::InsertMany,
+            r#"[{"name":"A"},{"name":"B"}]"#,
+            2,
+            80,
+            false,
+            None,
+        )
+        .await;
 
         let entries = store.list(TimelineFilter::default()).await;
         assert_eq!(entries.len(), 2);
@@ -342,19 +609,94 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_update_one_vs_many() {
+    async fn record_insert_many_helper_uses_correct_kind_even_for_one_doc() {
         let store = TimelineStore::new();
         let ctx = test_ctx("p1");
 
-        record_update(&store, &ctx, r#"{"_id":1}"#, r#"{"$set":{"x":1}}"#, 1, 1, 30, false, None).await;
-        record_update(&store, &ctx, r#"{}"#, r#"{"$set":{"x":1}}"#, 5, 5, 60, false, None).await;
+        record_insert_many(&store, &ctx, r#"[{"name":"A"}]"#, 1, 40, false, None).await;
 
         let entries = store.list(TimelineFilter::default()).await;
-        let one = entries.iter().find(|e| e.matched_count == Some(1)).unwrap();
-        assert_eq!(one.kind, OperationKind::UpdateOne);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, OperationKind::InsertMany);
+        assert_eq!(entries[0].inserted_count, Some(1));
+    }
 
-        let many = entries.iter().find(|e| e.matched_count == Some(5)).unwrap();
-        assert_eq!(many.kind, OperationKind::UpdateMany);
+    #[tokio::test]
+    async fn record_update_one_vs_many_and_replace() {
+        let store = TimelineStore::new();
+        let ctx = test_ctx("p1");
+
+        record_update(
+            &store,
+            &ctx,
+            OperationKind::UpdateOne,
+            r#"{"_id":1}"#,
+            r#"{"$set":{"x":1}}"#,
+            1,
+            1,
+            30,
+            false,
+            None,
+        )
+        .await;
+        record_update(
+            &store,
+            &ctx,
+            OperationKind::UpdateMany,
+            r#"{}"#,
+            r#"{"$set":{"x":1}}"#,
+            5,
+            5,
+            60,
+            false,
+            None,
+        )
+        .await;
+        record_replace_one(
+            &store,
+            &ctx,
+            r#"{"_id":1}"#,
+            r#"{"name":"B"}"#,
+            1,
+            1,
+            25,
+            false,
+            None,
+        )
+        .await;
+
+        let entries = store.list(TimelineFilter::default()).await;
+        let one = entries.iter().find(|e| e.kind == OperationKind::UpdateOne).unwrap();
+        assert_eq!(one.matched_count, Some(1));
+
+        let many = entries.iter().find(|e| e.kind == OperationKind::UpdateMany).unwrap();
+        assert_eq!(many.matched_count, Some(5));
+
+        let repl = entries.iter().find(|e| e.kind == OperationKind::ReplaceOne).unwrap();
+        assert_eq!(repl.update_json, Some(r#"{"name":"B"}"#.into()));
+    }
+
+    #[tokio::test]
+    async fn record_update_many_with_zero_matches_keeps_kind() {
+        let store = TimelineStore::new();
+        let ctx = test_ctx("p1");
+
+        record_update(
+            &store,
+            &ctx,
+            OperationKind::UpdateMany,
+            r#"{"_id":999}"#,
+            r#"{"$set":{"x":1}}"#,
+            0,
+            0,
+            10,
+            false,
+            None,
+        )
+        .await;
+
+        let entries = store.list(TimelineFilter::default()).await;
+        assert_eq!(entries[0].kind, OperationKind::UpdateMany);
     }
 
     #[tokio::test]
@@ -362,15 +704,35 @@ mod tests {
         let store = TimelineStore::new();
         let ctx = test_ctx("p1");
 
-        record_delete(&store, &ctx, r#"{"_id":1}"#, 1, 20, false, None).await;
-        record_delete(&store, &ctx, r#"{}"#, 10, 100, false, None).await;
+        record_delete(
+            &store,
+            &ctx,
+            OperationKind::DeleteOne,
+            r#"{"_id":1}"#,
+            1,
+            20,
+            false,
+            None,
+        )
+        .await;
+        record_delete(
+            &store,
+            &ctx,
+            OperationKind::DeleteMany,
+            r#"{}"#,
+            10,
+            100,
+            false,
+            None,
+        )
+        .await;
 
         let entries = store.list(TimelineFilter::default()).await;
-        let one = entries.iter().find(|e| e.deleted_count == Some(1)).unwrap();
-        assert_eq!(one.kind, OperationKind::DeleteOne);
+        let one = entries.iter().find(|e| e.kind == OperationKind::DeleteOne).unwrap();
+        assert_eq!(one.deleted_count, Some(1));
 
-        let many = entries.iter().find(|e| e.deleted_count == Some(10)).unwrap();
-        assert_eq!(many.kind, OperationKind::DeleteMany);
+        let many = entries.iter().find(|e| e.kind == OperationKind::DeleteMany).unwrap();
+        assert_eq!(many.deleted_count, Some(10));
     }
 
     #[tokio::test]
@@ -392,6 +754,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn record_collection_operations() {
+        let store = TimelineStore::new();
+        let ctx = test_ctx("p1");
+
+        record_collection_create(&store, &ctx, 100, false, None).await;
+        record_collection_drop(&store, &ctx, 50, false, None).await;
+        record_collection_rename(&store, &ctx, "new_col", 75, false, None).await;
+
+        let entries = store.list(TimelineFilter::default()).await;
+        assert_eq!(entries.len(), 3);
+        assert!(entries.iter().any(|e| e.kind == OperationKind::CollectionCreate));
+        assert!(entries.iter().any(|e| e.kind == OperationKind::CollectionDrop));
+
+        let rename = entries.iter().find(|e| e.kind == OperationKind::CollectionRename).unwrap();
+        assert_eq!(rename.query_json, Some("new_col".into()));
+    }
+
+    #[tokio::test]
+    async fn record_bulk_operations() {
+        let store = TimelineStore::new();
+        let ctx = test_ctx("p1");
+
+        record_import(
+            &store,
+            &ctx,
+            r#"{"source":"file.json","format":"json"}"#,
+            100,
+            200,
+            false,
+            None,
+        )
+        .await;
+        record_export(
+            &store,
+            &ctx,
+            r#"{"destination":"out.csv","format":"csv"}"#,
+            250,
+            300,
+            false,
+            None,
+        )
+        .await;
+        record_dump_collection(&store, &ctx, 500, 400, false, None).await;
+        record_restore_collection(&store, &ctx, 50, 150, false, None).await;
+
+        let entries = store.list(TimelineFilter::default()).await;
+        let import = entries.iter().find(|e| e.kind == OperationKind::Import).unwrap();
+        assert_eq!(import.inserted_count, Some(100));
+        assert_eq!(import.query_json, Some(r#"{"source":"file.json","format":"json"}"#.into()));
+
+        let export = entries.iter().find(|e| e.kind == OperationKind::Export).unwrap();
+        assert_eq!(export.returned_count, Some(250));
+
+        let dump = entries.iter().find(|e| e.kind == OperationKind::Dump).unwrap();
+        assert_eq!(dump.returned_count, Some(500));
+
+        let restore = entries.iter().find(|e| e.kind == OperationKind::Restore).unwrap();
+        assert_eq!(restore.inserted_count, Some(50));
+    }
+
+    #[tokio::test]
     async fn record_with_error_message() {
         let store = TimelineStore::new();
         let ctx = test_ctx("p1");
@@ -399,6 +822,7 @@ mod tests {
         record_insert(
             &store,
             &ctx,
+            OperationKind::InsertOne,
             r#"bad json"#,
             0,
             0,

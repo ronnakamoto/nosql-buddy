@@ -19,6 +19,7 @@ export type OperationKind =
   | "indexDrop"
   | "collectionCreate"
   | "collectionDrop"
+  | "collectionRename"
   | "import"
   | "export"
   | "dump"
@@ -119,6 +120,7 @@ export function operationKindLabel(kind: OperationKind): string {
     case "indexDrop": return "Drop Index";
     case "collectionCreate": return "Create Collection";
     case "collectionDrop": return "Drop Collection";
+    case "collectionRename": return "Rename Collection";
     case "import": return "Import";
     case "export": return "Export";
     case "dump": return "Dump";

@@ -1085,6 +1085,7 @@ pub async fn insert_document(
     crate::mongo::operation_recorder::record_insert(
         &state.timeline,
         &ctx,
+        crate::mongo::timeline_store::OperationKind::InsertOne,
         &request.document_json,
         1,
         elapsed,
@@ -1147,9 +1148,15 @@ pub async fn update_documents(
         request.database.clone(),
         request.collection.clone(),
     );
+    let update_kind = if request.multi {
+        crate::mongo::timeline_store::OperationKind::UpdateMany
+    } else {
+        crate::mongo::timeline_store::OperationKind::UpdateOne
+    };
     crate::mongo::operation_recorder::record_update(
         &state.timeline,
         &ctx,
+        update_kind,
         &request.filter_json,
         &request.update_json,
         res.matched_count,
@@ -1191,6 +1198,7 @@ pub async fn replace_document(
     state: State<'_, AppState>,
 ) -> AppResult<ReplaceResult> {
     let entry = state.clients.get(&request.connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let filter = parse_optional_doc(Some(&request.filter_json))?.unwrap_or_default();
     let replacement: Document = serde_json::from_str(&request.replacement_json)?;
     let coll = entry
@@ -1198,7 +1206,9 @@ pub async fn replace_document(
         .database(&request.database)
         .collection::<Document>(&request.collection);
     let opts = mongodb::options::ReplaceOptions::builder().upsert(request.upsert).build();
+    let start = Instant::now();
     let res = coll.replace_one(filter, replacement).with_options(opts).await?;
+    let elapsed = start.elapsed().as_millis() as u64;
 
     let _ = crate::audit::interceptor::record_update(
         &state.audit_log,
@@ -1207,6 +1217,26 @@ pub async fn replace_document(
         &request.filter_json,
         &request.replacement_json,
     );
+
+    // Record timeline entry.
+    let ctx = crate::mongo::operation_recorder::RecordContext::new(
+        profile_id,
+        request.connection_id.clone(),
+        request.database.clone(),
+        request.collection.clone(),
+    );
+    crate::mongo::operation_recorder::record_replace_one(
+        &state.timeline,
+        &ctx,
+        &request.filter_json,
+        &request.replacement_json,
+        res.matched_count,
+        res.modified_count,
+        elapsed,
+        false,
+        None,
+    )
+    .await;
 
     Ok(ReplaceResult {
         matched_count: res.matched_count,
@@ -1245,11 +1275,14 @@ pub async fn insert_many_documents(
         return Err(AppError::Validation("documents array must not be empty".into()));
     }
     let entry = state.clients.get(&request.connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let coll = entry
         .client
         .database(&request.database)
         .collection::<Document>(&request.collection);
+    let start = Instant::now();
     let result = coll.insert_many(docs).await?;
+    let elapsed = start.elapsed().as_millis() as u64;
     let ids: Vec<String> = result
         .inserted_ids
         .values()
@@ -1266,6 +1299,24 @@ pub async fn insert_many_documents(
         &request.collection,
         &request.documents_json,
     );
+
+    // Record timeline entry.
+    let ctx = crate::mongo::operation_recorder::RecordContext::new(
+        profile_id,
+        request.connection_id.clone(),
+        request.database.clone(),
+        request.collection.clone(),
+    );
+    crate::mongo::operation_recorder::record_insert_many(
+        &state.timeline,
+        &ctx,
+        &request.documents_json,
+        ids.len() as u64,
+        elapsed,
+        false,
+        None,
+    )
+    .await;
 
     Ok(InsertManyResult {
         inserted_count: ids.len() as u64,
@@ -1321,6 +1372,7 @@ pub async fn delete_documents(
     crate::mongo::operation_recorder::record_delete(
         &state.timeline,
         &ctx,
+        crate::mongo::timeline_store::OperationKind::DeleteMany,
         &filter_json,
         res.deleted_count,
         elapsed,

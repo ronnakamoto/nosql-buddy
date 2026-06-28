@@ -58,6 +58,7 @@ pub async fn dump_database(
 /// Core dump logic callable from both the command handler and the scheduler.
 pub async fn run_dump(request: &DumpRequest, state: &AppState, app: &tauri::AppHandle) -> AppResult<DumpResult> {
     let entry = state.clients.get(&request.connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let db = entry.client.database(&request.database);
 
     // Resolve collections to dump.
@@ -100,6 +101,7 @@ pub async fn run_dump(request: &DumpRequest, state: &AppState, app: &tauri::AppH
     let mut total_errors: u64 = 0;
     let mut files: Vec<String> = Vec::new();
     let mut cancelled = false;
+    let mut timeline_entries: Vec<crate::mongo::timeline_store::TimelineEntry> = Vec::with_capacity(collections.len());
 
     let profile_name = state
         .clients
@@ -148,7 +150,9 @@ pub async fn run_dump(request: &DumpRequest, state: &AppState, app: &tauri::AppH
             max_error_samples: 100,
         };
 
+        let coll_start = std::time::Instant::now();
         let report = run_pipeline(Box::new(source), Vec::new(), sink, ctx).await;
+        let coll_elapsed = coll_start.elapsed().as_millis() as u64;
         match report {
             Ok(r) => {
                 total_processed += r.processed;
@@ -157,14 +161,51 @@ pub async fn run_dump(request: &DumpRequest, state: &AppState, app: &tauri::AppH
                 let msg = format!("Dumped {coll_name}: {} docs", r.processed);
                 state.jobs.log_info(&request.job_id, &msg).await;
                 emit_job_log_entry(app, &request.job_id, &chrono_now(), "info", &msg);
+
+                timeline_entries.push(
+                    crate::mongo::timeline_store::TimelineEntry::builder(
+                        uuid::Uuid::new_v4().to_string(),
+                        profile_id.clone(),
+                        crate::mongo::timeline_store::OperationKind::Dump,
+                    )
+                    .connection_id(request.connection_id.clone())
+                    .database(request.database.clone())
+                    .collection(coll_name.clone())
+                    .actor("local-user".to_string())
+                    .returned_count(r.processed)
+                    .execution_ms(coll_elapsed)
+                    .executed_at(chrono_now())
+                    .build(),
+                );
             }
             Err(e) => {
                 total_errors += 1;
                 let msg = format!("Failed to dump {coll_name}: {e}");
                 state.jobs.log_error(&request.job_id, &msg).await;
                 emit_job_log_entry(app, &request.job_id, &chrono_now(), "error", &msg);
+
+                timeline_entries.push(
+                    crate::mongo::timeline_store::TimelineEntry::builder(
+                        uuid::Uuid::new_v4().to_string(),
+                        profile_id.clone(),
+                        crate::mongo::timeline_store::OperationKind::Dump,
+                    )
+                    .connection_id(request.connection_id.clone())
+                    .database(request.database.clone())
+                    .collection(coll_name.clone())
+                    .actor("local-user".to_string())
+                    .execution_ms(coll_elapsed)
+                    .errored(true)
+                    .error_message(Some(msg))
+                    .executed_at(chrono_now())
+                    .build(),
+                );
             }
         }
+    }
+
+    if !timeline_entries.is_empty() {
+        state.timeline.append_batch(timeline_entries).await;
     }
 
     state.jobs.unregister(&request.job_id).await;

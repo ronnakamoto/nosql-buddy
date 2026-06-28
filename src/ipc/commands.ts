@@ -1482,6 +1482,22 @@ export interface ShellResponse {
   lastDatabase: string | null;
   activeDatabase: string;
   executionMs: number;
+  operations?: ShellOperation[];
+}
+
+export interface ShellOperation {
+  kind: import("./timeline").OperationKind;
+  database: string;
+  collection: string;
+  queryJson: string | null;
+  updateJson: string | null;
+  matchedCount: number | null;
+  modifiedCount: number | null;
+  insertedCount: number | null;
+  deletedCount: number | null;
+  executionMs: number | null;
+  errored: boolean;
+  errorMessage: string | null;
 }
 
 export type CompletionKind =

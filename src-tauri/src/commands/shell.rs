@@ -12,6 +12,7 @@ use tauri::State;
 
 use crate::error::{AppError, AppResult};
 use crate::mongo::client_registry::ClientEntry;
+use crate::mongo::operation_recorder::RecordContext;
 use crate::mongo::schema::compute_schema_report;
 use crate::mongo::shell::ShellResponse;
 use crate::mongo::shell_autocomplete::{
@@ -51,14 +52,149 @@ pub async fn eval_shell(
         .shell_registry
         .get_or_create(request.connection_id.clone(), initial_db.clone())
         .await?;
-    shell
+    let mut response = shell
         .eval(
-            entry,
+            entry.clone(),
             request.script,
             request.active_database.unwrap_or(initial_db),
             Some(state.audit_log.clone()),
         )
-        .await
+        .await?;
+
+    // Record any database operations the shell performed into the Data Timeline.
+    if !response.operations.is_empty() {
+        let profile_id = entry.profile_id.clone();
+        let connection_id = request.connection_id.clone();
+        for op in &response.operations {
+            let ctx = RecordContext::new(
+                profile_id.clone(),
+                connection_id.clone(),
+                op.database.clone(),
+                op.collection.clone(),
+            );
+            match op.kind {
+                crate::mongo::timeline_store::OperationKind::Find
+                | crate::mongo::timeline_store::OperationKind::Aggregate => {
+                    // Not currently emitted by the shell; skip.
+                }
+                crate::mongo::timeline_store::OperationKind::InsertOne => {
+                    crate::mongo::operation_recorder::record_insert(
+                        &state.timeline,
+                        &ctx,
+                        op.kind,
+                        op.update_json.as_deref().unwrap_or(""),
+                        op.inserted_count.unwrap_or(1),
+                        op.execution_ms.unwrap_or(0),
+                        op.errored,
+                        op.error_message.clone(),
+                    )
+                    .await;
+                }
+                crate::mongo::timeline_store::OperationKind::InsertMany => {
+                    crate::mongo::operation_recorder::record_insert_many(
+                        &state.timeline,
+                        &ctx,
+                        op.update_json.as_deref().unwrap_or(""),
+                        op.inserted_count.unwrap_or(0),
+                        op.execution_ms.unwrap_or(0),
+                        op.errored,
+                        op.error_message.clone(),
+                    )
+                    .await;
+                }
+                crate::mongo::timeline_store::OperationKind::UpdateOne
+                | crate::mongo::timeline_store::OperationKind::UpdateMany
+                | crate::mongo::timeline_store::OperationKind::ReplaceOne => {
+                    crate::mongo::operation_recorder::record_update(
+                        &state.timeline,
+                        &ctx,
+                        op.kind,
+                        op.query_json.as_deref().unwrap_or(""),
+                        op.update_json.as_deref().unwrap_or(""),
+                        op.matched_count.unwrap_or(0),
+                        op.modified_count.unwrap_or(0),
+                        op.execution_ms.unwrap_or(0),
+                        op.errored,
+                        op.error_message.clone(),
+                    )
+                    .await;
+                }
+                crate::mongo::timeline_store::OperationKind::DeleteOne
+                | crate::mongo::timeline_store::OperationKind::DeleteMany => {
+                    crate::mongo::operation_recorder::record_delete(
+                        &state.timeline,
+                        &ctx,
+                        op.kind,
+                        op.query_json.as_deref().unwrap_or(""),
+                        op.deleted_count.unwrap_or(0),
+                        op.execution_ms.unwrap_or(0),
+                        op.errored,
+                        op.error_message.clone(),
+                    )
+                    .await;
+                }
+                crate::mongo::timeline_store::OperationKind::IndexCreate => {
+                    crate::mongo::operation_recorder::record_index_create(
+                        &state.timeline,
+                        &ctx,
+                        op.update_json.as_deref().unwrap_or(""),
+                        op.execution_ms.unwrap_or(0),
+                        op.errored,
+                        op.error_message.clone(),
+                    )
+                    .await;
+                }
+                crate::mongo::timeline_store::OperationKind::IndexDrop => {
+                    crate::mongo::operation_recorder::record_index_drop(
+                        &state.timeline,
+                        &ctx,
+                        op.query_json.as_deref().unwrap_or(""),
+                        op.execution_ms.unwrap_or(0),
+                        op.errored,
+                        op.error_message.clone(),
+                    )
+                    .await;
+                }
+                crate::mongo::timeline_store::OperationKind::CollectionCreate => {
+                    crate::mongo::operation_recorder::record_collection_create(
+                        &state.timeline,
+                        &ctx,
+                        op.execution_ms.unwrap_or(0),
+                        op.errored,
+                        op.error_message.clone(),
+                    )
+                    .await;
+                }
+                crate::mongo::timeline_store::OperationKind::CollectionDrop => {
+                    crate::mongo::operation_recorder::record_collection_drop(
+                        &state.timeline,
+                        &ctx,
+                        op.execution_ms.unwrap_or(0),
+                        op.errored,
+                        op.error_message.clone(),
+                    )
+                    .await;
+                }
+                crate::mongo::timeline_store::OperationKind::CollectionRename => {
+                    crate::mongo::operation_recorder::record_collection_rename(
+                        &state.timeline,
+                        &ctx,
+                        op.query_json.as_deref().unwrap_or(""),
+                        op.execution_ms.unwrap_or(0),
+                        op.errored,
+                        op.error_message.clone(),
+                    )
+                    .await;
+                }
+                _ => {}
+            }
+        }
+        // Drop the operations from the response before sending it to the frontend
+        // to keep the payload focused on UI-visible data.
+        response.operations.clear();
+    }
+
+    Ok(response)
 }
 
 /// Request payload for `shell_autocomplete`.

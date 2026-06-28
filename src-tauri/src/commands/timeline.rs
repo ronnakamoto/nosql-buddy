@@ -42,6 +42,7 @@ pub async fn list_timeline(
         "indexDrop" => Some(crate::mongo::timeline_store::OperationKind::IndexDrop),
         "collectionCreate" => Some(crate::mongo::timeline_store::OperationKind::CollectionCreate),
         "collectionDrop" => Some(crate::mongo::timeline_store::OperationKind::CollectionDrop),
+        "collectionRename" => Some(crate::mongo::timeline_store::OperationKind::CollectionRename),
         "import" => Some(crate::mongo::timeline_store::OperationKind::Import),
         "export" => Some(crate::mongo::timeline_store::OperationKind::Export),
         "dump" => Some(crate::mongo::timeline_store::OperationKind::Dump),

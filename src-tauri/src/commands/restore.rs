@@ -107,6 +107,7 @@ pub async fn restore_database(
     app: tauri::AppHandle,
 ) -> AppResult<RestoreResult> {
     let entry = state.clients.get(&request.connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let db = entry.client.database(&request.target_database);
 
     let dir = validate_source_dir(&request.source_dir)?;
@@ -140,6 +141,7 @@ pub async fn restore_database(
     let mut total_inserted: u64 = 0;
     let mut total_errors: u64 = 0;
     let mut cancelled = false;
+    let mut timeline_entries: Vec<crate::mongo::timeline_store::TimelineEntry> = Vec::with_capacity(request.collection_map.len());
 
     for mapping in &request.collection_map {
         if !mapping.enabled {
@@ -207,23 +209,63 @@ pub async fn restore_database(
             max_error_samples: 100,
         };
 
+        let coll_start = std::time::Instant::now();
         let report = run_pipeline(Box::new(source), Vec::new(), Box::new(sink), ctx).await;
+        let coll_elapsed = coll_start.elapsed().as_millis() as u64;
         match report {
             Ok(r) => {
+                let inserted_count = inserted.load(std::sync::atomic::Ordering::Relaxed);
                 total_processed += r.processed;
-                total_inserted += inserted.load(std::sync::atomic::Ordering::Relaxed);
+                total_inserted += inserted_count;
                 total_errors += r.errors;
                 let msg = format!("Restored {}: {} docs", mapping.target, r.processed);
                 state.jobs.log_info(&request.job_id, &msg).await;
                 emit_job_log_entry(&app, &request.job_id, &chrono_now(), "info", &msg);
+
+                timeline_entries.push(
+                    crate::mongo::timeline_store::TimelineEntry::builder(
+                        uuid::Uuid::new_v4().to_string(),
+                        profile_id.clone(),
+                        crate::mongo::timeline_store::OperationKind::Restore,
+                    )
+                    .connection_id(request.connection_id.clone())
+                    .database(request.target_database.clone())
+                    .collection(mapping.target.clone())
+                    .actor("local-user".to_string())
+                    .inserted_count(inserted_count)
+                    .execution_ms(coll_elapsed)
+                    .executed_at(chrono_now())
+                    .build(),
+                );
             }
             Err(e) => {
                 total_errors += 1;
                 let msg = format!("Failed to restore {}: {e}", mapping.target);
                 state.jobs.log_error(&request.job_id, &msg).await;
                 emit_job_log_entry(&app, &request.job_id, &chrono_now(), "error", &msg);
+
+                timeline_entries.push(
+                    crate::mongo::timeline_store::TimelineEntry::builder(
+                        uuid::Uuid::new_v4().to_string(),
+                        profile_id.clone(),
+                        crate::mongo::timeline_store::OperationKind::Restore,
+                    )
+                    .connection_id(request.connection_id.clone())
+                    .database(request.target_database.clone())
+                    .collection(mapping.target.clone())
+                    .actor("local-user".to_string())
+                    .execution_ms(coll_elapsed)
+                    .errored(true)
+                    .error_message(Some(msg))
+                    .executed_at(chrono_now())
+                    .build(),
+                );
             }
         }
+    }
+
+    if !timeline_entries.is_empty() {
+        state.timeline.append_batch(timeline_entries).await;
     }
 
     state.jobs.unregister(&request.job_id).await;
