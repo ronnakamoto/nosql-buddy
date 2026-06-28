@@ -263,6 +263,11 @@
   color: var(--accent-fg);
 }
 
+.data-model__view-btn.is-active:hover {
+  background: var(--accent-600);
+  color: var(--accent-fg);
+}
+
 .data-model__threshold {
   display: flex;
   align-items: center;

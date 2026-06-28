@@ -791,9 +791,11 @@
 .btn--primary:hover {
   background: var(--accent-600);
   border-color: transparent;
+  color: var(--accent-fg);
 }
 .btn--primary:active {
   background: var(--accent-700);
+  color: var(--accent-fg);
 }
 .btn--primary .kbd {
   background: oklch(1 0 0 / 0.16);

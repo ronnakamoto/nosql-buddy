@@ -614,6 +614,8 @@
 
 .audit-proof-card__primary-link:hover {
   background: var(--accent-600);
+  color: var(--accent-fg);
+  text-decoration: none;
 }
 
 .audit-proof-card__pending {
@@ -1196,9 +1198,11 @@ button.audit-proof-card__primary-link:disabled {
 
 .audit-btn--primary:not(:disabled):hover {
   background: var(--accent-600);
+  color: var(--accent-fg);
 }
 .audit-btn--primary:not(:disabled):active {
   background: var(--accent-700);
+  color: var(--accent-fg);
 }
 .audit-btn--secondary:not(:disabled):hover {
   background: var(--surface-3);
@@ -1986,7 +1990,7 @@ button.audit-proof-card__primary-link:disabled {
 }
 
 .audit-proof-drawer__close:hover {
-  background: var(--surface);
+  background: var(--surface-3);
   color: var(--ink);
 }
 
