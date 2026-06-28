@@ -21,7 +21,8 @@ import "prismjs/components/prism-java";
 import "prismjs/components/prism-csharp";
 import "prismjs/components/prism-ruby";
 import "prismjs/components/prism-bash";
-import { HighlightedTextarea } from "../components/HighlightedTextarea";
+import { CodeEditor } from "../components/CodeEditor";
+import { useCollectionSchema } from "../hooks/useCollectionSchema";
 import { InfoPopover } from "../components/InfoPopover";
 import { Alert } from "../components/Alert";
 import { useToast } from "../context/ToastContext";
@@ -66,7 +67,7 @@ export interface QueryTabProps {
   onImported?: () => void;
 }
 
-type Mode = "find" | "aggregate" | "sql";
+type Mode = "find" | "aggregate" | "sql" | "update" | "insert";
 
 const SQL_LANGUAGES: SqlLanguage[] = [
   "node-js",
@@ -369,6 +370,7 @@ export function QueryTab({
     find: Record<string, unknown> | null;
     warnings: string[];
     code: Record<string, string>;
+    operation?: import("../ipc/commands").SqlOperation;
   } | null>(null);
   const [sqlLanguage, setSqlLanguage] = useState<SqlLanguage>("node-js");
   const [sqlNotice, setSqlNotice] = useState<string | null>(null);
@@ -377,12 +379,27 @@ export function QueryTab({
   const [page, setPage] = useState<DocumentPage | null>(null);
   const [running, setRunning] = useState(false);
   const [insertOpen, setInsertOpen] = useState(false);
+
+  // ─── Update mode state ──────────────────────────────────────────────
+  const [updateFilterText, setUpdateFilterText] = useState("{}");
+  const [updateText, setUpdateText] = useState('{}');
+  const [updateMulti, setUpdateMulti] = useState(true);
+  const [updateUpsert, setUpdateUpsert] = useState(false);
+  const [updatePreviewCount, setUpdatePreviewCount] = useState<number | null>(null);
+  const [updatePreviewLoading, setUpdatePreviewLoading] = useState(false);
+
+  // ─── Insert mode state ──────────────────────────────────────────────
+  const [insertBody, setInsertBody] = useState('');
+  const [insertMany, setInsertMany] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [exportSource, setExportSource] = useState<ExportSourceDto | null>(null);
   const [pendingDelete, setPendingDelete] = useState<{ idx: number; docId: unknown } | null>(null);
   const [viewMode, setViewMode] = useState<ResultsViewMode>("table");
   const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(() => new Set());
+
+  // ─── Schema for autocomplete ────────────────────────────────────────
+  const schema = useCollectionSchema(connectionId, database, collection);
 
   // ─── Paging state (find mode) ───────────────────────────────────────
   // `page: DocumentPage` remains the single source of truth for the visible
@@ -411,12 +428,21 @@ export function QueryTab({
         if (sortText.trim()) JSON.parse(sortText);
       } else if (mode === "aggregate") {
         if (pipelineText.trim()) JSON.parse(pipelineText);
+      } else if (mode === "update") {
+        if (updateFilterText.trim()) JSON.parse(updateFilterText);
+        if (updateText.trim()) JSON.parse(updateText);
+      } else if (mode === "insert") {
+        if (insertBody.trim()) {
+          const parsed = JSON.parse(insertBody);
+          if (insertMany && !Array.isArray(parsed)) return false;
+          if (!insertMany && (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))) return false;
+        }
       }
       return true;
     } catch {
       return false;
     }
-  }, [mode, filterText, projectionText, sortText, pipelineText]);
+  }, [mode, filterText, projectionText, sortText, pipelineText, updateFilterText, updateText, insertBody, insertMany]);
 
   const sqlPipelineHtml = useMemo(() => {
     if (!sqlResult) return "";
@@ -435,9 +461,6 @@ export function QueryTab({
       return;
     }
     setRunning(true);
-    // A fresh Run always starts at page 1 and is the only thing that should
-    // log a query-history entry; subsequent load-more/jump appends are not
-    // new queries.
     captureHistoryRef.current = true;
     setCurrentPage(1);
     setSelectedRowIds(new Set());
@@ -464,6 +487,38 @@ export function QueryTab({
           countMode: "none",
         });
         setPage(result);
+      } else if (mode === "update") {
+        const result = await commands.updateDocuments({
+          connectionId,
+          database,
+          collection,
+          filterJson: updateFilterText,
+          updateJson: updateText,
+          multi: updateMulti,
+          upsert: updateUpsert,
+        });
+        toast.push(
+          `Updated ${result.modifiedCount} document(s) (matched ${result.matchedCount})`,
+          result.modifiedCount > 0 ? "success" : "warning",
+        );
+      } else if (mode === "insert") {
+        if (insertMany) {
+          const result = await commands.insertManyDocuments({
+            connectionId,
+            database,
+            collection,
+            documentsJson: insertBody,
+          });
+          toast.push(`Inserted ${result.insertedCount} document(s).`, "success");
+        } else {
+          const result = await commands.insertDocument({
+            connectionId,
+            database,
+            collection,
+            documentJson: insertBody,
+          });
+          toast.push(`Inserted document with _id ${result}.`, "success");
+        }
       } else {
         const translated = await commands.translateSql(database, sqlText);
         setSqlResult({
@@ -471,7 +526,23 @@ export function QueryTab({
           find: translated.find,
           warnings: translated.warnings,
           code: translated.code,
+          operation: translated.operation,
         });
+        await runSqlTranslation(translated);
+      }
+    } catch (e) {
+      toast.push(describeError(e), "error");
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  async function runSqlTranslation(translated: import("../ipc/commands").SqlTranslation) {
+    if (!translated.operation) return;
+    const op = translated.operation;
+    switch (op.kind) {
+      case "find":
+      case "aggregate": {
         const result = await commands.aggregatePage({
           connectionId,
           database,
@@ -481,11 +552,59 @@ export function QueryTab({
           countMode: "none",
         });
         setPage(result);
+        break;
       }
-    } catch (e) {
-      toast.push(describeError(e), "error");
-    } finally {
-      setRunning(false);
+      case "update": {
+        const result = await commands.updateDocuments({
+          connectionId,
+          database,
+          collection,
+          filterJson: JSON.stringify(op.filter),
+          updateJson: JSON.stringify(op.update),
+          multi: op.multi,
+          upsert: op.upsert,
+        });
+        toast.push(
+          `Updated ${result.modifiedCount} document(s) (matched ${result.matchedCount})`,
+          result.modifiedCount > 0 ? "success" : "warning",
+        );
+        break;
+      }
+      case "insert": {
+        const result = await commands.insertManyDocuments({
+          connectionId,
+          database,
+          collection,
+          documentsJson: JSON.stringify(op.documents),
+        });
+        toast.push(`Inserted ${result.insertedCount} document(s).`, "success");
+        break;
+      }
+      case "delete": {
+        const count = await commands.deleteDocuments(
+          connectionId,
+          database,
+          collection,
+          JSON.stringify(op.filter),
+        );
+        toast.push(`Deleted ${count} document(s).`, "success");
+        break;
+      }
+      case "replace": {
+        const result = await commands.replaceDocument({
+          connectionId,
+          database,
+          collection,
+          filterJson: JSON.stringify(op.filter),
+          replacementJson: JSON.stringify(op.replacement),
+          upsert: op.upsert,
+        });
+        toast.push(
+          `Replaced ${result.modifiedCount} document(s) (matched ${result.matchedCount})`,
+          result.modifiedCount > 0 ? "success" : "warning",
+        );
+        break;
+      }
     }
   }
 
@@ -617,6 +736,15 @@ export function QueryTab({
       });
     }
     if (mode === "aggregate") return pipelineText;
+    if (mode === "update") {
+      return JSON.stringify({
+        filter: safeParse(updateFilterText, {}),
+        update: safeParse(updateText, {}),
+        multi: updateMulti,
+        upsert: updateUpsert,
+      });
+    }
+    if (mode === "insert") return insertBody;
     return sqlText;
   }
 
@@ -652,6 +780,32 @@ export function QueryTab({
     }
     if (mode === "aggregate") {
       setPipelineText(text);
+      return;
+    }
+    if (mode === "update") {
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed && typeof parsed === "object") {
+          setUpdateFilterText(
+            parsed.filter !== undefined
+              ? JSON.stringify(parsed.filter, null, 2)
+              : "{}",
+          );
+          setUpdateText(
+            parsed.update !== undefined
+              ? JSON.stringify(parsed.update, null, 2)
+              : "{}",
+          );
+          if (typeof parsed.multi === "boolean") setUpdateMulti(parsed.multi);
+          if (typeof parsed.upsert === "boolean") setUpdateUpsert(parsed.upsert);
+        }
+      } catch {
+        setUpdateFilterText(text);
+      }
+      return;
+    }
+    if (mode === "insert") {
+      setInsertBody(text);
       return;
     }
     setSqlText(text);
@@ -919,6 +1073,79 @@ export function QueryTab({
     toast.push(`Insert failed: ${message}`, "error");
   }
 
+  async function handleBulkDeleteSelected() {
+    if (selectedDocuments.length === 0) {
+      toast.push("Select one or more rows first.", "warning");
+      return;
+    }
+    const ids = selectedDocuments
+      .map((doc) => toFilterId(doc))
+      .filter((id) => id !== undefined);
+    if (ids.length === 0) {
+      toast.push("Selected rows lack `_id` fields.", "error");
+      return;
+    }
+    if (!window.confirm(`Delete ${ids.length} selected document(s)? This cannot be undone.`)) {
+      return;
+    }
+    try {
+      const filter = ids.length === 1 ? { _id: ids[0] } : { _id: { $in: ids } };
+      const count = await commands.deleteDocuments(
+        connectionId,
+        database,
+        collection,
+        JSON.stringify(filter),
+      );
+      toast.push(`Deleted ${count} document(s).`, "success");
+      setSelectedRowIds(new Set());
+      await run();
+    } catch (e) {
+      toast.push(`Bulk delete failed: ${describeError(e)}`, "error");
+    }
+  }
+
+  async function handleBulkUpdateSelected() {
+    if (selectedDocuments.length === 0) {
+      toast.push("Select one or more rows first.", "warning");
+      return;
+    }
+    const ids = selectedDocuments
+      .map((doc) => toFilterId(doc))
+      .filter((id) => id !== undefined);
+    if (ids.length === 0) {
+      toast.push("Selected rows lack `_id` fields.", "error");
+      return;
+    }
+    const updateDoc = window.prompt("Enter $set update JSON (e.g. {\"$set\":{\"status\":\"archived\"}}):", '{"$set":{}}');
+    if (!updateDoc) return;
+    try {
+      JSON.parse(updateDoc);
+    } catch {
+      toast.push("Invalid update JSON.", "error");
+      return;
+    }
+    try {
+      const filter = ids.length === 1 ? { _id: ids[0] } : { _id: { $in: ids } };
+      const result = await commands.updateDocuments({
+        connectionId,
+        database,
+        collection,
+        filterJson: JSON.stringify(filter),
+        updateJson: updateDoc,
+        multi: true,
+        upsert: false,
+      });
+      toast.push(
+        `Updated ${result.modifiedCount} document(s) (matched ${result.matchedCount}).`,
+        result.modifiedCount > 0 ? "success" : "warning",
+      );
+      setSelectedRowIds(new Set());
+      await run();
+    } catch (e) {
+      toast.push(`Bulk update failed: ${describeError(e)}`, "error");
+    }
+  }
+
   return (
     <div className="pane">
       <div className="pane__header">
@@ -955,6 +1182,26 @@ export function QueryTab({
             onKeyDown={(e) => e.key === "Enter" && setMode("sql")}
           >
             SQL
+          </div>
+          <div
+            className={`tabs-secondary__item ${mode === "update" ? "is-active" : ""}`}
+            role="tab"
+            tabIndex={0}
+            aria-selected={mode === "update"}
+            onClick={() => setMode("update")}
+            onKeyDown={(e) => e.key === "Enter" && setMode("update")}
+          >
+            Update
+          </div>
+          <div
+            className={`tabs-secondary__item ${mode === "insert" ? "is-active" : ""}`}
+            role="tab"
+            tabIndex={0}
+            aria-selected={mode === "insert"}
+            onClick={() => setMode("insert")}
+            onKeyDown={(e) => e.key === "Enter" && setMode("insert")}
+          >
+            Insert
           </div>
         </div>
         <div className="pane__sub">
@@ -1034,7 +1281,7 @@ export function QueryTab({
         <div className="editor">
           {mode === "find" && (
             <div className="pane__body" style={{ display: "grid", gridTemplateRows: "1fr 1fr 1fr" }}>
-              <div>
+              <div className="editor__pane">
                 <div className="editor__toolbar">
                   <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>Filter</span>
                   <div className="editor__toolbar-tabs">
@@ -1055,11 +1302,12 @@ export function QueryTab({
                   </div>
                 </div>
                 {filterEditor === "json" ? (
-                  <textarea
+                  <CodeEditor
                     className="editor__textarea"
                     value={filterText}
-                    onChange={(e) => setFilterText(e.target.value)}
-                    spellCheck={false}
+                    onChange={setFilterText}
+                    context="filter"
+                    schema={schema.loading ? undefined : schema}
                   />
                 ) : (
                   <div className="editor__textarea" style={{ overflow: "auto" }}>
@@ -1075,30 +1323,32 @@ export function QueryTab({
                   </div>
                 )}
               </div>
-              <div>
+              <div className="editor__pane">
                 <div className="editor__toolbar">
                   <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>Projection <InfoPopover label="Projection help" title="Projection"><p>Specify which fields to return. Use <code>{'{ field: 1 }'}</code> to include fields or <code>{'{ field: 0 }'}</code> to exclude them. Leave empty to return all fields.</p></InfoPopover></span>
                   <span className="kbd">{`{ field: 1 }`}</span>
                 </div>
-                <textarea
+                <CodeEditor
                   className="editor__textarea"
                   value={projectionText}
-                  onChange={(e) => setProjectionText(e.target.value)}
+                  onChange={setProjectionText}
+                  context="filter"
+                  schema={schema.loading ? undefined : schema}
                   placeholder="Optional"
-                  spellCheck={false}
                 />
               </div>
-              <div>
+              <div className="editor__pane">
                 <div className="editor__toolbar">
                   <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>Sort <InfoPopover label="Sort help" title="Sort"><p>Sort results by one or more fields. Use <code>{'{ field: 1 }'}</code> for ascending or <code>{'{ field: -1 }'}</code> for descending.</p></InfoPopover></span>
                   <span className="kbd">{`{ field: 1 }`}</span>
                 </div>
-                <textarea
+                <CodeEditor
                   className="editor__textarea"
                   value={sortText}
-                  onChange={(e) => setSortText(e.target.value)}
+                  onChange={setSortText}
+                  context="filter"
+                  schema={schema.loading ? undefined : schema}
                   placeholder="Optional"
-                  spellCheck={false}
                 />
               </div>
             </div>
@@ -1134,16 +1384,16 @@ export function QueryTab({
                   <Alert tone="success" compact>{sqlNotice}</Alert>
                 )}
               </div>
-              <div>
+              <div className="editor__pane">
                 <div className="editor__toolbar">
                   <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>SQL</span>
                   <span className="kbd">Translated on Run</span>
                 </div>
-                <HighlightedTextarea
+                <CodeEditor
+                  className="editor__textarea"
                   value={sqlText}
                   onChange={setSqlText}
-                  language="sql"
-                  spellCheck={false}
+                  context="sql"
                   ariaLabel="SQL query"
                 />
               </div>
@@ -1212,6 +1462,116 @@ export function QueryTab({
               </div>
             </div>
           )}
+          {mode === "update" && (
+            <div className="pane__body" style={{ display: "grid", gridTemplateRows: "1fr 1fr auto" }}>
+              <div className="editor__pane">
+                <div className="editor__toolbar">
+                  <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>Filter <InfoPopover label="Filter help" title="Update filter"><p>Documents matching this filter will be updated. Use <code>{'{ field: value }'}</code> syntax.</p></InfoPopover></span>
+                  <span className="kbd">{`{ field: value }`}</span>
+                </div>
+                <CodeEditor
+                  className="editor__textarea"
+                  value={updateFilterText}
+                  onChange={setUpdateFilterText}
+                  context="filter"
+                  schema={schema.loading ? undefined : schema}
+                />
+              </div>
+              <div className="editor__pane">
+                <div className="editor__toolbar">
+                  <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>Update <InfoPopover label="Update help" title="Update document"><p>MongoDB update operators such as <code>$set</code>, <code>$inc</code>, <code>$push</code>, etc.</p></InfoPopover></span>
+                  <span className="kbd">{`{ $set: { ... } }`}</span>
+                </div>
+                <CodeEditor
+                  className="editor__textarea"
+                  value={updateText}
+                  onChange={setUpdateText}
+                  context="update"
+                  schema={schema.loading ? undefined : schema}
+                />
+              </div>
+              <div style={{ display: "flex", gap: 12, alignItems: "center", padding: "var(--space-2) var(--space-3)", flexWrap: "wrap" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={updateMulti}
+                    onChange={(e) => setUpdateMulti(e.target.checked)}
+                  />
+                  Update multiple
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={updateUpsert}
+                    onChange={(e) => setUpdateUpsert(e.target.checked)}
+                  />
+                  Upsert
+                </label>
+                <button
+                  className="btn btn--sm"
+                  onClick={async () => {
+                    if (!valid) {
+                      toast.push("Fix the JSON syntax first.", "error");
+                      return;
+                    }
+                    setUpdatePreviewLoading(true);
+                    try {
+                      const count = await commands.previewUpdate({
+                        connectionId,
+                        database,
+                        collection,
+                        filterJson: updateFilterText || null,
+                        updateJson: updateText,
+                      });
+                      setUpdatePreviewCount(count);
+                    } catch (e) {
+                      toast.push(describeError(e), "error");
+                    } finally {
+                      setUpdatePreviewLoading(false);
+                    }
+                  }}
+                  disabled={running || updatePreviewLoading}
+                >
+                  {updatePreviewLoading ? "Previewing…" : "Preview"}
+                </button>
+                {updatePreviewCount !== null && (
+                  <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>
+                    {updatePreviewCount.toLocaleString()} document(s) will match
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+          {mode === "insert" && (
+            <div className="pane__body" style={{ display: "grid", gridTemplateRows: "auto 1fr" }}>
+              <div style={{ display: "flex", gap: 12, alignItems: "center", padding: "var(--space-2) var(--space-3)", flexWrap: "wrap" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={insertMany}
+                    onChange={(e) => setInsertMany(e.target.checked)}
+                  />
+                  Insert many (JSON array)
+                </label>
+              </div>
+              <div className="editor__pane">
+                <div className="editor__toolbar">
+                  <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>
+                    Document{insertMany ? "s" : ""} JSON
+                    <InfoPopover label="Insert help" title="Insert document"><p>Paste a JSON {insertMany ? "array of objects" : "object"}. The <code>_id</code> field is optional.</p></InfoPopover>
+                  </span>
+                </div>
+                <CodeEditor
+                  className="editor__textarea"
+                  value={insertBody}
+                  onChange={setInsertBody}
+                  context="insert"
+                  schema={schema.loading ? undefined : schema}
+                  placeholder={insertMany ? "[\n  { ... },\n  { ... }\n]" : "{\n  ...\n}"}
+                />
+              </div>
+            </div>
+          )}
         </div>
         <div className="split__handle" aria-hidden="true" />
         <div className="pane__body results-pane">
@@ -1238,6 +1598,22 @@ export function QueryTab({
                   title="Copy selected documents as JSON"
                 >
                   Copy selected
+                </button>
+                <button
+                  className="btn btn--sm btn--danger"
+                  disabled={selectedDocuments.length === 0}
+                  onClick={() => void handleBulkDeleteSelected()}
+                  title="Delete all selected documents"
+                >
+                  Delete selected
+                </button>
+                <button
+                  className="btn btn--sm"
+                  disabled={selectedDocuments.length === 0}
+                  onClick={() => void handleBulkUpdateSelected()}
+                  title="Update all selected documents with a $set operation"
+                >
+                  Update selected
                 </button>
                 <button
                   className="btn btn--sm"

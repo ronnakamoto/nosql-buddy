@@ -16,9 +16,35 @@ use crate::mongo::query_code::{self, Language};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub enum SqlOperation {
+    Find,
+    Aggregate,
+    Update {
+        filter: serde_json::Value,
+        update: serde_json::Value,
+        multi: bool,
+        upsert: bool,
+    },
+    Insert {
+        documents: Vec<serde_json::Value>,
+    },
+    Delete {
+        filter: serde_json::Value,
+        multi: bool,
+    },
+    Replace {
+        filter: serde_json::Value,
+        replacement: serde_json::Value,
+        upsert: bool,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SqlTranslation {
     pub database: String,
     pub collection: String,
+    pub operation: SqlOperation,
     pub pipeline: serde_json::Value,
     pub find: Option<serde_json::Value>,
     pub warnings: Vec<String>,
@@ -30,6 +56,28 @@ pub struct SqlTranslation {
 pub fn translate(database: &str, sql: &str) -> AppResult<SqlTranslation> {
     let mut warnings = Vec::new();
     let mut p = Parser::new(sql);
+    p.skip_ws();
+
+    if p.peek_keyword("SELECT") {
+        translate_select(database, &mut p, &mut warnings)
+    } else if p.peek_keyword("UPDATE") {
+        translate_update(database, &mut p, &mut warnings)
+    } else if p.peek_keyword("INSERT") || p.peek_keyword("UPSERT") {
+        translate_insert(database, &mut p, &mut warnings)
+    } else if p.peek_keyword("DELETE") || p.peek_keyword("REMOVE") {
+        translate_delete(database, &mut p, &mut warnings)
+    } else {
+        Err(AppError::SqlParse(
+            "expected SELECT, UPDATE, INSERT, or DELETE statement".into(),
+        ))
+    }
+}
+
+fn translate_select(
+    database: &str,
+    p: &mut Parser,
+    warnings: &mut Vec<String>,
+) -> AppResult<SqlTranslation> {
     let stmt = p.parse_select()?;
     let collection = stmt.collection.ok_or_else(|| {
         AppError::SqlParse("FROM clause with at least one table is required".into())
@@ -48,28 +96,28 @@ pub fn translate(database: &str, sql: &str) -> AppResult<SqlTranslation> {
         // and only fall back to `{$expr: ...}` when both sides are field
         // references or the comparison is non-scalar. This keeps indexes
         // usable for the common `field <op> literal` case.
-        let value = expr_to_filter(&filter, &mut warnings)?;
+        let value = expr_to_filter(&filter, warnings)?;
         find_filter = Some(value.clone());
         stages.push(serde_json::json!({ "$match": value }));
     }
 
     for join in &stmt.joins {
-        stages.push(join_to_lookup(join, &mut warnings)?);
+        stages.push(join_to_lookup(join, warnings)?);
     }
 
     if stmt.distinct && stmt.group_by.is_empty() {
         // DISTINCT: collapse duplicates by grouping on the projected
         // fields, then replace the root so the output shape matches
         // what the user asked for (instead of `_id: {...}`).
-        let key = build_distinct_group_key(&stmt.projection, &mut warnings)?;
+        let key = build_distinct_group_key(&stmt.projection, warnings)?;
         stages.push(serde_json::json!({ "$group": { "_id": key } }));
         stages.push(serde_json::json!({ "$replaceRoot": { "newRoot": "$_id" } }));
         // No `find` shortcut: distinct always runs through aggregate.
     } else if !stmt.group_by.is_empty() {
-        let group = build_group_stage(&stmt.group_by, &stmt.projection, &mut warnings)?;
+        let group = build_group_stage(&stmt.group_by, &stmt.projection, warnings)?;
         stages.push(serde_json::json!({ "$group": group }));
     } else {
-        let project = build_project_stage(&stmt.projection, &mut warnings)?;
+        let project = build_project_stage(&stmt.projection, warnings)?;
         if !project.as_object().map(|m| m.is_empty()).unwrap_or(true) {
             stages.push(serde_json::json!({ "$project": project }));
             find_projection = Some(project);
@@ -81,7 +129,7 @@ pub fn translate(database: &str, sql: &str) -> AppResult<SqlTranslation> {
         // expression and must be wrapped in $expr to be valid inside a
         // $match stage. Bare `{$gt: [...]}` would hit the same
         // "unknown top level operator" error as the WHERE bug.
-        let value = expr_to_agg_expr(having, &mut warnings)?;
+        let value = expr_to_agg_expr(having, warnings)?;
         stages.push(serde_json::json!({ "$match": { "$expr": value } }));
     }
 
@@ -134,12 +182,242 @@ pub fn translate(database: &str, sql: &str) -> AppResult<SqlTranslation> {
     let pipeline_arr = stages.clone();
     let code = generate_code_variants(database, &collection_for_code, &pipeline_arr);
 
+    let operation = if find.is_some() {
+        SqlOperation::Find
+    } else {
+        SqlOperation::Aggregate
+    };
+
     Ok(SqlTranslation {
         database: database.to_string(),
         collection,
+        operation,
         pipeline: serde_json::Value::Array(stages),
         find,
-        warnings,
+        warnings: warnings.clone(),
+        code,
+    })
+}
+
+fn translate_update(
+    database: &str,
+    p: &mut Parser,
+    warnings: &mut Vec<String>,
+) -> AppResult<SqlTranslation> {
+    p.expect_keyword("UPDATE")?;
+    p.skip_ws();
+    let collection = p.parse_identifier()?;
+    p.skip_ws();
+
+    let mut filter = serde_json::Value::Object(serde_json::Map::new());
+    let mut set_fields = serde_json::Map::new();
+    let mut upsert = false;
+
+    if p.peek_keyword("SET") {
+        p.consume_keyword("SET")?;
+        p.skip_ws();
+        loop {
+            let field = p.parse_identifier()?;
+            p.skip_ws();
+            p.expect_char('=')?;
+            p.skip_ws();
+            let value = expr_to_agg_expr(&p.parse_expr()?, warnings)?;
+            set_fields.insert(field, value);
+            p.skip_ws();
+            if p.peek_char() == Some(',') {
+                p.pos += 1;
+                p.skip_ws();
+                continue;
+            }
+            break;
+        }
+    }
+    p.skip_ws();
+
+    if p.peek_keyword("WHERE") {
+        p.consume_keyword("WHERE")?;
+        p.skip_ws();
+        filter = expr_to_filter(&p.parse_expr()?, warnings)?;
+    }
+    p.skip_ws();
+
+    if p.peek_keyword("UPSERT") {
+        p.consume_keyword("UPSERT")?;
+        upsert = true;
+    }
+
+    p.skip_ws();
+    if p.pos < p.src.len() {
+        return Err(AppError::SqlParse(format!(
+            "unexpected trailing input at position {}",
+            p.pos
+        )));
+    }
+
+    let update_doc = serde_json::json!({ "$set": set_fields });
+    let code = generate_write_code_variants(database, &collection, "update", &filter, &update_doc, upsert);
+
+    Ok(SqlTranslation {
+        database: database.to_string(),
+        collection,
+        operation: SqlOperation::Update {
+            filter: filter.clone(),
+            update: update_doc,
+            multi: true,
+            upsert,
+        },
+        pipeline: serde_json::Value::Array(vec![]),
+        find: None,
+        warnings: warnings.clone(),
+        code,
+    })
+}
+
+fn translate_insert(
+    database: &str,
+    p: &mut Parser,
+    warnings: &mut Vec<String>,
+) -> AppResult<SqlTranslation> {
+    p.expect_keyword("INSERT")?;
+    p.skip_ws();
+    p.expect_keyword("INTO")?;
+    p.skip_ws();
+    let collection = p.parse_identifier()?;
+    p.skip_ws();
+
+    let mut documents = Vec::new();
+
+    if p.peek_keyword("VALUES") {
+        p.consume_keyword("VALUES")?;
+        p.skip_ws();
+        loop {
+            if p.peek_char() == Some('{') {
+                let doc = p.parse_json_value()?;
+                documents.push(doc);
+            } else {
+                let expr = p.parse_expr()?;
+                let doc = expr_to_agg_expr(&expr, warnings)?;
+                documents.push(doc);
+            }
+            p.skip_ws();
+            if p.peek_char() == Some(',') {
+                p.pos += 1;
+                p.skip_ws();
+                continue;
+            }
+            break;
+        }
+    } else if p.peek_char() == Some('{') {
+        let doc = p.parse_json_value()?;
+        documents.push(doc);
+    } else {
+        p.expect_char('(')?;
+        p.skip_ws();
+        let mut fields = Vec::new();
+        loop {
+            fields.push(p.parse_identifier()?);
+            p.skip_ws();
+            if p.peek_char() == Some(',') {
+                p.pos += 1;
+                p.skip_ws();
+                continue;
+            }
+            break;
+        }
+        p.expect_char(')')?;
+        p.skip_ws();
+        p.expect_keyword("VALUES")?;
+        p.skip_ws();
+        loop {
+            p.expect_char('(')?;
+            p.skip_ws();
+            let mut doc = serde_json::Map::new();
+            for (i, field) in fields.iter().enumerate() {
+                let expr = p.parse_expr()?;
+                let value = expr_to_agg_expr(&expr, warnings)?;
+                doc.insert(field.clone(), value);
+                p.skip_ws();
+                if i < fields.len() - 1 {
+                    p.expect_char(',')?;
+                    p.skip_ws();
+                }
+            }
+            p.expect_char(')')?;
+            documents.push(serde_json::Value::Object(doc));
+            p.skip_ws();
+            if p.peek_char() == Some(',') {
+                p.pos += 1;
+                p.skip_ws();
+                continue;
+            }
+            break;
+        }
+    }
+
+    p.skip_ws();
+    if p.pos < p.src.len() {
+        return Err(AppError::SqlParse(format!(
+            "unexpected trailing input at position {}",
+            p.pos
+        )));
+    }
+
+    let code = generate_insert_code_variants(database, &collection, &documents);
+
+    Ok(SqlTranslation {
+        database: database.to_string(),
+        collection,
+        operation: SqlOperation::Insert {
+            documents: documents.clone(),
+        },
+        pipeline: serde_json::Value::Array(vec![]),
+        find: None,
+        warnings: warnings.clone(),
+        code,
+    })
+}
+
+fn translate_delete(
+    database: &str,
+    p: &mut Parser,
+    warnings: &mut Vec<String>,
+) -> AppResult<SqlTranslation> {
+    p.expect_keyword("DELETE")?;
+    p.skip_ws();
+    if p.peek_keyword("FROM") {
+        p.consume_keyword("FROM")?;
+        p.skip_ws();
+    }
+    let collection = p.parse_identifier()?;
+    p.skip_ws();
+
+    let mut filter = serde_json::Value::Object(serde_json::Map::new());
+    if p.peek_keyword("WHERE") {
+        p.consume_keyword("WHERE")?;
+        p.skip_ws();
+        filter = expr_to_filter(&p.parse_expr()?, warnings)?;
+    }
+    p.skip_ws();
+
+    if p.pos < p.src.len() {
+        return Err(AppError::SqlParse(format!(
+            "unexpected trailing input at position {}",
+            p.pos
+        )));
+    }
+
+    let code = generate_write_code_variants(database, &collection, "delete", &filter, &serde_json::Value::Null, false);
+
+    Ok(SqlTranslation {
+        database: database.to_string(),
+        collection,
+        operation: SqlOperation::Delete {
+            filter: filter.clone(),
+            multi: true,
+        },
+        pipeline: serde_json::Value::Array(vec![]),
+        find: None,
+        warnings: warnings.clone(),
         code,
     })
 }
@@ -167,6 +445,144 @@ fn generate_code_variants(
             query_code::generate(lang, database, collection, pipeline),
         );
     }
+    map
+}
+
+fn generate_write_code_variants(
+    database: &str,
+    collection: &str,
+    op: &str,
+    filter: &serde_json::Value,
+    update: &serde_json::Value,
+    upsert: bool,
+) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    let filter_str = serde_json::to_string_pretty(filter).unwrap_or_default();
+    let update_str = serde_json::to_string_pretty(update).unwrap_or_default();
+    let upsert_str = if upsert { ", upsert: true" } else { "" };
+
+    map.insert(
+        "node-js".into(),
+        format!(
+            "const {{ MongoClient }} = require('mongodb');\n\
+            async function run() {{\n\
+            const client = new MongoClient('mongodb://localhost:27017/{database}');\n\
+            await client.connect();\n\
+            const db = client.db('{database}');\n\
+            const coll = db.collection('{collection}');\n\
+            const result = await coll.{op}Many(\n\
+            {filter_str},\n\
+            {update_str}\n\
+            {{ {upsert_str} }}\n\
+            );\n\
+            console.log(result);\n\
+            await client.close();\n\
+            }}\n\
+            run().catch(console.error);\n"
+        ),
+    );
+
+    map.insert(
+        "python".into(),
+        format!(
+            "from pymongo import MongoClient\n\
+            client = MongoClient('mongodb://localhost:27017/{database}')\n\
+            db = client['{database}']\n\
+            coll = db['{collection}']\n\
+            result = coll.{op}_many(\n\
+            {filter_str},\n\
+            {update_str}\n\
+            )\n\
+            print(result)\n"
+        ),
+    );
+
+    map.insert(
+        "shell".into(),
+        format!(
+            "use {database}\n\
+            db.{collection}.{op}Many(\n\
+            {filter_str},\n\
+            {update_str}\n\
+            )\n"
+        ),
+    );
+
+    for lang in ["java", "c-sharp", "ruby"] {
+        map.insert(
+            lang.into(),
+            format!(
+                "// {lang} driver code for {op} on {database}.{collection}\n\
+                // Filter: {filter_str}\n\
+                // Update: {update_str}\n"
+            ),
+        );
+    }
+
+    map
+}
+
+fn generate_insert_code_variants(
+    database: &str,
+    collection: &str,
+    documents: &[serde_json::Value],
+) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    let docs_str = serde_json::to_string_pretty(documents).unwrap_or_default();
+
+    map.insert(
+        "node-js".into(),
+        format!(
+            "const {{ MongoClient }} = require('mongodb');\n\
+            async function run() {{\n\
+            const client = new MongoClient('mongodb://localhost:27017/{database}');\n\
+            await client.connect();\n\
+            const db = client.db('{database}');\n\
+            const coll = db.collection('{collection}');\n\
+            const result = await coll.insertMany(\n\
+            {docs_str}\n\
+            );\n\
+            console.log(result);\n\
+            await client.close();\n\
+            }}\n\
+            run().catch(console.error);\n"
+        ),
+    );
+
+    map.insert(
+        "python".into(),
+        format!(
+            "from pymongo import MongoClient\n\
+            client = MongoClient('mongodb://localhost:27017/{database}')\n\
+            db = client['{database}']\n\
+            coll = db['{collection}']\n\
+            result = coll.insert_many(\n\
+            {docs_str}\n\
+            )\n\
+            print(result)\n"
+        ),
+    );
+
+    map.insert(
+        "shell".into(),
+        format!(
+            "use {database}\n\
+            db.{collection}.insertMany(\n\
+            {docs_str}\n\
+            )\n"
+        ),
+    );
+
+    for lang in ["java", "c-sharp", "ruby"] {
+        map.insert(
+            lang.into(),
+            format!(
+                "// {lang} driver code for insert into {database}.{collection}\n\
+                // Documents: {docs_str}\n"
+            ),
+        );
+    }
+
     map
 }
 
@@ -393,6 +809,64 @@ impl<'a> Parser<'a> {
             break;
         }
         Ok(items)
+    }
+
+    /// Parse a raw JSON value (object or array) by consuming balanced
+    /// braces/brackets, then delegating to `serde_json::from_str`.
+    fn parse_json_value(&mut self) -> AppResult<serde_json::Value> {
+        self.skip_ws();
+        let start = self.pos;
+        let open = match self.peek_char() {
+            Some('{') => '{',
+            Some('[') => '[',
+            other => {
+                return Err(AppError::SqlParse(format!(
+                    "expected JSON object or array, found {:?} at position {}",
+                    other, self.pos
+                )));
+            }
+        };
+        let close = match open {
+            '{' => '}',
+            '[' => ']',
+            _ => unreachable!(),
+        };
+        let mut depth = 1;
+        let mut in_string = false;
+        let mut escape = false;
+        self.pos += 1;
+        while self.pos < self.src.len() {
+            let c = self.src[self.pos..].chars().next().unwrap();
+            if in_string {
+                if escape {
+                    escape = false;
+                } else if c == '\\' {
+                    escape = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
+            } else {
+                match c {
+                    '"' => in_string = true,
+                    _ if c == open => depth += 1,
+                    _ if c == close => {
+                        depth -= 1;
+                        if depth == 0 {
+                            self.pos += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            self.pos += c.len_utf8();
+        }
+        if depth != 0 {
+            return Err(AppError::SqlParse("unterminated JSON value".into()));
+        }
+        let json_str = &self.src[start..self.pos];
+        serde_json::from_str(json_str)
+            .map_err(|e| AppError::SqlParse(format!("invalid JSON value: {e}")))
     }
 
     fn parse_join(&mut self) -> AppResult<JoinClause> {
@@ -1643,5 +2117,96 @@ mod tests {
             .expect("post-group $match");
         assert!(m["$match"].get("$expr").is_some());
         assert!(m["$match"]["$expr"].get("$gt").is_some());
+    }
+
+    // ---- Write operation translation tests ----
+
+    #[test]
+    fn translates_update_with_set_and_where() {
+        let t = translate("shop", "UPDATE products SET name = \"Widget\", price = 10 WHERE status = \"active\"").expect("translate");
+        assert_eq!(t.collection, "products");
+        match &t.operation {
+            SqlOperation::Update { filter, update, multi, upsert } => {
+                assert!(filter.get("status").is_some());
+                assert_eq!(update["$set"]["name"], "Widget");
+                assert_eq!(update["$set"]["price"], 10.0);
+                assert!(*multi);
+                assert!(!*upsert);
+            }
+            other => panic!("expected Update, got {:?}", other),
+        }
+        assert!(t.code.contains_key("node-js"));
+        assert!(t.code.contains_key("python"));
+    }
+
+    #[test]
+    fn translates_update_with_upsert() {
+        let t = translate("shop", "UPDATE products SET count = 1 WHERE _id = \"abc\" UPSERT").expect("translate");
+        match &t.operation {
+            SqlOperation::Update { upsert, .. } => assert!(*upsert),
+            other => panic!("expected Update, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn translates_insert_into_values_object() {
+        let t = translate("shop", "INSERT INTO products VALUES {\"name\":\"A\",\"price\":5}").expect("translate");
+        assert_eq!(t.collection, "products");
+        match &t.operation {
+            SqlOperation::Insert { documents } => {
+                assert_eq!(documents.len(), 1);
+                assert_eq!(documents[0]["name"], "A");
+                assert_eq!(documents[0]["price"], 5.0);
+            }
+            other => panic!("expected Insert, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn translates_insert_into_columns_values() {
+        let t = translate("shop", "INSERT INTO products (name, price) VALUES (\"A\", 5)").expect("translate");
+        assert_eq!(t.collection, "products");
+        match &t.operation {
+            SqlOperation::Insert { documents } => {
+                assert_eq!(documents.len(), 1);
+                assert_eq!(documents[0]["name"], "A");
+                assert_eq!(documents[0]["price"], 5.0);
+            }
+            other => panic!("expected Insert, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn translates_delete_with_where() {
+        let t = translate("shop", "DELETE FROM products WHERE status = \"archived\"").expect("translate");
+        assert_eq!(t.collection, "products");
+        match &t.operation {
+            SqlOperation::Delete { filter, multi } => {
+                assert_eq!(filter["status"], "archived");
+                assert!(*multi);
+            }
+            other => panic!("expected Delete, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn delete_without_where_uses_empty_filter() {
+        let t = translate("shop", "DELETE FROM products").expect("translate");
+        match &t.operation {
+            SqlOperation::Delete { filter, .. } => {
+                assert!(filter.as_object().unwrap().is_empty());
+            }
+            other => panic!("expected Delete, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_statement() {
+        assert!(translate("shop", "DROP TABLE products").is_err());
+    }
+
+    #[test]
+    fn update_rejects_trailing_input() {
+        assert!(translate("shop", "UPDATE products SET x = 1 WHERE y = 2 trailing").is_err());
     }
 }

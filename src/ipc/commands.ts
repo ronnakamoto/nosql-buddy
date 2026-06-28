@@ -350,9 +350,18 @@ export interface ScanScopeRequest {
   lookupSignals?: LookupSignal[];
 }
 
+export type SqlOperation =
+  | { kind: "find" }
+  | { kind: "aggregate" }
+  | { kind: "update"; filter: Record<string, unknown>; update: Record<string, unknown>; multi: boolean; upsert: boolean }
+  | { kind: "insert"; documents: unknown[] }
+  | { kind: "delete"; filter: Record<string, unknown>; multi: boolean }
+  | { kind: "replace"; filter: Record<string, unknown>; replacement: Record<string, unknown>; upsert: boolean };
+
 export interface SqlTranslation {
   database: string;
   collection: string;
+  operation: SqlOperation;
   pipeline: unknown[];
   find: Record<string, unknown> | null;
   warnings: string[];
@@ -808,6 +817,7 @@ export interface UpdateRequest {
   filterJson: string;
   updateJson: string;
   multi: boolean;
+  upsert: boolean;
 }
 
 /** Result of an update operation. `matchedCount` distinguishes a true
@@ -818,11 +828,46 @@ export interface UpdateResult {
   modifiedCount: number;
 }
 
+export interface ReplaceRequest {
+  connectionId: string;
+  database: string;
+  collection: string;
+  filterJson: string;
+  replacementJson: string;
+  upsert: boolean;
+}
+
+export interface ReplaceResult {
+  matchedCount: number;
+  modifiedCount: number;
+  upsertedId: string | null;
+}
+
+export interface InsertManyRequest {
+  connectionId: string;
+  database: string;
+  collection: string;
+  documentsJson: string;
+}
+
+export interface InsertManyResult {
+  insertedCount: number;
+  insertedIds: string[];
+}
+
 export interface PreviewRequest {
   connectionId: string;
   database: string;
   collection: string;
   filterJson?: string | null;
+}
+
+export interface PreviewUpdateRequest {
+  connectionId: string;
+  database: string;
+  collection: string;
+  filterJson?: string | null;
+  updateJson: string;
 }
 
 /** Audit log status snapshot. */
@@ -1320,8 +1365,12 @@ const commands = {
     }),
   insertDocument: (request: InsertRequest) =>
     invoke<string>("insert_document", { request }),
+  insertManyDocuments: (request: InsertManyRequest) =>
+    invoke<InsertManyResult>("insert_many_documents", { request }),
   updateDocuments: (request: UpdateRequest) =>
     invoke<UpdateResult>("update_documents", { request }),
+  replaceDocument: (request: ReplaceRequest) =>
+    invoke<ReplaceResult>("replace_document", { request }),
   deleteDocuments: (
     connectionId: string,
     database: string,
@@ -1336,7 +1385,7 @@ const commands = {
     }),
   previewDelete: (request: PreviewRequest) =>
     invoke<number>("preview_delete", { request }),
-  previewUpdate: (request: PreviewRequest) =>
+  previewUpdate: (request: PreviewUpdateRequest) =>
     invoke<number>("preview_update", { request }),
   translateVqb: (request: VqbTranslateRequest) =>
     invoke<Record<string, unknown>>("translate_vqb", { request }),

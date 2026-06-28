@@ -5,6 +5,8 @@ import { ExplainTree } from "../components/ExplainTree";
 import { InfoPopover } from "../components/InfoPopover";
 import { DriverCodePanel } from "../components/DriverCodePanel";
 import type { Language } from "../components/driverCodeTypes";
+import { CodeEditor } from "../components/CodeEditor";
+import { useCollectionSchema } from "../hooks/useCollectionSchema";
 import { useToast } from "../context/ToastContext";
 
 export interface AggregationEditorProps {
@@ -110,6 +112,7 @@ export function AggregationEditor({
   const [showCodeModal, setShowCodeModal] = useState(false);
   const [showExplainModal, setShowExplainModal] = useState(false);
   const [resolvedUri, setResolvedUri] = useState<string>("");
+  const schema = useCollectionSchema(connectionId, database, collection);
   const [draggingKey, setDraggingKey] = useState<string | null>(null);
   const [showTemplates, setShowTemplates] = useState(false);
 
@@ -456,13 +459,17 @@ export function AggregationEditor({
                     Delete
                   </button>
                 </div>
-                <textarea
-                  className="agg-stage__editor"
+                <CodeEditor
+                  className="cm-stage-editor"
                   value={stage.body}
-                  onChange={(e) => updateStageBody(stage.key, e.target.value)}
-                  spellCheck={false}
-                  rows={Math.min(10, Math.max(2, stage.body.split("\n").length))}
-                  aria-label={`Stage ${idx + 1} JSON`}
+                  onChange={(next) => updateStageBody(stage.key, next)}
+                  context="aggregate"
+                  schema={schema.loading ? undefined : schema}
+                  fillHeight={false}
+                  compact
+                  minHeight="2.4em"
+                  maxHeight="260px"
+                  ariaLabel={`Stage ${idx + 1} JSON`}
                 />
                 {error && (
                   <div className="agg-stage__error">{error}</div>

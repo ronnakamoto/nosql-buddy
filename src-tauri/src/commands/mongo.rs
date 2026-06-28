@@ -962,6 +962,7 @@ pub struct UpdateRequest {
     pub filter_json: String,
     pub update_json: String,
     pub multi: bool,
+    pub upsert: bool,
 }
 
 #[tauri::command]
@@ -977,10 +978,11 @@ pub async fn update_documents(
         .client
         .database(&request.database)
         .collection::<Document>(&request.collection);
+    let opts = mongodb::options::UpdateOptions::builder().upsert(request.upsert).build();
     let res = if request.multi {
-        coll.update_many(filter, update).await?
+        coll.update_many(filter, update).with_options(opts).await?
     } else {
-        coll.update_one(filter, update).await?
+        coll.update_one(filter, update).with_options(opts).await?
     };
 
     // Record audit event.
@@ -995,6 +997,113 @@ pub async fn update_documents(
     Ok(UpdateResult {
         matched_count: res.matched_count,
         modified_count: res.modified_count,
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaceRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub collection: String,
+    pub filter_json: String,
+    pub replacement_json: String,
+    pub upsert: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaceResult {
+    pub matched_count: u64,
+    pub modified_count: u64,
+    pub upserted_id: Option<String>,
+}
+
+#[tauri::command]
+pub async fn replace_document(
+    request: ReplaceRequest,
+    state: State<'_, AppState>,
+) -> AppResult<ReplaceResult> {
+    let entry = state.clients.get(&request.connection_id).await?;
+    let filter = parse_optional_doc(Some(&request.filter_json))?.unwrap_or_default();
+    let replacement: Document = serde_json::from_str(&request.replacement_json)?;
+    let coll = entry
+        .client
+        .database(&request.database)
+        .collection::<Document>(&request.collection);
+    let opts = mongodb::options::ReplaceOptions::builder().upsert(request.upsert).build();
+    let res = coll.replace_one(filter, replacement).with_options(opts).await?;
+
+    let _ = crate::audit::interceptor::record_update(
+        &state.audit_log,
+        &request.database,
+        &request.collection,
+        &request.filter_json,
+        &request.replacement_json,
+    );
+
+    Ok(ReplaceResult {
+        matched_count: res.matched_count,
+        modified_count: res.modified_count,
+        upserted_id: res.upserted_id.as_ref().and_then(|id| match id {
+            bson::Bson::ObjectId(oid) => Some(oid.to_hex()),
+            bson::Bson::String(s) => Some(s.clone()),
+            _ => Some(id.to_string()),
+        }),
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InsertManyRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub collection: String,
+    pub documents_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InsertManyResult {
+    pub inserted_count: u64,
+    pub inserted_ids: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn insert_many_documents(
+    request: InsertManyRequest,
+    state: State<'_, AppState>,
+) -> AppResult<InsertManyResult> {
+    let docs: Vec<Document> = serde_json::from_str(&request.documents_json)?;
+    if docs.is_empty() {
+        return Err(AppError::Validation("documents array must not be empty".into()));
+    }
+    let entry = state.clients.get(&request.connection_id).await?;
+    let coll = entry
+        .client
+        .database(&request.database)
+        .collection::<Document>(&request.collection);
+    let result = coll.insert_many(docs).await?;
+    let ids: Vec<String> = result
+        .inserted_ids
+        .values()
+        .map(|id| match id {
+            bson::Bson::ObjectId(oid) => oid.to_hex(),
+            bson::Bson::String(s) => s.clone(),
+            _ => id.to_string(),
+        })
+        .collect();
+
+    let _ = crate::audit::interceptor::record_insert(
+        &state.audit_log,
+        &request.database,
+        &request.collection,
+        &request.documents_json,
+    );
+
+    Ok(InsertManyResult {
+        inserted_count: ids.len() as u64,
+        inserted_ids: ids,
     })
 }
 
@@ -1056,9 +1165,31 @@ pub async fn preview_delete(request: PreviewRequest, state: State<'_, AppState>)
     Ok(coll.count_documents(filter).await.unwrap_or(0))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewUpdateRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub collection: String,
+    pub filter_json: Option<String>,
+    pub update_json: String,
+}
+
 #[tauri::command]
-pub async fn preview_update(request: PreviewRequest, state: State<'_, AppState>) -> AppResult<u64> {
-    preview_delete(request, state).await
+pub async fn preview_update(
+    request: PreviewUpdateRequest,
+    state: State<'_, AppState>,
+) -> AppResult<u64> {
+    // Validate update JSON is a valid BSON document first.
+    let _update = parse_optional_doc(Some(&request.update_json))?
+        .ok_or_else(|| AppError::InvalidBson("update document must be a JSON object".into()))?;
+    let entry = state.clients.get(&request.connection_id).await?;
+    let filter = parse_optional_doc(request.filter_json.as_deref())?.unwrap_or_default();
+    let coll = entry
+        .client
+        .database(&request.database)
+        .collection::<Document>(&request.collection);
+    Ok(coll.count_documents(filter).await.unwrap_or(0))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1141,5 +1272,82 @@ mod tests {
         };
         let back = collation_from_driver(&collation_to_driver(&dto));
         assert_eq!(back, dto);
+    }
+
+    // ---- DTO validation tests for new write commands ----
+
+    #[test]
+    fn update_request_serializes_upsert() {
+        let req = UpdateRequest {
+            connection_id: "c1".into(),
+            database: "db".into(),
+            collection: "coll".into(),
+            filter_json: "{}".into(),
+            update_json: "{ \"$set\": { \"x\": 1 } }".into(),
+            multi: true,
+            upsert: true,
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        assert!(json.contains("\"upsert\":true"), "upsert must serialize as camelCase");
+        assert!(json.contains("\"multi\":true"));
+    }
+
+    #[test]
+    fn replace_request_serializes_and_round_trips() {
+        let req = ReplaceRequest {
+            connection_id: "c1".into(),
+            database: "db".into(),
+            collection: "coll".into(),
+            filter_json: "{ \"_id\": \"abc\" }".into(),
+            replacement_json: "{ \"name\": \"new\" }".into(),
+            upsert: false,
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        let back: ReplaceRequest = serde_json::from_str(&json).expect("deserialize");
+        assert!(!back.upsert);
+        assert_eq!(back.filter_json, req.filter_json);
+    }
+
+    #[test]
+    fn replace_result_handles_object_id() {
+        let res = ReplaceResult {
+            matched_count: 1,
+            modified_count: 1,
+            upserted_id: Some("abc123".into()),
+        };
+        let json = serde_json::to_string(&res).expect("serialize");
+        assert!(json.contains("\"upsertedId\":\"abc123\""));
+    }
+
+    #[test]
+    fn insert_many_request_parses_document_array() {
+        let req = InsertManyRequest {
+            connection_id: "c1".into(),
+            database: "db".into(),
+            collection: "coll".into(),
+            documents_json: "[{\"a\":1},{\"b\":2}]".into(),
+        };
+        let docs: Vec<Document> = serde_json::from_str(&req.documents_json).expect("parse docs");
+        assert_eq!(docs.len(), 2);
+    }
+
+    #[test]
+    fn insert_many_result_serializes_ids() {
+        let res = InsertManyResult {
+            inserted_count: 2,
+            inserted_ids: vec!["id1".into(), "id2".into()],
+        };
+        let json = serde_json::to_string(&res).expect("serialize");
+        let back: InsertManyResult = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.inserted_count, 2);
+        assert_eq!(back.inserted_ids.len(), 2);
+    }
+
+    #[test]
+    fn preview_update_request_validates_update_json() {
+        // Verify that parse_optional_doc rejects non-object JSON.
+        let bad = "\"not an object\"";
+        let doc = parse_optional_doc(Some(bad));
+        assert!(doc.is_err() || doc.unwrap().is_none());
     }
 }

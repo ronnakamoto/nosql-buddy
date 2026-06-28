@@ -1151,12 +1151,26 @@
 }
 
 .editor {
-  display: grid;
-  grid-template-columns: 1fr;
-  grid-template-rows: auto 1fr auto;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   border-top: 1px solid var(--border);
   background: var(--bg);
+}
+
+/* The active mode renders a single pane__body; let it fill the editor so
+   inner 1fr editor rows resolve against a definite height. */
+.editor > .pane__body {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Editor cell: toolbar pinned on top, editor fills the remaining row. */
+.editor__pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .editor__toolbar {
@@ -1203,17 +1217,11 @@
 
 .editor__textarea {
   width: 100%;
-  min-height: 140px;
-  height: 100%;
   border: 0;
-  resize: none;
-  background: var(--bg);
-  color: var(--ink);
-  padding: var(--space-3) var(--space-4);
-  font-family: var(--font-mono);
-  font-size: var(--font-size-sm);
-  line-height: 1.5;
   outline: none;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 /* ─── Highlighted code editor (textarea over Prism backdrop) ─────── */
@@ -2935,6 +2943,21 @@ input[type="checkbox"]:disabled {
 .agg-stage__editor:focus {
   outline: 2px solid var(--accent-700);
   outline-offset: 1px;
+}
+
+/* CodeMirror-based stage editor wrapper. Carries the border/background
+   the old textarea had; CodeMirror manages inner padding + caret. */
+.cm-stage-editor {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.cm-stage-editor:focus-within {
+  border-color: var(--accent-700);
+  box-shadow: 0 0 0 1px var(--accent-700);
 }
 
 .agg-stage__error {

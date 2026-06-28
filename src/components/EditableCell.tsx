@@ -137,6 +137,7 @@ export function EditableCell({
         filterJson: JSON.stringify({ _id: docId }),
         updateJson: JSON.stringify({ $set: { [fieldPath]: parsed.value } }),
         multi: false,
+        upsert: false,
       });
       if (result.matchedCount === 0) {
         // No document matched the filter. The most common cause is the

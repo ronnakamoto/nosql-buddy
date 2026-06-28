@@ -8,26 +8,30 @@ export interface InsertDocumentModalProps {
   connectionId: string;
   database: string;
   collection: string;
+  /** When true, accept a JSON array of documents and call insertMany. */
+  many?: boolean;
   onClose: () => void;
-  /** Called after a successful insert. The argument is the new `_id`. */
+  /** Called after a successful insert. The argument is the new `_id` or comma-separated ids. */
   onInserted: (insertedId: string) => void;
   /** Called on a failure so the parent can surface the error. */
   onError: (message: string) => void;
 }
 
 const DEFAULT_BODY = '{\n  "name": "Untitled"\n}';
+const DEFAULT_BODY_MANY = '[\n  {\n    "name": "Untitled"\n  }\n]';
 
 /**
  * Modal that lets the user paste a JSON document and insert it into
- * the active collection via the `insert_document` IPC command. The
- * textarea contents are parsed and the modal stays open with an
- * inline error if parsing fails, so the user can correct the JSON.
+ * the active collection via the `insert_document` or `insert_many_documents`
+ * IPC command. The textarea contents are parsed and the modal stays open
+ * with an inline error if parsing fails, so the user can correct the JSON.
  */
 export function InsertDocumentModal({
   open,
   connectionId,
   database,
   collection,
+  many = false,
   onClose,
   onInserted,
   onError,
@@ -40,10 +44,10 @@ export function InsertDocumentModal({
   // Reset when the modal is opened so the previous draft does not leak.
   useEffect(() => {
     if (open) {
-      setBody(DEFAULT_BODY);
+      setBody(many ? DEFAULT_BODY_MANY : DEFAULT_BODY);
       setSubmitting(false);
     }
-  }, [open]);
+  }, [open, many]);
 
   if (!open) return null;
 
@@ -55,20 +59,39 @@ export function InsertDocumentModal({
       toast.push(`Invalid JSON: ${describeError(e)}`, "error");
       return;
     }
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-      toast.push("Document must be a JSON object.", "error");
-      return;
-    }
     setSubmitting(true);
     try {
-      const id = await commands.insertDocument({
-        connectionId,
-        database,
-        collection,
-        documentJson: JSON.stringify(parsed),
-      });
-      onInserted(id);
-      onClose();
+      if (many) {
+        if (!Array.isArray(parsed)) {
+          toast.push("Insert many requires a JSON array of objects.", "error");
+          return;
+        }
+        if (parsed.length === 0) {
+          toast.push("Array must not be empty.", "error");
+          return;
+        }
+        const result = await commands.insertManyDocuments({
+          connectionId,
+          database,
+          collection,
+          documentsJson: JSON.stringify(parsed),
+        });
+        onInserted(result.insertedIds.join(", "));
+        onClose();
+      } else {
+        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+          toast.push("Document must be a JSON object.", "error");
+          return;
+        }
+        const id = await commands.insertDocument({
+          connectionId,
+          database,
+          collection,
+          documentJson: JSON.stringify(parsed),
+        });
+        onInserted(id);
+        onClose();
+      }
     } catch (e) {
       const msg = describeError(e);
       toast.push(msg, "error");
@@ -81,12 +104,12 @@ export function InsertDocumentModal({
   return (
     <Modal
       open={open}
-      title={`Insert document into ${database}.${collection}`}
+      title={`Insert ${many ? "documents" : "document"} into ${database}.${collection}`}
       onClose={submitting ? () => undefined : onClose}
     >
       <div style={{ display: "grid", gap: "var(--space-3)" }}>
         <p style={{ color: "var(--ink-muted)", fontSize: 13, margin: 0 }}>
-          Paste a JSON object. The <code>_id</code> field is optional — Mongo
+          Paste a JSON {many ? "array of objects" : "object"}. The <code>_id</code> field is optional — Mongo
           will assign one if omitted.
         </p>
         <textarea
@@ -95,7 +118,7 @@ export function InsertDocumentModal({
           onChange={(e) => setBody(e.target.value)}
           spellCheck={false}
           rows={12}
-          aria-label="Document JSON"
+          aria-label={many ? "Documents JSON" : "Document JSON"}
           style={{
             fontFamily: "var(--font-mono)",
             fontSize: 12,
@@ -120,7 +143,7 @@ export function InsertDocumentModal({
             onClick={() => void handleInsert()}
             disabled={submitting}
           >
-            {submitting ? "Inserting…" : "Insert"}
+            {submitting ? "Inserting…" : many ? "Insert Many" : "Insert"}
           </button>
         </div>
       </div>

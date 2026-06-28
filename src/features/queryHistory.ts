@@ -19,7 +19,7 @@
  * connection-scoped, so callers don't need to think about that.
  */
 
-export type QueryMode = "find" | "aggregate" | "sql";
+export type QueryMode = "find" | "aggregate" | "sql" | "update" | "insert";
 
 export interface HistoryEntry {
   /** Monotonically increasing timestamp (ms since epoch). */
@@ -244,6 +244,10 @@ export function modeLabel(mode: QueryMode): string {
       return "Aggregation";
     case "sql":
       return "SQL";
+    case "update":
+      return "Update";
+    case "insert":
+      return "Insert";
   }
 }
 

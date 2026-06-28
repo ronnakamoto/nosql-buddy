@@ -86,8 +86,27 @@ fn sql_translate_group_by_with_count() {
 
 #[test]
 fn sql_translate_rejects_non_select() {
-    let res = translate("shop", "DELETE FROM products");
+    let res = translate("shop", "DROP TABLE products");
     assert!(res.is_err());
+}
+
+#[test]
+fn sql_translate_update_basic() {
+    let t = translate("shop", "UPDATE products SET price = 10 WHERE status = \"active\"").expect("translate");
+    assert_eq!(t.collection, "products");
+    assert_eq!(t.pipeline.as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn sql_translate_insert_basic() {
+    let t = translate("shop", "INSERT INTO products VALUES {\"name\":\"A\"}").expect("translate");
+    assert_eq!(t.collection, "products");
+}
+
+#[test]
+fn sql_translate_delete_basic() {
+    let t = translate("shop", "DELETE FROM products WHERE status = \"archived\"").expect("translate");
+    assert_eq!(t.collection, "products");
 }
 
 #[test]
