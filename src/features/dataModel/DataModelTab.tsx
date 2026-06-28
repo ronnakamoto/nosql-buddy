@@ -1,5 +1,17 @@
-import { useEffect, useMemo, useState } from "react";
-import { Network, LayoutGrid, List } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ChevronDown,
+  FileCode,
+  FileJson,
+  Image as ImageIcon,
+  LayoutGrid,
+  List,
+  Network,
+  Search,
+} from "lucide-react";
+import { save } from "@tauri-apps/plugin-dialog";
+import { writeFile, writeTextFile } from "@tauri-apps/plugin-fs";
+import type { Edge as RFEdge, Node as RFNode } from "@xyflow/react";
 import commands, {
   type CollectionSummary,
   type DataModelGraph,
@@ -9,6 +21,7 @@ import { useToast } from "../../context/ToastContext";
 import { ShapeTreeView } from "./ShapeTreeView";
 import { DiagramCanvas } from "./DiagramCanvas";
 import { InfoPopover } from "../../components/InfoPopover";
+import { graphToJson, graphToMermaid, graphToSvg, svgToPngBytes } from "./exportGraph";
 
 export interface DataModelTabProps {
   connectionId: string;
@@ -25,7 +38,17 @@ export function DataModelTab({ connectionId, database }: DataModelTabProps) {
   const [viewMode, setViewMode] = useState<ViewMode>("diagram");
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [confidenceThreshold, setConfidenceThreshold] = useState(0.25);
+  const [selectorSearch, setSelectorSearch] = useState("");
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const toast = useToast();
+
+  // Most recent laid-out (and user-dragged) nodes/edges reported by the canvas.
+  // Used for SVG/PNG export so the exported image matches the on-screen layout,
+  // including any manual drags.
+  const laidOutRef = useRef<{ nodes: RFNode[]; edges: RFEdge[] }>({ nodes: [], edges: [] });
+  const exportBtnRef = useRef<HTMLButtonElement>(null);
+  const exportMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setCollections(null);
@@ -50,6 +73,18 @@ export function DataModelTab({ connectionId, database }: DataModelTabProps) {
       })
       .catch((e) => toast.push(formatError(e), "error"));
   }, [connectionId, database]);
+
+  // Close the export dropdown on outside click.
+  useEffect(() => {
+    if (!exportMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (exportMenuRef.current?.contains(e.target as Node)) return;
+      if (exportBtnRef.current?.contains(e.target as Node)) return;
+      setExportMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [exportMenuOpen]);
 
   const runScan = async () => {
     if (selected.size === 0) {
@@ -94,6 +129,27 @@ export function DataModelTab({ connectionId, database }: DataModelTabProps) {
     });
   };
 
+  const selectAll = () => setSelected(new Set(collections?.map((c) => c.name) ?? []));
+  const selectNone = () => setSelected(new Set());
+  const selectRelated = () => {
+    if (!graph || graph.edges.length === 0) {
+      toast.push("Scan first to detect relationships.", "info");
+      return;
+    }
+    const related = new Set<string>();
+    for (const e of graph.edges) {
+      if (e.hidden) continue;
+      related.add(e.fromCollection);
+      related.add(e.toCollection);
+    }
+    if (related.size === 0) {
+      toast.push("No relationships detected at the current confidence threshold.", "info");
+      return;
+    }
+    setSelected(related);
+    toast.push(`Selected ${related.size} related collections.`, "success");
+  };
+
   const selectedShape = useMemo(
     () => graph?.nodes.find((n) => n.collection === selectedNode),
     [graph, selectedNode],
@@ -110,12 +166,95 @@ export function DataModelTab({ connectionId, database }: DataModelTabProps) {
     return { ...graph, edges: visibleEdges };
   }, [graph, visibleEdges]);
 
+  const filteredCollections = useMemo(() => {
+    const q = selectorSearch.trim().toLowerCase();
+    if (!q) return collections ?? [];
+    return (collections ?? []).filter((c) => c.name.toLowerCase().includes(q));
+  }, [collections, selectorSearch]);
+
+  const onLayoutChange = useCallback(
+    (nodes: RFNode[], edges: RFEdge[]) => {
+      laidOutRef.current = { nodes, edges };
+    },
+    [],
+  );
+
+  // ─── Export ───────────────────────────────────────────────────────
+
+  const runExport = async (format: "json" | "mermaid" | "svg" | "png") => {
+    if (!graph) {
+      toast.push("Scan a database before exporting.", "info");
+      return;
+    }
+    setExporting(true);
+    setExportMenuOpen(false);
+    try {
+      if (format === "json") {
+        const path = await save({
+          defaultPath: `${database}-data-model.json`,
+          filters: [{ name: "JSON", extensions: ["json"] }],
+        });
+        if (!path) return;
+        await writeTextFile(path, graphToJson(graph));
+        toast.push(`Exported JSON to ${path}`, "success");
+        return;
+      }
+
+      if (format === "mermaid") {
+        const path = await save({
+          defaultPath: `${database}-data-model.mmd`,
+          filters: [{ name: "Mermaid", extensions: ["mmd", "mermaid"] }],
+        });
+        if (!path) return;
+        await writeTextFile(path, graphToMermaid(graph));
+        toast.push(`Exported Mermaid diagram to ${path}`, "success");
+        return;
+      }
+
+      // SVG + PNG use the laid-out nodes/edges so manual drags are captured.
+      const { nodes, edges } = laidOutRef.current;
+      if (nodes.length === 0) {
+        toast.push("Switch to the Diagram view before exporting an image.", "info");
+        return;
+      }
+      const { svg, width, height } = graphToSvg(nodes, edges, database);
+
+      if (format === "svg") {
+        const path = await save({
+          defaultPath: `${database}-data-model.svg`,
+          filters: [{ name: "SVG", extensions: ["svg"] }],
+        });
+        if (!path) return;
+        await writeTextFile(path, svg);
+        toast.push(`Exported SVG to ${path}`, "success");
+        return;
+      }
+
+      const bytes = await svgToPngBytes(svg, width, height);
+      const path = await save({
+        defaultPath: `${database}-data-model.png`,
+        filters: [{ name: "PNG", extensions: ["png"] }],
+      });
+      if (!path) return;
+      await writeFile(path, bytes);
+      toast.push(`Exported PNG to ${path}`, "success");
+    } catch (e) {
+      toast.push(`Export failed: ${formatError(e)}`, "error");
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <div className="pane">
       <div className="pane__header">
         <h2 className="pane__title">Data Model — {database}</h2>
         <div className="pane__sub">
-          {scanning ? "Scanning collections…" : graph ? `${graph.nodes.length} collections · ${visibleEdges.length} relationships` : "Select collections and scan"}
+          {scanning
+            ? "Scanning collections…"
+            : graph
+              ? `${graph.nodes.length} collections · ${visibleEdges.length} relationships`
+              : "Select collections and scan"}
         </div>
       </div>
       <div className="pane__body" style={{ display: "flex", flexDirection: "column" }}>
@@ -189,6 +328,39 @@ export function DataModelTab({ connectionId, database }: DataModelTabProps) {
             <p><strong>Relationships</strong>: tabular list of all detected links with confidence scores.</p>
             <p><strong>Shape</strong>: detailed field-by-field schema for a single collection.</p>
           </InfoPopover>
+          <div className="data-model__export">
+            <button
+              ref={exportBtnRef}
+              className="btn btn--ghost btn--sm"
+              onClick={() => setExportMenuOpen((o) => !o)}
+              aria-expanded={exportMenuOpen}
+              aria-haspopup="menu"
+              disabled={!graph || exporting}
+              title={graph ? "Export the data model" : "Scan a database to enable export"}
+            >
+              {exporting ? "Exporting…" : "Export"} <ChevronDown size={12} />
+            </button>
+            {exportMenuOpen && (
+              <div ref={exportMenuRef} className="conn-pop data-model__export-menu" role="menu">
+                <button className="conn-pop__item" role="menuitem" onClick={() => void runExport("png")}>
+                  <span className="conn-pop__icon" aria-hidden="true"><ImageIcon size={14} /></span>
+                  <span className="conn-pop__label">PNG image</span>
+                </button>
+                <button className="conn-pop__item" role="menuitem" onClick={() => void runExport("svg")}>
+                  <span className="conn-pop__icon" aria-hidden="true"><FileCode size={14} /></span>
+                  <span className="conn-pop__label">SVG image</span>
+                </button>
+                <button className="conn-pop__item" role="menuitem" onClick={() => void runExport("mermaid")}>
+                  <span className="conn-pop__icon" aria-hidden="true"><FileCode size={14} /></span>
+                  <span className="conn-pop__label">Mermaid diagram</span>
+                </button>
+                <button className="conn-pop__item" role="menuitem" onClick={() => void runExport("json")}>
+                  <span className="conn-pop__icon" aria-hidden="true"><FileJson size={14} /></span>
+                  <span className="conn-pop__label">JSON model</span>
+                </button>
+              </div>
+            )}
+          </div>
           <span className="shape-toolbar__hint">
             {selected.size} selected · {collections?.length ?? 0} total collections
           </span>
@@ -197,15 +369,31 @@ export function DataModelTab({ connectionId, database }: DataModelTabProps) {
           <div className="data-model__selector">
             <div className="data-model__selector-header">
               <span>Collections</span>
-              <button
-                className="btn btn--ghost btn--sm"
-                onClick={() => setSelected(new Set(collections?.map((c) => c.name) ?? []))}
-              >
-                All
-              </button>
+              <div className="data-model__selector-actions">
+                <button className="btn btn--ghost btn--sm" onClick={selectAll} title="Select all">All</button>
+                <button className="btn btn--ghost btn--sm" onClick={selectNone} title="Select none">None</button>
+                <button
+                  className="btn btn--ghost btn--sm"
+                  onClick={selectRelated}
+                  disabled={!graph}
+                  title={graph ? "Select only collections in detected relationships" : "Scan first to enable"}
+                >
+                  Related
+                </button>
+              </div>
+            </div>
+            <div className="data-model__selector-search">
+              <Search size={12} aria-hidden="true" />
+              <input
+                type="text"
+                placeholder="Filter collections…"
+                value={selectorSearch}
+                onChange={(e) => setSelectorSearch(e.target.value)}
+                aria-label="Filter collections"
+              />
             </div>
             <div className="data-model__selector-list">
-              {collections?.map((c) => (
+              {filteredCollections.map((c) => (
                 <label key={c.name} className="data-model__selector-row">
                   <input
                     type="checkbox"
@@ -220,6 +408,9 @@ export function DataModelTab({ connectionId, database }: DataModelTabProps) {
                   </span>
                 </label>
               ))}
+              {filteredCollections.length === 0 && (
+                <div className="data-model__selector-empty">No collections match.</div>
+              )}
             </div>
           </div>
           <div className="data-model__main">
@@ -230,6 +421,7 @@ export function DataModelTab({ connectionId, database }: DataModelTabProps) {
                   setSelectedNode(name);
                   setViewMode("shape");
                 }}
+                onLayoutChange={onLayoutChange}
               />
             )}
             {viewMode === "relationships" && graph && (

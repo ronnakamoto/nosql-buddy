@@ -477,6 +477,7 @@
 /* React Flow canvas overrides. */
 
 .diagram-canvas {
+  position: relative;
   flex: 1;
   min-height: 0;
   background: var(--bg);
@@ -652,4 +653,102 @@
   background: var(--surface-2);
   color: var(--ink-muted);
   border: 1px solid var(--border);
+}
+
+/* Export dropdown — anchored under the toolbar Export button. */
+
+.data-model__export {
+  position: relative;
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+
+.data-model__export-menu {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  right: 0;
+  left: auto;
+  width: 200px;
+  max-height: none;
+  z-index: var(--z-dropdown);
+}
+
+/* Collection selector header — actions row + search. */
+
+.data-model__selector-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.data-model__selector-actions .btn--sm {
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 500;
+}
+
+.data-model__selector-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--ink-faint);
+}
+
+.data-model__selector-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  font-size: var(--font-size-sm);
+  font-family: var(--font-mono);
+  outline: none;
+}
+
+.data-model__selector-search input::placeholder {
+  color: var(--ink-faint);
+}
+
+.data-model__selector-empty {
+  padding: 12px 10px;
+  font-size: var(--font-size-sm);
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
+/* Keyboard-shortcut hint overlaid on the canvas. */
+
+.diagram-canvas__shortcuts {
+  position: absolute;
+  bottom: 8px;
+  left: 48px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--font-size-xs);
+  color: var(--ink-faint);
+  background: color-mix(in oklch, var(--surface) 80%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px 7px;
+  user-select: none;
+}
+
+.diagram-canvas__shortcuts kbd {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--ink-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0 4px;
+}
+
+.diagram-canvas__shortcuts-note {
+  font-size: var(--font-size-xs);
+  color: var(--ink-faint);
+  margin: 0;
 }

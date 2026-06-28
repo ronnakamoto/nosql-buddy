@@ -1,17 +1,21 @@
 import Dagre from "@dagrejs/dagre";
 import type { Edge, Node } from "@xyflow/react";
 
-const NODE_WIDTH = 260;
-const HEADER_HEIGHT = 38;
-const FIELD_HEIGHT = 26;
-const PADDING = 24;
+/** Shared node geometry. Kept here so the SVG/PNG exporter renders nodes at the
+ * same dimensions React Flow + dagre lay them out at. */
+export const NODE_WIDTH = 260;
+export const HEADER_HEIGHT = 38;
+export const FIELD_HEIGHT = 26;
+export const FIELD_PADDING = 24;
+export const VISIBLE_FIELDS = 8;
+export const MORE_ROW_HEIGHT = 22;
 
-function nodeHeight(node: Node): number {
+export function nodeHeight(node: Node): number {
   const shape = (node.data as { shape?: { root?: { children?: unknown[] } } })?.shape;
   const fieldCount = Array.isArray(shape?.root?.children) ? shape.root.children.length : 0;
-  const visible = Math.min(fieldCount, 8);
-  const hasMore = fieldCount > 8 ? 22 : 0;
-  return HEADER_HEIGHT + visible * FIELD_HEIGHT + hasMore + PADDING;
+  const visible = Math.min(fieldCount, VISIBLE_FIELDS);
+  const hasMore = fieldCount > VISIBLE_FIELDS ? MORE_ROW_HEIGHT : 0;
+  return HEADER_HEIGHT + visible * FIELD_HEIGHT + hasMore + FIELD_PADDING;
 }
 
 export function layoutGraph(nodes: Node[], edges: Edge[]): { nodes: Node[]; edges: Edge[] } {
