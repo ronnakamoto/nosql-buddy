@@ -27,6 +27,7 @@ import { InfoPopover } from "../components/InfoPopover";
 import { Alert } from "../components/Alert";
 import { useToast } from "../context/ToastContext";
 import { Minus, Maximize2, X } from "lucide-react";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 
 /** Prism grammar name for each driver-code language. Mirrors the map
  *  in DriverCodePanel so the SQL tab's read-only code block shares the
@@ -397,6 +398,7 @@ export function QueryTab({
   const [importOpen, setImportOpen] = useState(false);
   const [exportSource, setExportSource] = useState<ExportSourceDto | null>(null);
   const [pendingDelete, setPendingDelete] = useState<{ idx: number; docId: unknown } | null>(null);
+  const [pendingBulkDelete, setPendingBulkDelete] = useState<{ ids: unknown[]; count: number } | null>(null);
   const [viewMode, setViewMode] = useState<ResultsViewMode>("table");
   const [resultsPanelState, setResultsPanelState] = useState<ResultsPanelState>("expanded");
   const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(() => new Set());
@@ -1079,7 +1081,7 @@ export function QueryTab({
     toast.push(`Insert failed: ${message}`, "error");
   }
 
-  async function handleBulkDeleteSelected() {
+  function handleBulkDeleteSelected() {
     if (selectedDocuments.length === 0) {
       toast.push("Select one or more rows first.", "warning");
       return;
@@ -1091,9 +1093,13 @@ export function QueryTab({
       toast.push("Selected rows lack `_id` fields.", "error");
       return;
     }
-    if (!window.confirm(`Delete ${ids.length} selected document(s)? This cannot be undone.`)) {
-      return;
-    }
+    setPendingBulkDelete({ ids, count: ids.length });
+  }
+
+  async function confirmBulkDelete() {
+    if (!pendingBulkDelete) return;
+    const { ids } = pendingBulkDelete;
+    setPendingBulkDelete(null);
     try {
       const filter = ids.length === 1 ? { _id: ids[0] } : { _id: { $in: ids } };
       const count = await commands.deleteDocuments(
@@ -1753,24 +1759,22 @@ export function QueryTab({
           }}
         />
       )}
-      {pendingDelete && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
-          <div className="modal" style={{ width: "min(420px, 92vw)" }}>
-            <div className="modal__header">
-              <h2 className="modal__title">Delete document?</h2>
-            </div>
-            <div className="modal__body">
-              <p>This will permanently delete the document from {database}.{collection}.</p>
-            </div>
-            <div className="modal__footer" style={{ display: "flex", gap: 8, justifyContent: "flex-end", padding: "var(--space-3)" }}>
-              <button className="btn btn--sm" onClick={cancelDelete}>Cancel</button>
-              <button className="btn btn--primary btn--sm" onClick={() => void confirmDelete()}>
-                Delete
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title="Delete document?"
+        description={`This will permanently remove the document from ${database}.${collection}. This cannot be undone.`}
+        confirmLabel="Delete document"
+        onConfirm={() => void confirmDelete()}
+        onCancel={cancelDelete}
+      />
+      <ConfirmDialog
+        open={pendingBulkDelete !== null}
+        title={`Delete ${pendingBulkDelete?.count ?? 0} document${(pendingBulkDelete?.count ?? 0) === 1 ? "" : "s"}?`}
+        description={`This will permanently remove ${pendingBulkDelete?.count ?? 0} selected document${(pendingBulkDelete?.count ?? 0) === 1 ? "" : "s"} from ${database}.${collection}. This cannot be undone.`}
+        confirmLabel={`Delete ${pendingBulkDelete?.count ?? 0} document${(pendingBulkDelete?.count ?? 0) === 1 ? "" : "s"}`}
+        onConfirm={() => void confirmBulkDelete()}
+        onCancel={() => setPendingBulkDelete(null)}
+      />
     </div>
   );
 }

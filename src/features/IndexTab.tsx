@@ -6,6 +6,7 @@ import commands, {
   type IndexStats,
 } from "../ipc/commands";
 import { Modal } from "../components/Modal";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { InfoPopover } from "../components/InfoPopover";
 import { useToast } from "../context/ToastContext";
 
@@ -250,6 +251,8 @@ export function IndexTab({ connectionId, database, collection }: IndexTabProps) 
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [sortByUsage, setSortByUsage] = useState(false);
   const [statsUnavailable, setStatsUnavailable] = useState(false);
+  const [pendingDrop, setPendingDrop] = useState<string | null>(null);
+  const [pendingRecreate, setPendingRecreate] = useState<string | null>(null);
 
   async function refresh() {
     setStatsUnavailable(false);
@@ -312,23 +315,27 @@ export function IndexTab({ connectionId, database, collection }: IndexTabProps) 
     setModalOpen(true);
   }
 
-  async function handleSubmit() {
+  function handleSubmit() {
     const result = draftToRequest(draft, connectionId, database, collection);
     if ("error" in result) {
       toast.push(result.error, "error");
       return;
     }
     // Editing an existing index means MongoDB cannot apply option changes
-    // in place, so we drop then recreate. The modal note informed the
-    // user of this; confirm once more because dropping is destructive.
+    // in place, so we drop then recreate. Show a confirmation dialog before
+    // proceeding because dropping is destructive.
     if (editingName) {
-      if (
-        !window.confirm(
-          `Drop and recreate index "${editingName}"? The existing index will be removed first.`,
-        )
-      ) {
-        return;
-      }
+      setPendingRecreate(editingName);
+      return;
+    }
+    void doSubmit();
+  }
+
+  async function doSubmit() {
+    const result = draftToRequest(draft, connectionId, database, collection);
+    if ("error" in result) {
+      toast.push(result.error, "error");
+      return;
     }
     try {
       if (editingName) {
@@ -346,8 +353,12 @@ export function IndexTab({ connectionId, database, collection }: IndexTabProps) 
     }
   }
 
-  async function handleDrop(name: string) {
-    if (!window.confirm(`Drop index ${name}? This cannot be undone.`)) return;
+  function handleDrop(name: string) {
+    setPendingDrop(name);
+  }
+
+  async function confirmDrop(name: string) {
+    setPendingDrop(null);
     try {
       await commands.dropIndex(connectionId, database, collection, name);
       toast.push(`Dropped index "${name}".`, "success");
@@ -563,6 +574,25 @@ export function IndexTab({ connectionId, database, collection }: IndexTabProps) 
           </p>
         )}
       </Modal>
+
+      <ConfirmDialog
+        open={pendingDrop !== null}
+        title="Drop index?"
+        description="The index will be permanently removed. Queries that relied on it will fall back to a collection scan until a new index is created."
+        confirmLabel="Drop index"
+        detail={pendingDrop ?? undefined}
+        onConfirm={() => { if (pendingDrop) void confirmDrop(pendingDrop); }}
+        onCancel={() => setPendingDrop(null)}
+      />
+      <ConfirmDialog
+        open={pendingRecreate !== null}
+        title="Drop and recreate index?"
+        description="The existing index will be dropped first, then recreated with the new options. The collection will be unindexed briefly while the new index builds."
+        confirmLabel="Drop and recreate"
+        detail={pendingRecreate ?? undefined}
+        onConfirm={() => { setPendingRecreate(null); void doSubmit(); }}
+        onCancel={() => setPendingRecreate(null)}
+      />
     </div>
   );
 }

@@ -821,6 +821,19 @@
   background: color-mix(in oklch, var(--danger-500), transparent 88%);
   border-color: var(--danger-500);
 }
+/* Filled danger: solid red background for confirm-destroy actions. */
+.btn--danger-filled {
+  background: var(--danger-500);
+  border-color: var(--danger-500);
+  color: var(--accent-fg);
+}
+.btn--danger-filled:hover {
+  background: oklch(from var(--danger-500) calc(l - 0.05) c h);
+  border-color: oklch(from var(--danger-500) calc(l - 0.05) c h);
+}
+.btn--danger-filled:focus-visible {
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--danger-500) 30%, transparent);
+}
 .btn.is-active {
   background: var(--accent-100);
   border-color: color-mix(in oklch, var(--accent-500), transparent 55%);
@@ -1703,6 +1716,80 @@
   margin-right: auto;
   font-size: var(--font-size-xs);
   color: var(--ink-faint);
+}
+
+/* ─── ConfirmDialog ─────────────────────────────────────────────────── */
+/* Compact destructive-action dialog built on .modal base. No scrollable
+   body: content is always short. Cancel is focused by default so Escape
+   or Enter on the focused Cancel button never fires the destructive action. */
+.confirm-dialog {
+  grid-template-rows: auto auto auto;
+}
+
+.confirm-dialog__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-4) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.confirm-dialog__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  background: color-mix(in oklch, var(--danger-500) 12%, var(--surface));
+  color: var(--danger-500);
+  flex-shrink: 0;
+}
+
+.confirm-dialog__title {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+
+.confirm-dialog__body {
+  padding: var(--space-4);
+  display: grid;
+  gap: var(--space-3);
+}
+
+.confirm-dialog__desc {
+  margin: 0;
+  font-size: var(--font-size-md);
+  color: var(--ink-muted);
+  line-height: var(--line-height-normal);
+}
+
+.confirm-dialog__detail {
+  display: block;
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--ink);
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
+.confirm-dialog__footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border);
+  background: var(--surface);
 }
 
 .field {

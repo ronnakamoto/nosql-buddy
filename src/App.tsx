@@ -28,6 +28,7 @@ import { TimelinePanel } from "./features/timeline/TimelinePanel";
 import { DumpWizard } from "./features/backupRestore/DumpWizard";
 import { RestoreWizard } from "./features/backupRestore/RestoreWizard";
 import type { CollectionItem } from "./features/backupRestore/CollectionCheckList";
+import { ConfirmDialog } from "./components/ConfirmDialog";
 import {
   Search,
   Terminal,
@@ -596,6 +597,7 @@ export default function App() {
   const [restoreTarget, setRestoreTarget] = useState<{ connectionId: string; database: string } | null>(null);
   const [refreshingConn, setRefreshingConn] = useState(false);
   const [refreshingDb, setRefreshingDb] = useState<string | null>(null);
+  const [pendingDeleteProfile, setPendingDeleteProfile] = useState<ProfileSummary | null>(null);
   const toasts = useToasts();
 
   // Initial load
@@ -821,8 +823,14 @@ export default function App() {
     }
   }, [settings, toasts]);
 
-  const deleteProfile = useCallback(async (profile: ProfileSummary) => {
-    if (!window.confirm(`Delete connection "${profile.name}"?`)) return;
+  const deleteProfile = useCallback((profile: ProfileSummary) => {
+    setPendingDeleteProfile(profile);
+  }, []);
+
+  const confirmDeleteProfile = useCallback(async () => {
+    if (!pendingDeleteProfile) return;
+    const profile = pendingDeleteProfile;
+    setPendingDeleteProfile(null);
     try {
       await commands.deleteProfile(profile.id);
       await refreshProfiles();
@@ -830,7 +838,7 @@ export default function App() {
     } catch (e) {
       toasts.push(describeError(e), "error");
     }
-  }, [toasts]);
+  }, [pendingDeleteProfile, toasts]);
 
   const openQueryTab = useCallback((connectionId: string, database: string, collection: string) => {
     const id = `q:${connectionId}:${database}:${collection}:${Date.now()}`;
@@ -1405,6 +1413,14 @@ export default function App() {
           onRestored={refreshConnection}
         />
       )}
+      <ConfirmDialog
+        open={pendingDeleteProfile !== null}
+        title="Delete connection?"
+        description={`"${pendingDeleteProfile?.name}" will be permanently removed. Any saved credentials for this connection will be deleted.`}
+        confirmLabel="Delete connection"
+        onConfirm={() => void confirmDeleteProfile()}
+        onCancel={() => setPendingDeleteProfile(null)}
+      />
     </div>
     </ToastProvider>
   );

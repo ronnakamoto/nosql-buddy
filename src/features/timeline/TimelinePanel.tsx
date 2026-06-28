@@ -23,6 +23,7 @@ import {
   operationKindLabel,
 } from "../../ipc/timeline";
 import { Alert } from "../../components/Alert";
+import { ConfirmDialog } from "../../components/ConfirmDialog";
 
 interface TimelinePanelProps {
   profileId?: string | null;
@@ -96,6 +97,7 @@ export function TimelinePanel({ profileId, database, collection }: TimelinePanel
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [noteDraft, setNoteDraft] = useState<Record<string, string>>({});
   const [savingNote, setSavingNote] = useState<string | null>(null);
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!profileId) {
@@ -136,7 +138,14 @@ export function TimelinePanel({ profileId, database, collection }: TimelinePanel
     );
   }, [entries, search]);
 
-  const handleDelete = async (id: string) => {
+  const handleDelete = (id: string) => {
+    setPendingDeleteId(id);
+  };
+
+  const confirmDelete = async () => {
+    if (!pendingDeleteId) return;
+    const id = pendingDeleteId;
+    setPendingDeleteId(null);
     try {
       const ok = await deleteTimelineEntry(id);
       if (ok) {
@@ -442,6 +451,15 @@ export function TimelinePanel({ profileId, database, collection }: TimelinePanel
           );
         })}
       </div>
+
+      <ConfirmDialog
+        open={pendingDeleteId !== null}
+        title="Delete timeline entry?"
+        description="This entry will be permanently removed from the operation timeline. This cannot be undone."
+        confirmLabel="Delete entry"
+        onConfirm={() => void confirmDelete()}
+        onCancel={() => setPendingDeleteId(null)}
+      />
     </div>
   );
 }

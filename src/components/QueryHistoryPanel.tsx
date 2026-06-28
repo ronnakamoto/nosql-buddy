@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { ConfirmDialog } from "./ConfirmDialog";
 import {
   type BookmarkEntry,
   type BookmarkSummary,
@@ -44,6 +45,7 @@ export function QueryHistoryPanel({
   const [bookmarks, setBookmarks] = useState<BookmarkSummary[]>([]);
   const [showSaveBookmark, setShowSaveBookmark] = useState(false);
   const [newBookmarkName, setNewBookmarkName] = useState("");
+  const [confirmClearOpen, setConfirmClearOpen] = useState(false);
   const panelRef = useRef<HTMLDivElement | null>(null);
 
   // Refresh the lists when the panel opens or any dependency changes.
@@ -75,6 +77,11 @@ export function QueryHistoryPanel({
   }
 
   function handleClearHistory() {
+    setConfirmClearOpen(true);
+  }
+
+  function doClearHistory() {
+    setConfirmClearOpen(false);
     try {
       clearHistory(connectionId, database, collection, mode);
       refresh();
@@ -283,6 +290,14 @@ export function QueryHistoryPanel({
           )}
         </div>
       )}
+      <ConfirmDialog
+        open={confirmClearOpen}
+        title="Clear query history?"
+        description="All recent runs for this collection and mode will be permanently removed. Saved bookmarks will not be affected."
+        confirmLabel="Clear history"
+        onConfirm={doClearHistory}
+        onCancel={() => setConfirmClearOpen(false)}
+      />
     </span>
   );
 }
