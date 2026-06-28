@@ -169,7 +169,7 @@ export function CardHeader({
   actions,
   compact = false,
 }: {
-  title: string;
+  title: ReactNode;
   subtitle?: string;
   icon?: ReactNode;
   actions?: ReactNode;
@@ -296,7 +296,7 @@ export function StatusCard({
   detail,
   action,
 }: {
-  title: string;
+  title: ReactNode;
   status: "good" | "warning" | "danger" | "neutral";
   value: ReactNode;
   detail?: ReactNode;

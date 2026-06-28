@@ -60,7 +60,7 @@ function RootCompare({
         <span className="audit-root-compare__full">{localRoot || "—"}</span>
       </div>
       <div className="audit-root-compare__row">
-        <span className="audit-root-compare__label">On-chain root</span>
+        <span className="audit-root-compare__label">On-chain root<InfoPopover label="Help: On-chain root" title="On-chain root"><p>The Merkle root previously committed to the Stellar blockchain. Used as the trusted reference to detect tampering.</p></InfoPopover></span>
         <span className="audit-root-compare__hash" title={onchainRoot?.rootHex}>
           {shortHash(onchainRoot?.rootHex)}
         </span>
@@ -233,21 +233,21 @@ export function AuditInvestigation({
 
       {/* 1. Root comparison */}
       <div className="audit-investigation__block">
-        <div className="audit-investigation__block-title">Root comparison</div>
+        <div className="audit-investigation__block-title">Root comparison<InfoPopover label="Help: Root comparison" title="Root comparison"><p>Compares the locally computed Merkle root against the on-chain root. A mismatch indicates the audit log was tampered with.</p></InfoPopover></div>
         <RootCompare localRoot={localRoot} onchainRoot={onchainRoot} />
       </div>
 
       {/* 2. Proof inspector (shown when a proof has been generated) */}
       {currentProof && (
         <div className="audit-investigation__block">
-          <div className="audit-investigation__block-title">Proof inspector</div>
+          <div className="audit-investigation__block-title">Proof inspector<InfoPopover label="Help: Proof inspector" title="Proof inspector"><p>Displays the cryptographic Merkle proof for a selected event. Proofs can be independently verified against the batch root.</p></InfoPopover></div>
           <ProofInspector proof={currentProof} onExport={handleExportProof} />
         </div>
       )}
 
       {/* 3. Tamper timeline */}
       <div className="audit-investigation__block">
-        <div className="audit-investigation__block-title">Verification history</div>
+        <div className="audit-investigation__block-title">Verification history<InfoPopover label="Help: Verification history" title="Verification history"><p>Chronological record of all integrity verification runs. Each entry shows whether the audit log matched the on-chain commitment at that time.</p></InfoPopover></div>
         <TamperTimeline history={verificationHistory} />
       </div>
 
@@ -255,7 +255,7 @@ export function AuditInvestigation({
       {connectionId && (
         <div className="audit-investigation__block">
           <StatusCard
-            title="Oplog completeness"
+            title={<>Oplog completeness<InfoPopover label="Help: Oplog completeness" title="Oplog completeness"><p>Compares the MongoDB oplog (replication log) against the audit commitment. Verifies that every database operation is accounted for in the audit trail.</p></InfoPopover></>}
             status={oplogStatus}
             value={
               oplogReport

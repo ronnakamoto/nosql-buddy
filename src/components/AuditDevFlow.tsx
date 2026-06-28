@@ -26,6 +26,7 @@ import type { ProofResult, DevSetupParams } from "../ipc/commands";
 import { onAuditSetupProgress } from "../ipc/events";
 import { useToast } from "../context/ToastContext";
 import { FlaskConical, CircleDashed, X, CheckCircle, ExternalLink } from "lucide-react";
+import { InfoPopover } from "./InfoPopover";
 
 /**
  * Dev Mode — a guided, step-based audit control surface.
@@ -1067,7 +1068,7 @@ function DevLiveViewInner() {
       {/* ─── Integrity row ──────────────────────────────────────────── */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "var(--space-4)" }}>
         <StatusCard
-          title="On-chain root"
+          title={<>On-chain root<InfoPopover label="Help: On-chain root" title="On-chain root"><p>The Merkle root previously committed to the Stellar blockchain. Used as the trusted reference to detect tampering.</p></InfoPopover></>}
           status={onChainStatus}
           value={onchain ? shortHash(onchain.rootHex) : pollingOnchain ? "…" : "—"}
           detail={onchain ? `Batch ${onchain.sequence} · ${formatTs(onchain.timestamp)}` : pollingOnchain ? "Waiting for Stellar confirmation…" : "No batch committed yet"}
@@ -1075,7 +1076,7 @@ function DevLiveViewInner() {
         />
 
         <StatusCard
-          title="Multi-party sign-off"
+          title={<>Multi-party sign-off<InfoPopover label="Help: Multi-party sign-off" title="Multi-party sign-off"><p>Attester nodes cryptographically sign the committed batch root. More attesters increase trust and decentralization.</p></InfoPopover></>}
           status={attestationStatus}
           value={onchain ? `${onChainAttesters.length} attester${onChainAttesters.length !== 1 ? "s" : ""}` : "—"}
           detail={onChainAttesters.length > 0 ? `Signed batch ${onchain?.sequence}` : onchain ? "Awaiting attestation" : "Seal a batch to begin"}
@@ -1083,7 +1084,7 @@ function DevLiveViewInner() {
         />
 
         <StatusCard
-          title="Oplog verification"
+          title={<>Oplog verification<InfoPopover label="Help: Oplog verification" title="Oplog verification"><p>Compares the MongoDB oplog against the audit commitment to verify every database operation is accounted for.</p></InfoPopover></>}
           status={oplogStatus}
           value={oplog ? (oplog.onChainMatchesAuditor ? "Match" : oplog.verdict === "incomplete" ? "Incomplete" : "Mismatch") : "—"}
           detail={oplog ? (oplog.verdict === "incomplete" ? (oplog.explanation ?? "Cannot verify") : `${oplog.oplogEntryCount ?? 0} entries checked`) : "Not verified yet"}
@@ -1095,7 +1096,7 @@ function DevLiveViewInner() {
       {proofResult && (
         <Card>
           <CardHeader
-            title="Inclusion Proof"
+            title={<>Inclusion Proof<InfoPopover label="Help: Inclusion Proof" title="Inclusion Proof"><p>A cryptographic Merkle proof showing that a specific event is included in the batch. Can be independently verified against the batch root.</p></InfoPopover></>}
             subtitle={`Leaf #${proofResult.leafIndex} · batch root ${shortHash(proofResult.rootHex)}`}
             actions={
               <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
@@ -1271,7 +1272,7 @@ function DevLiveViewInner() {
       <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: "var(--space-4)" }}>
         <Card compact>
           <CardHeader
-            title="Change Feed"
+            title={<>Change Feed<InfoPopover label="Help: Change Feed" title="Change Feed"><p>Real-time stream of audited MongoDB operations. Click Prove to generate a cryptographic Merkle proof for any event.</p></InfoPopover></>}
             subtitle={`${events.length} captured · ${leafCount} leaves`}
             compact
           />
@@ -1313,7 +1314,7 @@ function DevLiveViewInner() {
 
         <Card compact>
           <CardHeader
-            title="Batches"
+            title={<>Batches<InfoPopover label="Help: Batches" title="Batches"><p>History of sealed and committed audit batches. Each batch contains a group of events with a cryptographic fingerprint (Merkle root).</p></InfoPopover></>}
             subtitle={`${epochs.length} sealed`}
             compact
           />

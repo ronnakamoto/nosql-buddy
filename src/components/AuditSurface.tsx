@@ -19,6 +19,7 @@ import { AuditStatusSection } from "./AuditStatusSection";
 import { AuditChangeFeed } from "./AuditChangeFeed";
 import { AuditBatchHistory } from "./AuditBatchHistory";
 import { AuditInvestigation } from "./AuditInvestigation";
+import { InfoPopover } from "./InfoPopover";
 
 /**
  * AuditSurface — the unified, adaptive audit interface.
@@ -387,14 +388,17 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
               </button>
             </div>
           ) : (
-            <button
-              className="audit-mode-tab"
-              onClick={() => setConfirmReset(true)}
-              style={{ color: "var(--warning-500)" }}
-              title="Clear local events, batches, and verification history (on-chain history is unaffected)"
-            >
-              Reset audit data
-            </button>
+            <>
+              <button
+                className="audit-mode-tab"
+                onClick={() => setConfirmReset(true)}
+                style={{ color: "var(--warning-500)" }}
+                title="Clear local events, batches, and verification history (on-chain history is unaffected)"
+              >
+                Reset audit data
+              </button>
+              <InfoPopover label="Help: Reset audit data" title="Reset audit data"><p>Clears all local audit events, batches, and verification history. On-chain commitments and IPFS data are unaffected and remain verifiable.</p></InfoPopover>
+            </>
           )}
         </div>
 
@@ -455,6 +459,7 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
           >
             <span className="audit-section-header__title">
               Investigation
+              <InfoPopover label="Help: Investigation" title="Investigation"><p>Forensic tools for deep verification: root comparison, Merkle proof inspection, verification history, and oplog completeness checks.</p></InfoPopover>
               {verificationHistory.some((r) => r.report.tamperDetected) && (
                 <span className="audit-section-header__badge audit-section-header__badge--danger">
                   tamper
@@ -488,7 +493,7 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
             onClick={() => setAdvancedCollapsed((v) => !v)}
             style={{ cursor: "pointer" }}
           >
-            <span className="audit-section-header__title">Advanced</span>
+            <span className="audit-section-header__title">Advanced<InfoPopover label="Help: Advanced" title="Advanced audit info"><p>Detailed technical data including the current Merkle root, tree height, on-chain root, transaction hashes, and IPFS CIDs.</p></InfoPopover></span>
             <span className={`audit-section-header__chevron ${advancedCollapsed ? "" : "audit-section-header__chevron--open"}`}>▶</span>
           </div>
 

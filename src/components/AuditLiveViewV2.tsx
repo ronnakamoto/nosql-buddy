@@ -26,6 +26,7 @@ import {
   StatusCard,
 } from "./AuditUi";
 import { CircleDashed } from "lucide-react";
+import { InfoPopover } from "./InfoPopover";
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -310,7 +311,7 @@ export function AuditLiveViewV2({
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-3)" }}>
         <Card>
           <CardHeader
-            title={`Batch ${currentEpoch?.epochNumber ?? 0}`}
+            title={<>Batch {currentEpoch?.epochNumber ?? 0}<InfoPopover label="Help: Audit batch" title="Audit batch"><p>Events are grouped into batches (epochs). Once sealed, the batch fingerprint is committed to the blockchain for permanent verification.</p></InfoPopover></>}
             subtitle={epochClosed ? "Sealed and ready to commit" : `${epochEventCount} / ${epochThreshold} changes captured`}
           />
           <ProgressBar current={epochEventCount} max={epochThreshold} tone={epochClosed ? "success" : "accent"} />
@@ -352,7 +353,7 @@ export function AuditLiveViewV2({
 
         <Card>
           <CardHeader
-            title="Commit to Stellar"
+            title={<>Commit to Stellar<InfoPopover label="Help: Commit to Stellar" title="Commit to Stellar"><p>Publishes the sealed batch fingerprint to IPFS and anchors it on the Stellar blockchain. This creates a permanent, verifiable record.</p></InfoPopover></>}
             subtitle={lastClosedEpoch ? `Batch #${lastClosedEpoch.epochNumber} ready` : "Anchor the sealed batch on-chain"}
           />
           {commitLoading && (
@@ -398,7 +399,7 @@ export function AuditLiveViewV2({
       {/* ─── On-chain root + verify ─────────────────────────────────── */}
       <Card>
         <CardHeader
-          title="On-Chain Record"
+          title={<>On-Chain Record<InfoPopover label="Help: On-Chain Record" title="On-Chain Record"><p>Shows the latest batch root that has been committed to the Stellar blockchain. Use Refresh to poll for new confirmations and Verify Integrity to detect tampering.</p></InfoPopover></>}
           subtitle="Latest batch fingerprint anchored on Stellar"
           actions={
             <div style={{ display: "flex", gap: "var(--space-2)" }}>
@@ -439,7 +440,7 @@ export function AuditLiveViewV2({
       {/* ─── Oplog verification (when a MongoDB connection is active) ── */}
       {connectionId && (
         <StatusCard
-          title="Oplog verification"
+          title={<>Oplog verification<InfoPopover label="Help: Oplog verification" title="Oplog verification"><p>Compares the MongoDB oplog against the audit commitment to verify every database operation is accounted for in the audit trail.</p></InfoPopover></>}
           status={oplogStatus}
           value={
             oplogReport
@@ -476,7 +477,7 @@ export function AuditLiveViewV2({
       {/* ─── Event feed ─────────────────────────────────────────────── */}
       <Card>
         <CardHeader
-          title="Change Feed"
+          title={<>Change Feed<InfoPopover label="Help: Change Feed" title="Change Feed"><p>Real-time stream of audited MongoDB operations. Click an event to generate a cryptographic proof, or use filters to narrow by operation type.</p></InfoPopover></>}
           subtitle={`${events.length} event${events.length === 1 ? "" : "s"} captured`}
         />
         {events.length === 0 ? (
@@ -535,7 +536,7 @@ export function AuditLiveViewV2({
       {/* ─── Advanced drawer ────────────────────────────────────────── */}
       {showAdvanced && (
         <Card style={{ animation: "audit-fade-in 0.2s ease" }}>
-          <CardHeader title="Advanced" subtitle="Raw cryptographic details" />
+          <CardHeader title={<>Advanced<InfoPopover label="Help: Advanced" title="Advanced audit info"><p>Detailed technical data including the current Merkle root, tree height, on-chain root, transaction hashes, and IPFS CIDs.</p></InfoPopover></>} subtitle="Raw cryptographic details" />
           <KeyValue label="Merkle root (full)" value={rootHex || "—"} />
           <KeyValue label="Tree height" value={status?.treeHeight ?? "—"} />
           {onchainRoot && <KeyValue label="On-chain root (full)" value={onchainRoot.rootHex} />}

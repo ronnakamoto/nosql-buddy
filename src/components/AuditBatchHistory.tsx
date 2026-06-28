@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { Epoch } from "../ipc/commands";
 import { Badge, Button, KeyValue, TxHashLink } from "./AuditUi";
+import { InfoPopover } from "./InfoPopover";
 
 /**
  * AuditBatchHistory — compact epoch table with expandable rows and inline actions.
@@ -191,6 +192,7 @@ export function AuditBatchHistory({
       <div className="audit-section-header" onClick={onToggle} style={{ cursor: "pointer" }}>
         <span className="audit-section-header__title">
           Batch History
+          <InfoPopover label="Help: Batch History" title="Batch History"><p>Table of all audit batches (epochs). Each row shows status, event count, on-chain transaction, and verification state. Expand a row for details.</p></InfoPopover>
           <span className="audit-section-header__count">
             · {epochs.length} batch{epochs.length === 1 ? "" : "es"}
           </span>

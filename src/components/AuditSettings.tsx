@@ -244,7 +244,7 @@ export function AuditSettings({
 
       {/* ─── Mode ─────────────────────────────────────────────────── */}
       <Card>
-        <CardHeader title="Mode" subtitle="Switch between Dev and Production" />
+        <CardHeader title={<>Mode<InfoPopover label="Help: Audit mode" title="Audit mode"><p><strong>Dev Mode</strong>: runs a local Stellar stack via Docker for testing. No real funds required.</p><p><strong>Production Mode</strong>: connects to live Stellar testnet or mainnet using your own keypair.</p></InfoPopover></>} subtitle="Switch between Dev and Production" />
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-2)" }}>
           <ModeToggle
             active={mode === "dev"}
@@ -342,7 +342,7 @@ export function AuditSettings({
           <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-2)" }}>
             <FieldLabel>API Key<InfoPopover label="Help: Pinata credentials" title="Pinata credentials"><p>Pinata is an IPFS pinning service. Credentials are required to store audit batches permanently on IPFS.</p></InfoPopover></FieldLabel>
             <input value={pinataKey} onChange={(e) => setPinataKey(e.target.value)} placeholder="Pinata API key" style={inputStyle} />
-            <FieldLabel>API Secret</FieldLabel>
+            <FieldLabel>API Secret<InfoPopover label="Help: Pinata API Secret" title="Pinata API Secret"><p>Your Pinata API secret is used to authenticate IPFS pinning requests. Stored securely in your OS keychain.</p></InfoPopover></FieldLabel>
             <input value={pinataSecret} onChange={(e) => setPinataSecret(e.target.value)} placeholder="Pinata API secret" type="password" style={inputStyle} />
             <div style={{ display: "flex", gap: "var(--space-2)" }}>
               <Button variant="primary" loading={pinataBusy} onClick={savePinata}>Save</Button>
@@ -355,7 +355,7 @@ export function AuditSettings({
       {/* ─── Dev stack quick controls ─────────────────────────────── */}
       <Card>
         <CardHeader
-          title="Dev Stack"
+          title={<>Dev Stack<InfoPopover label="Help: Dev Stack" title="Dev Stack"><p>The local Docker stack runs Stellar Core, Horizon, and the Soroban RPC for local development and testing.</p></InfoPopover></>}
           subtitle="Quick controls for the local audit containers"
           actions={
             stack?.running ? (

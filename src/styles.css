@@ -4968,6 +4968,7 @@ input[type="checkbox"]:disabled {
   color: var(--ink);
   line-height: 1.5;
   text-transform: none;
+  font-weight: 400;
 }
 
 .info-popover__title {
@@ -4990,8 +4991,8 @@ input[type="checkbox"]:disabled {
 }
 
 .info-popover__body strong {
-  color: var(--ink);
-  font-weight: 600;
+  color: var(--ink-muted);
+  font-weight: 400;
 }
 
 .info-popover__body code {

@@ -2,6 +2,7 @@ import { useMemo, useState, useRef, useCallback } from "react";
 import type { AuditEvent } from "../ipc/commands";
 import { Badge, Button, EmptyState, Spinner } from "./AuditUi";
 import { CircleDashed } from "lucide-react";
+import { InfoPopover } from "./InfoPopover";
 
 /**
  * AuditChangeFeed — real-time stream of audit events with filter chips + search.
@@ -253,6 +254,7 @@ export function AuditChangeFeed({
       <div className="audit-section-header" onClick={onToggle} style={{ cursor: "pointer" }}>
         <span className="audit-section-header__title">
           Change Feed
+          <InfoPopover label="Help: Change Feed" title="Change Feed"><p>Real-time stream of audited MongoDB operations. Click an event to generate a cryptographic proof, or use filters to narrow by operation type.</p></InfoPopover>
           <span className="audit-section-header__count">
             · {events.length} event{events.length === 1 ? "" : "s"}
           </span>
