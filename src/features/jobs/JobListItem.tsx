@@ -126,7 +126,7 @@ export const JobListItem = memo(function JobListItem({
           <span className="job-progress-track">
             <span
               className="job-progress-fill"
-              style={{ width: `${Math.min(progress, 100)}%` }}
+              style={{ transform: `scaleX(${Math.min(progress, 100) / 100})` }}
             />
           </span>
           <span className="job-progress-text">

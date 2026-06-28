@@ -78,6 +78,11 @@ export function JobsHub({ connectionId, profileId }: JobsHubProps) {
   const runsFor = (templateId: string) =>
     jobs.filter((j) => j.parentJobId === templateId);
   const filtered = jobs.filter(matchesSearch);
+  const activeCount = jobs.filter(
+    (j) => j.status === "queued" || j.status === "running",
+  ).length;
+  const scheduledCount = jobs.filter((j) => j.schedule != null).length;
+  const visibleCount = view === "scheduled" ? templates.length : filtered.length;
 
   const openDump = useCallback(() => {
     setMenuOpen(false);
@@ -104,10 +109,33 @@ export function JobsHub({ connectionId, profileId }: JobsHubProps) {
   return (
     <div className="jobs-hub pane">
       <div className="jobs-hub__header">
-        <h2 className="jobs-hub__title">
-          <Database size={16} aria-hidden="true" />
-          Jobs Hub
-        </h2>
+        <div className="jobs-hub__topbar">
+          <div className="jobs-hub__heading">
+            <span className="jobs-hub__title-icon" aria-hidden="true">
+              <Database size={16} />
+            </span>
+            <div>
+              <h2 className="jobs-hub__title">Jobs Hub</h2>
+              <p className="jobs-hub__subtitle">
+                Monitor backups, restores, imports, and scheduled runs.
+              </p>
+            </div>
+          </div>
+          <div className="jobs-hub__summary" aria-label="Job summary">
+            <span className="jobs-hub__summary-item">
+              <strong>{visibleCount.toLocaleString()}</strong>
+              visible
+            </span>
+            <span className="jobs-hub__summary-item">
+              <strong>{activeCount.toLocaleString()}</strong>
+              active
+            </span>
+            <span className="jobs-hub__summary-item">
+              <strong>{scheduledCount.toLocaleString()}</strong>
+              scheduled
+            </span>
+          </div>
+        </div>
         <div className="jobs-hub__filters">
           <div className="jobs-hub__view-toggle" role="tablist" aria-label="Job view">
             <button
@@ -167,7 +195,7 @@ export function JobsHub({ connectionId, profileId }: JobsHubProps) {
               aria-label="Search jobs"
             />
           </div>
-          <div style={{ position: "relative" }}>
+          <div className="jobs-hub__new-job">
             <button
               ref={btnRef}
               className="btn btn--primary btn--sm"
@@ -183,15 +211,8 @@ export function JobsHub({ connectionId, profileId }: JobsHubProps) {
             {menuOpen && (
               <div
                 ref={menuRef}
-                className="conn-pop"
+                className="conn-pop jobs-hub__new-job-menu"
                 role="menu"
-                style={{
-                  position: "absolute",
-                  top: "calc(100% + 4px)",
-                  right: 0,
-                  width: 200,
-                  zIndex: "var(--z-dropdown)",
-                }}
               >
                 <button className="conn-pop__item" role="menuitem" onClick={openDump}>
                   <span className="conn-pop__icon" aria-hidden="true">
@@ -252,7 +273,7 @@ export function JobsHub({ connectionId, profileId }: JobsHubProps) {
               Dump a database, export a collection, or import data to see jobs here.
             </p>
             {connectionId && (
-              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <div className="jobs-hub__empty-actions">
                 <button className="btn btn--primary btn--sm" onClick={openDump}>
                   <Download size={14} />
                   Dump database
