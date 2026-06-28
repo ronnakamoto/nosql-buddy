@@ -243,6 +243,109 @@ export interface SchemaReport {
   fields: SchemaField[];
 }
 
+// ─── Shape (recursive document-shape inference) ──────────────────────
+
+export type ShapeType =
+  | "objectId"
+  | "string"
+  | "int"
+  | "long"
+  | "double"
+  | "decimal"
+  | "bool"
+  | "date"
+  | "object"
+  | "array"
+  | "null"
+  | "binary"
+  | "timestamp"
+  | "other";
+
+export interface ShapeNode {
+  path: string;
+  name: string;
+  types: Record<string, number>;
+  presence: number;
+  nullRatio: number;
+  cardinality?: number | null;
+  children: ShapeNode[];
+  arrayItem?: ShapeNode | null;
+  topValues: SchemaValueCount[] | null;
+  numericStats: SchemaNumericStats | null;
+  dateStats: SchemaDateStats | null;
+}
+
+export interface CollectionShape {
+  database: string;
+  collection: string;
+  kind: CollectionKind;
+  documentCount: number | null;
+  sampledDocuments: number;
+  root: ShapeNode;
+  maxDepth: number;
+  warnings: string[];
+  indexes: IndexInfo[];
+}
+
+// ─── Data Model / Relationships ─────────────────────────────────────
+
+export type RelationshipKind = "one-to-one" | "one-to-many" | "many-to-one" | "many-to-many";
+
+export type SignalKind = "objectIdMatch" | "namingConvention" | "lookup" | "index" | "appSchema";
+
+export interface RelationshipSignal {
+  kind: SignalKind;
+  detail: string;
+  weight: number;
+}
+
+export interface RelationshipEdge {
+  id: string;
+  fromCollection: string;
+  toCollection: string;
+  fromField: string;
+  toField: string;
+  kind: RelationshipKind;
+  confidence: number;
+  signals: RelationshipSignal[];
+  viaCollection?: string | null;
+  confirmed?: boolean;
+  hidden?: boolean;
+}
+
+export interface DataModelGraph {
+  database: string;
+  nodes: CollectionShape[];
+  edges: RelationshipEdge[];
+  generatedAt: string;
+  sampleSize: number;
+  confidenceThreshold: number;
+  warnings: string[];
+}
+
+export interface ScanScopeRequest {
+  connectionId: string;
+  database: string;
+  collections: string[];
+  sampleSize: number;
+  signals: {
+    objectIdMatch: boolean;
+    naming: boolean;
+    lookup: boolean;
+    index: boolean;
+    appSchema: boolean;
+  };
+  confidenceThreshold: number;
+  appSchemaPath?: string | null;
+}
+
+export interface DataModelProgressPayload {
+  collection: string;
+  done: number;
+  total: number;
+  error?: string | null;
+}
+
 export interface SqlTranslation {
   database: string;
   collection: string;
@@ -1197,6 +1300,20 @@ const commands = {
       database,
       collection,
     }),
+  sampleShape: (
+    connectionId: string,
+    database: string,
+    collection: string,
+    sampleSize?: number,
+  ) =>
+    invoke<CollectionShape>("sample_shape", {
+      request: {
+        connectionId,
+        database,
+        collection,
+        sampleSize: sampleSize ?? null,
+      },
+    }),
   insertDocument: (request: InsertRequest) =>
     invoke<string>("insert_document", { request }),
   updateDocuments: (request: UpdateRequest) =>
@@ -1268,6 +1385,8 @@ const commands = {
     invoke<ArchivePreviewEntry[]>("preview_archive", { sourceDir }),
   restoreDatabase: (request: RestoreRequest) =>
     invoke<RestoreResult>("restore_database", { request }),
+  scanDataModel: (request: ScanScopeRequest) =>
+    invoke<DataModelGraph>("scan_data_model", { request }),
 
   shellAutocomplete: (request: {
     connectionId: string;

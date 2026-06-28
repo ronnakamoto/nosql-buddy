@@ -194,6 +194,7 @@ pub fn run() {
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             commands::ping,
+            commands::data_model::scan_data_model,
             commands::system::app_info,
             commands::settings::get_settings,
             commands::settings::update_settings,
@@ -220,6 +221,7 @@ pub fn run() {
             commands::mongo::explain_find,
             commands::mongo::explain_aggregate,
             commands::mongo::sample_schema,
+            commands::mongo::sample_shape,
             commands::mongo::insert_document,
             commands::mongo::update_documents,
             commands::mongo::delete_documents,

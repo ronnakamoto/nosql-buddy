@@ -207,7 +207,7 @@ pub fn compute_schema_report(docs: &[Document]) -> SchemaReport {
 
 /// Build `NUM_BUCKETS` equal-width buckets between `min` and `max`. If all
 /// values are equal, a single bucket holding everything is returned.
-fn histogram(vals: &[f64], min: f64, max: f64) -> Vec<SchemaBucket> {
+pub(crate) fn histogram(vals: &[f64], min: f64, max: f64) -> Vec<SchemaBucket> {
     if vals.is_empty() {
         return Vec::new();
     }
@@ -238,7 +238,7 @@ fn histogram(vals: &[f64], min: f64, max: f64) -> Vec<SchemaBucket> {
 }
 
 /// Build `NUM_BUCKETS` equal-width time buckets (epoch millis) between min and max.
-fn date_histogram(vals: &[i64], min_ms: i64, max_ms: i64) -> Vec<SchemaDateBucket> {
+pub(crate) fn date_histogram(vals: &[i64], min_ms: i64, max_ms: i64) -> Vec<SchemaDateBucket> {
     if vals.is_empty() {
         return Vec::new();
     }

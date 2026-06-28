@@ -249,7 +249,7 @@ pub async fn list_collections(client: &Client, db: &str) -> AppResult<Vec<Collec
     Ok(out)
 }
 
-async fn classify_collection_name(client: &Client, db: &str, name: &str) -> CollectionKind {
+pub(crate) async fn classify_collection_name(client: &Client, db: &str, name: &str) -> CollectionKind {
     let info = client
         .database(db)
         .run_command(bson::doc! {

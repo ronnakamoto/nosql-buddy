@@ -4,6 +4,7 @@
 //! panics (no `unwrap`/`expect`). New domains get a new file and a re-export here.
 
 pub mod connections;
+pub mod data_model;
 pub mod driver_code;
 pub mod dump;
 pub mod export;

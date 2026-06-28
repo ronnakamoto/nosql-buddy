@@ -868,6 +868,51 @@ pub async fn sample_schema(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SampleShapeRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub collection: String,
+    pub sample_size: Option<u32>,
+}
+
+#[tauri::command]
+pub async fn sample_shape(
+    request: SampleShapeRequest,
+    state: State<'_, AppState>,
+) -> AppResult<crate::mongo::shape::CollectionShape> {
+    let entry = state.clients.get(&request.connection_id).await?;
+    let db = entry.client.database(&request.database);
+    let coll = db.collection::<Document>(&request.collection);
+    let sample_size = request
+        .sample_size
+        .map(|s| s.clamp(1, 10000) as i64)
+        .unwrap_or(DEFAULT_SAMPLE as i64);
+    let cursor = coll
+        .aggregate(vec![bson::doc! { "$sample": { "size": sample_size } }])
+        .await?;
+    let docs: Vec<Document> = cursor.try_collect().await?;
+    let document_count = db
+        .run_command(bson::doc! { "count": &request.collection })
+        .await
+        .ok()
+        .and_then(|d| {
+            d.get_i32("n")
+                .ok()
+                .map(|v| v as u64)
+                .or_else(|| d.get_i64("n").ok().map(|v| v as u64))
+        });
+    Ok(crate::mongo::shape::compute_collection_shape(
+        request.database,
+        request.collection,
+        CollectionKind::Collection,
+        document_count,
+        &docs,
+        Vec::new(),
+    ))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InsertRequest {
     pub connection_id: String,
     pub database: String,

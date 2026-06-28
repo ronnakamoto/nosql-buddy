@@ -94,3 +94,18 @@ export async function onJobLogEntry(
     handler(event.payload),
   );
 }
+
+export interface DataModelProgressPayload {
+  collection: string;
+  done: number;
+  total: number;
+  error?: string | null;
+}
+
+export async function onDataModelProgress(
+  handler: (payload: DataModelProgressPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<DataModelProgressPayload>("data-model-progress", (event) =>
+    handler(event.payload),
+  );
+}

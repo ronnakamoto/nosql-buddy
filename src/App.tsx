@@ -22,6 +22,7 @@ import { ToastProvider } from "./context/ToastContext";
 import AuditPanel from "./components/AuditPanel";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { JobsHub } from "./features/jobs/JobsHub";
+import { DataModelTab } from "./features/dataModel/DataModelTab";
 import { DumpWizard } from "./features/backupRestore/DumpWizard";
 import { RestoreWizard } from "./features/backupRestore/RestoreWizard";
 import type { CollectionItem } from "./features/backupRestore/CollectionCheckList";
@@ -46,6 +47,7 @@ import {
   Download,
   Upload,
   RefreshCw,
+  Network,
 } from "lucide-react";
 
 type AuditView = "chooser" | "dev" | "production" | "settings";
@@ -56,7 +58,8 @@ type Tab =
   | { id: string; kind: "schema"; connectionId: string; database: string; collection: string }
   | { id: string; kind: "shell"; connectionId: string; database: string; collection: string }
   | { id: string; kind: "audit"; auditMode: AuditMode; auditView: AuditView }
-  | { id: string; kind: "jobs"; connectionId?: string | null; profileId?: string | null };
+  | { id: string; kind: "jobs"; connectionId?: string | null; profileId?: string | null }
+  | { id: string; kind: "diagram"; connectionId: string; database: string };
 
 interface ActiveConnection {
   handle: ConnectionHandle;
@@ -78,11 +81,13 @@ function NewTabMenu({
   onNewShell,
   onOpenAudit,
   onOpenJobs,
+  onOpenDiagram,
 }: {
   onNewQuery: () => void;
   onNewShell: () => void;
   onOpenAudit: () => void;
   onOpenJobs: () => void;
+  onOpenDiagram: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ top: number; left: number | null; right: number | null }>({ top: 0, left: 0, right: null });
@@ -181,6 +186,15 @@ function NewTabMenu({
             <span className="new-tab-menu__icon" aria-hidden="true"><HardDrive size={14} /></span>
             <span className="new-tab-menu__label">Jobs</span>
             <span className="new-tab-menu__hint">Dump, restore, export, import</span>
+          </button>
+          <button
+            className="new-tab-menu__item"
+            role="menuitem"
+            onClick={() => { setOpen(false); onOpenDiagram(); }}
+          >
+            <span className="new-tab-menu__icon" aria-hidden="true"><Network size={14} /></span>
+            <span className="new-tab-menu__label">Data Model</span>
+            <span className="new-tab-menu__hint">Schema map & relationships</span>
           </button>
         </div>
       )}
@@ -291,9 +305,11 @@ function ConnectionRowMenu({
 function DatabaseRowMenu({
   onDump,
   onRestore,
+  onVisualize,
 }: {
   onDump: () => void;
   onRestore: () => void;
+  onVisualize: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ top: number; left: number | null; right: number | null }>({ top: 0, left: null, right: null });
@@ -357,6 +373,9 @@ function DatabaseRowMenu({
           </button>
           <button className="row-menu__item" role="menuitem" onClick={run(onRestore)}>
             <Upload size={14} aria-hidden="true" /> Restore to database
+          </button>
+          <button className="row-menu__item" role="menuitem" onClick={run(onVisualize)}>
+            <Network size={14} aria-hidden="true" /> Visualize data model
           </button>
         </div>
       )}
@@ -819,6 +838,13 @@ export default function App() {
     setActiveTabId(id);
   }, []);
 
+  const openDiagramTab = useCallback((connectionId: string, database: string) => {
+    const id = `dm:${connectionId}:${database}:${Date.now()}`;
+    const tab: Tab = { id, kind: "diagram", connectionId, database };
+    setTabs((current) => [...current, tab]);
+    setActiveTabId(id);
+  }, []);
+
   const openShellTab = useCallback((connectionId: string, database: string) => {
     const id = `sh:${connectionId}:${database}:${Date.now()}`;
     const tab: Tab = {
@@ -874,6 +900,12 @@ export default function App() {
       });
       for (const db of active.databases) {
         const collections = active.collections[db.name] ?? [];
+        items.push({
+          id: `dm:${db.name}`,
+          label: `Visualize data model for ${db.name}`,
+          hint: "Data Model tab",
+          run: () => openDiagramTab(active.handle.connectionId, db.name),
+        });
         for (const coll of collections) {
           items.push({
             id: `q:${db.name}:${coll.name}`,
@@ -885,7 +917,7 @@ export default function App() {
       }
     }
     return items;
-  }, [active, tabs, closeConnection, openQueryTab]);
+  }, [active, tabs, closeConnection, openDiagramTab, openQueryTab]);
 
   const tree = useMemo(() => {
     if (!active) return null;
@@ -929,6 +961,9 @@ export default function App() {
                     }}
                     onRestore={() => {
                       setRestoreTarget({ connectionId: active.handle.connectionId, database: db.name });
+                    }}
+                    onVisualize={() => {
+                      openDiagramTab(active.handle.connectionId, db.name);
                     }}
                   />
                 )}
@@ -1153,7 +1188,9 @@ export default function App() {
                         ? <Terminal size={14} />
                         : t.kind === "jobs"
                           ? <HardDrive size={14} />
-                          : <ShieldCheck size={14} />}
+                          : t.kind === "diagram"
+                            ? <Network size={14} />
+                            : <ShieldCheck size={14} />}
               </span>
               <span className="tab__label">
                 {t.kind === "query"
@@ -1164,9 +1201,11 @@ export default function App() {
                       ? `${t.database}.${t.collection}`
                       : t.kind === "shell"
                         ? t.database
-                        : t.kind === "jobs"
-                          ? "Jobs"
-                          : "Audit Log"}
+                        : t.kind === "diagram"
+                          ? t.database
+                          : t.kind === "jobs"
+                            ? "Jobs"
+                            : "Audit Log"}
               </span>
               <span className="tab__kind" aria-hidden="true">
                 {t.kind === "query"
@@ -1177,9 +1216,11 @@ export default function App() {
                       ? "Schema"
                       : t.kind === "shell"
                         ? "Shell"
-                        : t.kind === "jobs"
-                          ? "Jobs"
-                          : "ZK"}
+                        : t.kind === "diagram"
+                          ? "Model"
+                          : t.kind === "jobs"
+                            ? "Jobs"
+                            : "ZK"}
               </span>
               <span
                 className="tab__close"
@@ -1220,6 +1261,12 @@ export default function App() {
                 ]);
                 setActiveTabId(id);
               }}
+              onOpenDiagram={() =>
+                openDiagramTab(
+                  active.handle.connectionId,
+                  active.databases[0]?.name ?? "admin",
+                )
+              }
             />
           )}
         </div>
@@ -1398,6 +1445,9 @@ const TabPane = memo(function TabPane({
   }
   if (tab.kind === "jobs") {
     return <JobsHub connectionId={tab.connectionId} profileId={tab.profileId} />;
+  }
+  if (tab.kind === "diagram") {
+    return <DataModelTab connectionId={tab.connectionId} database={tab.database} />;
   }
   return (
     <SchemaTab
