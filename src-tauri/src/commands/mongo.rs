@@ -204,6 +204,7 @@ pub async fn find_documents(
     state: State<'_, AppState>,
 ) -> AppResult<DocumentPage> {
     let entry = state.clients.get(&request.connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
     let skip = request.skip.unwrap_or(0);
     let filter = parse_optional_doc(Some(&request.filter_json))?.unwrap_or_default();
@@ -234,6 +235,24 @@ pub async fn find_documents(
         .iter()
         .map(doc_to_display_json)
         .collect::<AppResult<Vec<_>>>()?;
+
+    // Record timeline entry.
+    let ctx = crate::mongo::operation_recorder::RecordContext::new(
+        profile_id,
+        request.connection_id.clone(),
+        request.database.clone(),
+        request.collection.clone(),
+    );
+    crate::mongo::operation_recorder::record_find(
+        &state.timeline,
+        &ctx,
+        &request.filter_json,
+        docs.len() as u64,
+        elapsed,
+        false,
+    )
+    .await;
+
     Ok(DocumentPage {
         documents,
         limit,
@@ -299,6 +318,7 @@ pub async fn find_page(
     state: State<'_, AppState>,
 ) -> AppResult<DocumentPage> {
     let entry = state.clients.get(&request.connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let page_size = resolve_page_size(request.page_size);
     let user_filter = parse_optional_doc(Some(&request.filter_json))?.unwrap_or_default();
     let projection = parse_optional_doc(request.projection_json.as_deref())?;
@@ -349,6 +369,26 @@ pub async fn find_page(
         CountMode::Estimated => estimate_count(&coll).await,
     };
 
+    // Record timeline entry only for the initial page (page 1) to avoid
+    // flooding the timeline with pagination noise.
+    if request.page <= 1 {
+        let ctx = crate::mongo::operation_recorder::RecordContext::new(
+            profile_id,
+            request.connection_id.clone(),
+            request.database.clone(),
+            request.collection.clone(),
+        );
+        crate::mongo::operation_recorder::record_find(
+            &state.timeline,
+            &ctx,
+            &request.filter_json,
+            docs.len() as u64,
+            elapsed,
+            false,
+        )
+        .await;
+    }
+
     let documents = docs
         .iter()
         .map(doc_to_display_json)
@@ -380,6 +420,7 @@ pub async fn aggregate_documents(
     state: State<'_, AppState>,
 ) -> AppResult<DocumentPage> {
     let entry = state.clients.get(&request.connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
     let mut pipeline: Vec<Document> = serde_json::from_str(&request.pipeline_json)?;
     if !pipeline.iter().any(|s| s.get("$limit").is_some()) {
@@ -398,6 +439,24 @@ pub async fn aggregate_documents(
         .iter()
         .map(doc_to_display_json)
         .collect::<AppResult<Vec<_>>>()?;
+
+    // Record timeline entry.
+    let ctx = crate::mongo::operation_recorder::RecordContext::new(
+        profile_id,
+        request.connection_id.clone(),
+        request.database.clone(),
+        request.collection.clone(),
+    );
+    crate::mongo::operation_recorder::record_aggregate(
+        &state.timeline,
+        &ctx,
+        &request.pipeline_json,
+        docs.len() as u64,
+        elapsed,
+        false,
+    )
+    .await;
+
     Ok(DocumentPage {
         documents,
         limit,
@@ -435,6 +494,7 @@ pub async fn aggregate_page(
     state: State<'_, AppState>,
 ) -> AppResult<DocumentPage> {
     let entry = state.clients.get(&request.connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let page_size = resolve_page_size(request.page_size);
     let skip = request.page.saturating_sub(1) * page_size as u64;
     let mut pipeline: Vec<Document> = serde_json::from_str(&request.pipeline_json)?;
@@ -482,6 +542,26 @@ pub async fn aggregate_page(
     } else {
         None
     };
+
+    // Record timeline entry only for the initial page (page 1) to avoid
+    // flooding the timeline with pagination noise.
+    if request.page <= 1 {
+        let ctx = crate::mongo::operation_recorder::RecordContext::new(
+            profile_id,
+            request.connection_id.clone(),
+            request.database.clone(),
+            request.collection.clone(),
+        );
+        crate::mongo::operation_recorder::record_aggregate(
+            &state.timeline,
+            &ctx,
+            &request.pipeline_json,
+            docs.len() as u64,
+            elapsed,
+            false,
+        )
+        .await;
+    }
 
     let documents = docs
         .iter()
@@ -630,6 +710,7 @@ pub async fn create_index(
     state: State<'_, AppState>,
 ) -> AppResult<String> {
     let entry = state.clients.get(&request.connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let key: Document = serde_json::from_str(&request.key_json)?;
     let coll = entry
         .client
@@ -661,7 +742,9 @@ pub async fn create_index(
         .keys(key)
         .options(Some(options))
         .build();
+    let started = Instant::now();
     coll.create_index(model).await?;
+    let elapsed = started.elapsed().as_millis() as u64;
     let _ = crate::audit::interceptor::record_create_index(
         &state.audit_log,
         &request.database,
@@ -679,6 +762,24 @@ pub async fn create_index(
         }))
         .unwrap_or_default(),
     );
+
+    // Record timeline entry.
+    let ctx = crate::mongo::operation_recorder::RecordContext::new(
+        profile_id,
+        request.connection_id.clone(),
+        request.database.clone(),
+        request.collection.clone(),
+    );
+    crate::mongo::operation_recorder::record_index_create(
+        &state.timeline,
+        &ctx,
+        &request.key_json,
+        elapsed,
+        false,
+        None,
+    )
+    .await;
+
     Ok(request.name)
 }
 
@@ -691,17 +792,38 @@ pub async fn drop_index(
     state: State<'_, AppState>,
 ) -> AppResult<()> {
     let entry = state.clients.get(&connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let coll = entry
         .client
         .database(&database)
         .collection::<Document>(&collection);
+    let started = Instant::now();
     coll.drop_index(&name).await?;
+    let elapsed = started.elapsed().as_millis() as u64;
     let _ = crate::audit::interceptor::record_drop_index(
         &state.audit_log,
         &database,
         &collection,
         &name,
     );
+
+    // Record timeline entry.
+    let ctx = crate::mongo::operation_recorder::RecordContext::new(
+        profile_id,
+        connection_id.clone(),
+        database.clone(),
+        collection.clone(),
+    );
+    crate::mongo::operation_recorder::record_index_drop(
+        &state.timeline,
+        &ctx,
+        &name,
+        elapsed,
+        false,
+        None,
+    )
+    .await;
+
     Ok(())
 }
 
@@ -926,12 +1048,15 @@ pub async fn insert_document(
     state: State<'_, AppState>,
 ) -> AppResult<String> {
     let entry = state.clients.get(&request.connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let doc: Document = serde_json::from_str(&request.document_json)?;
     let coll = entry
         .client
         .database(&request.database)
         .collection::<Document>(&request.collection);
+    let start = Instant::now();
     let result = coll.insert_one(doc.clone()).await?;
+    let elapsed = start.elapsed().as_millis() as u64;
     let id = result
         .inserted_id
         .as_object_id()
@@ -949,6 +1074,24 @@ pub async fn insert_document(
         &request.collection,
         &request.document_json,
     );
+
+    // Record timeline entry.
+    let ctx = crate::mongo::operation_recorder::RecordContext::new(
+        profile_id,
+        request.connection_id.clone(),
+        request.database.clone(),
+        request.collection.clone(),
+    );
+    crate::mongo::operation_recorder::record_insert(
+        &state.timeline,
+        &ctx,
+        &request.document_json,
+        1,
+        elapsed,
+        false,
+        None,
+    )
+    .await;
 
     Ok(id)
 }
@@ -971,6 +1114,7 @@ pub async fn update_documents(
     state: State<'_, AppState>,
 ) -> AppResult<UpdateResult> {
     let entry = state.clients.get(&request.connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let filter = parse_optional_doc(Some(&request.filter_json))?.unwrap_or_default();
     let update = parse_optional_doc(Some(&request.update_json))?
         .ok_or_else(|| AppError::InvalidBson("update document must be a JSON object".into()))?;
@@ -979,11 +1123,13 @@ pub async fn update_documents(
         .database(&request.database)
         .collection::<Document>(&request.collection);
     let opts = mongodb::options::UpdateOptions::builder().upsert(request.upsert).build();
+    let start = Instant::now();
     let res = if request.multi {
         coll.update_many(filter, update).with_options(opts).await?
     } else {
         coll.update_one(filter, update).with_options(opts).await?
     };
+    let elapsed = start.elapsed().as_millis() as u64;
 
     // Record audit event.
     let _ = crate::audit::interceptor::record_update(
@@ -993,6 +1139,26 @@ pub async fn update_documents(
         &request.filter_json,
         &request.update_json,
     );
+
+    // Record timeline entry.
+    let ctx = crate::mongo::operation_recorder::RecordContext::new(
+        profile_id,
+        request.connection_id.clone(),
+        request.database.clone(),
+        request.collection.clone(),
+    );
+    crate::mongo::operation_recorder::record_update(
+        &state.timeline,
+        &ctx,
+        &request.filter_json,
+        &request.update_json,
+        res.matched_count,
+        res.modified_count,
+        elapsed,
+        false,
+        None,
+    )
+    .await;
 
     Ok(UpdateResult {
         matched_count: res.matched_count,
@@ -1127,12 +1293,15 @@ pub async fn delete_documents(
     state: State<'_, AppState>,
 ) -> AppResult<u64> {
     let entry = state.clients.get(&connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let filter = parse_optional_doc(Some(&filter_json))?.unwrap_or_default();
     let coll = entry
         .client
         .database(&database)
         .collection::<Document>(&collection);
+    let start = Instant::now();
     let res = coll.delete_many(filter).await?;
+    let elapsed = start.elapsed().as_millis() as u64;
 
     // Record audit event.
     let _ = crate::audit::interceptor::record_delete(
@@ -1141,6 +1310,24 @@ pub async fn delete_documents(
         &collection,
         &filter_json,
     );
+
+    // Record timeline entry.
+    let ctx = crate::mongo::operation_recorder::RecordContext::new(
+        profile_id,
+        connection_id.clone(),
+        database.clone(),
+        collection.clone(),
+    );
+    crate::mongo::operation_recorder::record_delete(
+        &state.timeline,
+        &ctx,
+        &filter_json,
+        res.deleted_count,
+        elapsed,
+        false,
+        None,
+    )
+    .await;
 
     Ok(res.deleted_count)
 }

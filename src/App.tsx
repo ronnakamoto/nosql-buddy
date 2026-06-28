@@ -24,6 +24,7 @@ import AuditPanel from "./components/AuditPanel";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { JobsHub } from "./features/jobs/JobsHub";
 import { DataModelTab } from "./features/dataModel/DataModelTab";
+import { TimelinePanel } from "./features/timeline/TimelinePanel";
 import { DumpWizard } from "./features/backupRestore/DumpWizard";
 import { RestoreWizard } from "./features/backupRestore/RestoreWizard";
 import type { CollectionItem } from "./features/backupRestore/CollectionCheckList";
@@ -49,6 +50,7 @@ import {
   Upload,
   RefreshCw,
   Network,
+  History,
 } from "lucide-react";
 
 type AuditView = "chooser" | "dev" | "production" | "settings";
@@ -60,6 +62,7 @@ type Tab =
   | { id: string; kind: "shell"; connectionId: string; database: string; collection: string }
   | { id: string; kind: "audit"; auditMode: AuditMode; auditView: AuditView }
   | { id: string; kind: "jobs"; connectionId?: string | null; profileId?: string | null }
+  | { id: string; kind: "timeline"; connectionId?: string | null; profileId?: string | null; database?: string | null; collection?: string | null }
   | { id: string; kind: "diagram"; connectionId: string; database: string };
 
 interface ActiveConnection {
@@ -83,12 +86,14 @@ function NewTabMenu({
   onOpenAudit,
   onOpenJobs,
   onOpenDiagram,
+  onOpenTimeline,
 }: {
   onNewQuery: () => void;
   onNewShell: () => void;
   onOpenAudit: () => void;
   onOpenJobs: () => void;
   onOpenDiagram: () => void;
+  onOpenTimeline: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ top: number; left: number | null; right: number | null }>({ top: 0, left: 0, right: null });
@@ -187,6 +192,15 @@ function NewTabMenu({
             <span className="new-tab-menu__icon" aria-hidden="true"><HardDrive size={14} /></span>
             <span className="new-tab-menu__label">Jobs</span>
             <span className="new-tab-menu__hint">Dump, restore, export, import</span>
+          </button>
+          <button
+            className="new-tab-menu__item"
+            role="menuitem"
+            onClick={() => { setOpen(false); onOpenTimeline(); }}
+          >
+            <span className="new-tab-menu__icon" aria-hidden="true"><History size={14} /></span>
+            <span className="new-tab-menu__label">Timeline</span>
+            <span className="new-tab-menu__hint">Operation history & audit trail</span>
           </button>
           <button
             className="new-tab-menu__item"
@@ -1194,9 +1208,11 @@ export default function App() {
                         ? <Terminal size={14} />
                         : t.kind === "jobs"
                           ? <HardDrive size={14} />
-                          : t.kind === "diagram"
-                            ? <Network size={14} />
-                            : <ShieldCheck size={14} />}
+                          : t.kind === "timeline"
+                            ? <History size={14} />
+                            : t.kind === "diagram"
+                              ? <Network size={14} />
+                              : <ShieldCheck size={14} />}
               </span>
               <span className="tab__label">
                 {t.kind === "query"
@@ -1211,7 +1227,9 @@ export default function App() {
                           ? t.database
                           : t.kind === "jobs"
                             ? "Jobs"
-                            : "Audit Log"}
+                            : t.kind === "timeline"
+                              ? "Timeline"
+                              : "Audit Log"}
               </span>
               <span className="tab__kind" aria-hidden="true">
                 {t.kind === "query"
@@ -1226,7 +1244,9 @@ export default function App() {
                           ? "Model"
                           : t.kind === "jobs"
                             ? "Jobs"
-                            : "ZK"}
+                            : t.kind === "timeline"
+                              ? "Timeline"
+                              : "ZK"}
               </span>
               <span
                 className="tab__close"
@@ -1273,6 +1293,21 @@ export default function App() {
                   active.databases[0]?.name ?? "admin",
                 )
               }
+              onOpenTimeline={() => {
+                const id = `timeline-${Date.now()}`;
+                setTabs((prev) => [
+                  ...prev,
+                  {
+                    id,
+                    kind: "timeline",
+                    connectionId: active?.handle.connectionId ?? null,
+                    profileId: active?.handle.profileId ?? null,
+                    database: null,
+                    collection: null,
+                  },
+                ]);
+                setActiveTabId(id);
+              }}
             />
           )}
         </div>
@@ -1451,6 +1486,15 @@ const TabPane = memo(function TabPane({
   }
   if (tab.kind === "jobs") {
     return <JobsHub connectionId={tab.connectionId} profileId={tab.profileId} />;
+  }
+  if (tab.kind === "timeline") {
+    return (
+      <TimelinePanel
+        profileId={tab.profileId}
+        database={tab.database}
+        collection={tab.collection}
+      />
+    );
   }
   if (tab.kind === "diagram") {
     return <DataModelTab connectionId={tab.connectionId} database={tab.database} />;

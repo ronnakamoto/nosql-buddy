@@ -16,6 +16,7 @@ use crate::mongo::credentials::{InMemorySecretStore, KeyringSecretStore, SecretS
 use crate::mongo::job_store::JobStore;
 use crate::mongo::profiles::ProfileRepository;
 use crate::mongo::shell::ShellRegistry;
+use crate::mongo::timeline_store::TimelineStore;
 
 pub struct AppState {
     pub profiles: Arc<ProfileRepository>,
@@ -23,6 +24,7 @@ pub struct AppState {
     pub clients: ClientRegistry,
     pub shell_registry: ShellRegistry,
     pub jobs: JobStore,
+    pub timeline: TimelineStore,
     pub audit_log: Arc<AuditLog>,
     pub change_streams: ChangeStreamRegistry,
     pub epoch_manager: EpochManager,
@@ -45,16 +47,19 @@ impl AppState {
         // `tauri::AppHandle` to it. We use a placeholder here.
         let store_path = std::env::temp_dir().join("nosqlbuddy");
         let profiles = Arc::new(ProfileRepository::new(store_path, secrets.clone()));
-        let jobs_path = dirs::data_dir().map(|d| d.join("nosqlbuddy").join("jobs.jsonl"));
-        if let Some(ref p) = jobs_path {
-            let _ = std::fs::create_dir_all(p.parent().unwrap());
+        let data_dir = dirs::data_dir().map(|d| d.join("nosqlbuddy"));
+        if let Some(ref p) = data_dir {
+            let _ = std::fs::create_dir_all(p);
         }
+        let jobs_path = data_dir.as_ref().map(|d| d.join("jobs.jsonl"));
+        let timeline_path = data_dir.map(|d| d.join("timeline.jsonl"));
         Self {
             profiles,
             secrets,
             clients: ClientRegistry::new(),
             shell_registry: ShellRegistry::new(),
             jobs: JobStore::with_path(jobs_path),
+            timeline: TimelineStore::with_path(timeline_path),
             audit_log: Arc::new(AuditLog::new().expect("failed to create audit log")),
             change_streams: ChangeStreamRegistry::new(),
             epoch_manager: EpochManager::default(),

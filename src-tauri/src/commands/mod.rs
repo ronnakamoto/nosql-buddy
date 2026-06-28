@@ -16,6 +16,7 @@ pub mod settings;
 pub mod shell;
 pub mod sql;
 pub mod system;
+pub mod timeline;
 
 use crate::error::AppResult;
 
