@@ -86,6 +86,7 @@ pub async fn run_dump(request: &DumpRequest, state: &AppState, app: &tauri::AppH
     meta.collections = collections.clone();
     meta.output_path = Some(request.destination_dir.clone());
     meta.config_json = Some(serde_json::to_string(request).unwrap_or_default());
+    meta.profile_id = entry.profile_id.clone();
     state.jobs.create_job(meta).await;
     state
         .jobs

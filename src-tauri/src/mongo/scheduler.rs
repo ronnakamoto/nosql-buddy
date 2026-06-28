@@ -19,6 +19,7 @@ use tauri::Manager;
 use crate::commands::dump::{run_dump, DumpRequest};
 use crate::commands::export::{run_export, ExportRequest};
 use crate::events::{emit_job_status_changed, chrono_now};
+use crate::mongo::client_registry::{build_client, ClientEntry};
 use crate::mongo::job_store::{JobKind, JobMeta, JobStatus};
 use crate::state::AppState;
 
@@ -94,6 +95,7 @@ async fn tick(
         new_meta.output_path = meta.output_path.clone();
         new_meta.source_path = meta.source_path.clone();
         new_meta.config_json = meta.config_json.clone();
+        new_meta.profile_id = meta.profile_id.clone();
         new_meta.schedule = None; // One-off run; schedule stays on the original.
         new_meta.parent_job_id = Some(original_id.clone()); // Link run to its template.
         new_meta.message = "Queued by scheduler".into();
@@ -173,10 +175,25 @@ async fn execute_scheduled_job(
         .as_ref()
         .ok_or_else(|| SchedulerError::MissingConfig(meta.job_id.clone()))?;
 
+    // The connection id baked into config_json is ephemeral (minted per
+    // `open_connection`) and is almost always stale by the time a schedule
+    // fires after a restart. Resolve a live connection from the stable
+    // profile id instead.
+    let connection_id = match resolve_connection(app, state.inner(), meta).await {
+        Ok(id) => id,
+        Err(e) => {
+            let msg = format!("Scheduled job could not connect: {e}");
+            state.jobs.update_status(new_job_id, JobStatus::Failed, msg.clone()).await;
+            state.jobs.log_error(new_job_id, &msg).await;
+            emit_job_status_changed(app, new_job_id, "failed", &msg, Some(chrono_now()));
+            return Err(e);
+        }
+    };
+
     tracing::info!(
         job_id = %new_job_id,
         kind = ?meta.kind,
-        conn = %meta.connection_id,
+        conn = %connection_id,
         db = %meta.database,
         "scheduler: starting scheduled job"
     );
@@ -186,6 +203,7 @@ async fn execute_scheduled_job(
             let mut request: DumpRequest = serde_json::from_str(config_json)
                 .map_err(|e| SchedulerError::BadConfig(e.to_string()))?;
             request.job_id = new_job_id.to_string();
+            request.connection_id = connection_id.clone();
             // Ensure destination dir exists (it may have been deleted).
             if let Err(e) = std::fs::create_dir_all(&request.destination_dir) {
                 tracing::warn!(error = %e, dir = %request.destination_dir, "scheduler: failed to create destination dir");
@@ -203,6 +221,7 @@ async fn execute_scheduled_job(
             let mut request: ExportRequest = serde_json::from_str(config_json)
                 .map_err(|e| SchedulerError::BadConfig(e.to_string()))?;
             request.job_id = new_job_id.to_string();
+            request.connection_id = connection_id.clone();
             // Only file exports are schedulable; skip clipboard.
             if request.destination.kind == crate::commands::export::DestinationKind::Clipboard {
                 return Err(SchedulerError::UnsupportedDestination);
@@ -228,12 +247,59 @@ async fn execute_scheduled_job(
     Ok(())
 }
 
+/// Resolve a usable connection id for a scheduled job. Prefers an already-open
+/// connection for the job's profile; otherwise opens a fresh client from the
+/// stored profile so schedules keep working across app restarts. Legacy jobs
+/// recorded before profile tracking fall back to their stored connection id.
+async fn resolve_connection(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    meta: &JobMeta,
+) -> Result<String, SchedulerError> {
+    if meta.profile_id.is_empty() {
+        if state.clients.get(&meta.connection_id).await.is_ok() {
+            return Ok(meta.connection_id.clone());
+        }
+        if let Some(conn_id) = state.clients.only_connection_id().await {
+            return Ok(conn_id);
+        }
+        return Ok(meta.connection_id.clone());
+    }
+    if let Some(conn_id) = state.clients.connection_for_profile(&meta.profile_id).await {
+        return Ok(conn_id);
+    }
+    let profile = state
+        .profiles
+        .get(app, &meta.profile_id)
+        .map_err(|e| SchedulerError::Connection(format!("profile {}: {e}", meta.profile_id)))?;
+    let client = build_client(&profile.uri, "NoSQLBuddy-scheduler")
+        .await
+        .map_err(|e| SchedulerError::Connection(e.to_string()))?;
+    let connection_id = uuid::Uuid::new_v4().to_string();
+    state
+        .clients
+        .insert(
+            connection_id.clone(),
+            ClientEntry {
+                client,
+                profile_id: profile.id.clone(),
+                name: profile.name.clone(),
+                opened_at: chrono::Utc::now(),
+            },
+        )
+        .await;
+    tracing::info!(profile_id = %meta.profile_id, "scheduler: opened connection for scheduled job");
+    Ok(connection_id)
+}
+
 #[derive(Debug, thiserror::Error)]
 enum SchedulerError {
     #[error("job {0} has no stored config_json")]
     MissingConfig(String),
     #[error("invalid stored config: {0}")]
     BadConfig(String),
+    #[error("could not resolve a connection: {0}")]
+    Connection(String),
     #[error("scheduled job failed: {0}")]
     JobFailed(String),
     #[error("scheduling is only supported for dump and export jobs")]

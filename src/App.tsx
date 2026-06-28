@@ -56,7 +56,7 @@ type Tab =
   | { id: string; kind: "schema"; connectionId: string; database: string; collection: string }
   | { id: string; kind: "shell"; connectionId: string; database: string; collection: string }
   | { id: string; kind: "audit"; auditMode: AuditMode; auditView: AuditView }
-  | { id: string; kind: "jobs"; connectionId?: string | null };
+  | { id: string; kind: "jobs"; connectionId?: string | null; profileId?: string | null };
 
 interface ActiveConnection {
   handle: ConnectionHandle;
@@ -1209,7 +1209,15 @@ export default function App() {
               }}
               onOpenJobs={() => {
                 const id = `jobs-${Date.now()}`;
-                setTabs((prev) => [...prev, { id, kind: "jobs", connectionId: active?.handle.connectionId ?? null }]);
+                setTabs((prev) => [
+                  ...prev,
+                  {
+                    id,
+                    kind: "jobs",
+                    connectionId: active?.handle.connectionId ?? null,
+                    profileId: active?.handle.profileId ?? null,
+                  },
+                ]);
                 setActiveTabId(id);
               }}
             />
@@ -1389,7 +1397,7 @@ const TabPane = memo(function TabPane({
     );
   }
   if (tab.kind === "jobs") {
-    return <JobsHub connectionId={tab.connectionId} />;
+    return <JobsHub connectionId={tab.connectionId} profileId={tab.profileId} />;
   }
   return (
     <SchemaTab

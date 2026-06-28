@@ -264,6 +264,7 @@ pub async fn run_export(request: &ExportRequest, state: &AppState, app: &tauri::
     meta.collections = vec![request.collection.clone()];
     meta.output_path = file_path.clone();
     meta.config_json = Some(serde_json::to_string(request).unwrap_or_default());
+    meta.profile_id = entry.profile_id.clone();
     state.jobs.create_job(meta).await;
     state.jobs.update_status(&request.job_id, JobStatus::Running, "Export started".into()).await;
 
@@ -379,6 +380,7 @@ pub async fn copy_documents(
         request.database.clone(),
     );
     meta.collections = vec![request.collection.clone(), request.target.collection.clone()];
+    meta.profile_id = entry.profile_id.clone();
     state.jobs.create_job(meta).await;
     state.jobs.update_status(&request.job_id, JobStatus::Running, "Copy started".into()).await;
 

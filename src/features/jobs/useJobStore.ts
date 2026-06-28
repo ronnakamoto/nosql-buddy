@@ -4,6 +4,13 @@ import { onJobStatusChanged, onJobLogEntry } from "../../ipc/events";
 
 const POLL_INTERVAL_MS = 15000;
 
+type ScheduleUpdate = {
+  cron: string;
+  enabled: boolean;
+  retentionCount?: number | null;
+  profileId?: string | null;
+};
+
 export interface UseJobStoreReturn {
   jobs: JobMeta[];
   loading: boolean;
@@ -14,8 +21,8 @@ export interface UseJobStoreReturn {
   cancelJob: (jobId: string) => Promise<void>;
   deleteJob: (jobId: string) => Promise<void>;
   rerunJob: (jobId: string) => Promise<void>;
-  updateSchedule: (jobId: string, config: { cron: string; enabled: boolean; retentionCount?: number | null }) => Promise<void>;
-  toggleScheduleEnabled: (jobId: string, enabled: boolean) => Promise<void>;
+  updateSchedule: (jobId: string, config: ScheduleUpdate) => Promise<void>;
+  toggleScheduleEnabled: (jobId: string, enabled: boolean, profileId?: string | null) => Promise<void>;
 }
 
 export function useJobStore(): UseJobStoreReturn {
@@ -166,7 +173,7 @@ export function useJobStore(): UseJobStoreReturn {
     }
   }, []);
 
-  const updateSchedule = useCallback(async (jobId: string, config: { cron: string; enabled: boolean; retentionCount?: number | null }) => {
+  const updateSchedule = useCallback(async (jobId: string, config: ScheduleUpdate) => {
     try {
       const meta = await commands.updateSchedule({ jobId, ...config });
       setJobs((prev) => prev.map((j) => (j.jobId === jobId ? meta : j)));
@@ -176,7 +183,7 @@ export function useJobStore(): UseJobStoreReturn {
     }
   }, []);
 
-  const toggleScheduleEnabled = useCallback(async (jobId: string, enabled: boolean) => {
+  const toggleScheduleEnabled = useCallback(async (jobId: string, enabled: boolean, profileId?: string | null) => {
     const job = jobs.find((j) => j.jobId === jobId);
     if (!job?.schedule) return;
     try {
@@ -185,6 +192,7 @@ export function useJobStore(): UseJobStoreReturn {
         cron: job.schedule.cron,
         enabled,
         retentionCount: job.schedule.retentionCount,
+        profileId: profileId ?? job.profileId ?? null,
       });
       setJobs((prev) => prev.map((j) => (j.jobId === jobId ? meta : j)));
     } catch (e) {

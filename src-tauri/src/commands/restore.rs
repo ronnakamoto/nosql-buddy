@@ -126,6 +126,7 @@ pub async fn restore_database(
         .map(|m| m.target.clone())
         .collect();
     meta.collections = collections;
+    meta.profile_id = entry.profile_id.clone();
     state.jobs.create_job(meta).await;
     state
         .jobs

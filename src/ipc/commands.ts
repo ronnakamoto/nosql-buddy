@@ -452,6 +452,7 @@ export interface JobMeta {
   kind: JobKind;
   status: JobStatus;
   connectionId: string;
+  profileId: string;
   database: string;
   collections: string[];
   createdAt: string;
@@ -469,6 +470,7 @@ export interface JobMeta {
 
 export interface JobFilterRequest {
   connectionId?: string | null;
+  profileId?: string | null;
   database?: string | null;
   kind?: string | null;
   status?: string | null;
@@ -490,6 +492,7 @@ export interface JobDetailResponse {
   kind: JobKind;
   status: JobStatus;
   connectionId: string;
+  profileId: string;
   database: string;
   collections: string[];
   createdAt: string;
@@ -1255,7 +1258,7 @@ const commands = {
     invoke<boolean>("delete_job", { jobId }),
   rerunJob: (jobId: string) =>
     invoke<JobMeta>("rerun_job", { jobId }),
-  updateSchedule: (request: { jobId: string; cron: string; enabled: boolean; retentionCount?: number | null }) =>
+  updateSchedule: (request: { jobId: string; cron: string; enabled: boolean; retentionCount?: number | null; profileId?: string | null }) =>
     invoke<JobMeta>("update_schedule", { request }),
 
   // --- Dump / Restore ---

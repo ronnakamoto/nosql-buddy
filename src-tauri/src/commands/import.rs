@@ -175,6 +175,7 @@ pub async fn run_import(
     );
     meta.collections = vec![request.collection.clone()];
     meta.source_path = request.source.path.clone();
+    meta.profile_id = entry.profile_id.clone();
     state.jobs.create_job(meta).await;
     state.jobs.update_status(&request.job_id, JobStatus::Running, "Import started".into()).await;
 

@@ -9,9 +9,10 @@ import { RestoreWizard } from "../backupRestore/RestoreWizard";
 
 interface JobsHubProps {
   connectionId?: string | null;
+  profileId?: string | null;
 }
 
-export function JobsHub({ connectionId }: JobsHubProps) {
+export function JobsHub({ connectionId, profileId }: JobsHubProps) {
   const {
     jobs,
     loading,
@@ -35,17 +36,19 @@ export function JobsHub({ connectionId }: JobsHubProps) {
   const btnRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
+    // Filter by the stable profile id so job history and schedules persist
+    // across app restarts (connectionId is a fresh UUID on every launch).
     startPolling(
       view === "scheduled"
-        ? { connectionId: connectionId ?? null }
+        ? { profileId: profileId ?? null }
         : {
-            connectionId: connectionId ?? null,
+            profileId: profileId ?? null,
             kind: filterKind || null,
             status: filterStatus || null,
           },
     );
     return () => stopPolling();
-  }, [connectionId, filterKind, filterStatus, view, startPolling, stopPolling]);
+  }, [profileId, filterKind, filterStatus, view, startPolling, stopPolling]);
 
   // Close new-job dropdown on outside click.
   useEffect(() => {
@@ -85,6 +88,18 @@ export function JobsHub({ connectionId }: JobsHubProps) {
     setMenuOpen(false);
     setWizard("restore");
   }, []);
+
+  const saveSchedule = useCallback(
+    (jobId: string, config: Parameters<typeof updateSchedule>[1]) =>
+      updateSchedule(jobId, { ...config, profileId: profileId ?? null }),
+    [profileId, updateSchedule],
+  );
+
+  const toggleSchedule = useCallback(
+    (jobId: string, enabled: boolean) =>
+      toggleScheduleEnabled(jobId, enabled, profileId ?? null),
+    [profileId, toggleScheduleEnabled],
+  );
 
   return (
     <div className="jobs-hub pane">
@@ -219,7 +234,7 @@ export function JobsHub({ connectionId }: JobsHubProps) {
                 onCancel={cancelJob}
                 onDelete={deleteJob}
                 onRerun={rerunJob}
-                onToggleSchedule={toggleScheduleEnabled}
+                onToggleSchedule={toggleSchedule}
                 onEditSchedule={setEditingScheduleId}
               />
             ))}
@@ -257,7 +272,7 @@ export function JobsHub({ connectionId }: JobsHubProps) {
             onCancel={cancelJob}
             onDelete={deleteJob}
             onRerun={rerunJob}
-            onToggleSchedule={toggleScheduleEnabled}
+            onToggleSchedule={toggleSchedule}
             onEditSchedule={setEditingScheduleId}
           />
         ))}
@@ -281,7 +296,7 @@ export function JobsHub({ connectionId }: JobsHubProps) {
           jobId={editingScheduleId}
           schedule={jobs.find((j) => j.jobId === editingScheduleId)?.schedule!}
           onClose={() => setEditingScheduleId(null)}
-          onSave={updateSchedule}
+          onSave={saveSchedule}
         />
       )}
     </div>

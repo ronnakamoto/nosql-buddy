@@ -49,6 +49,12 @@ pub struct JobMeta {
     pub kind: JobKind,
     pub status: JobStatus,
     pub connection_id: String,
+    /// Stable profile id this job belongs to. Unlike `connection_id` (a fresh
+    /// UUID minted on every `open_connection`), the profile id survives app
+    /// restarts, so job history and schedules can be re-associated with a
+    /// reconnected profile.
+    #[serde(default)]
+    pub profile_id: String,
     pub database: String,
     pub collections: Vec<String>,
     pub created_at: String,
@@ -78,6 +84,7 @@ impl JobMeta {
             kind,
             status: JobStatus::Queued,
             connection_id,
+            profile_id: String::new(),
             database,
             collections: Vec::new(),
             created_at: chrono_now(),
@@ -118,6 +125,7 @@ pub enum LogLevel {
 #[serde(rename_all = "camelCase")]
 pub struct JobFilter {
     pub connection_id: Option<String>,
+    pub profile_id: Option<String>,
     pub database: Option<String>,
     pub kind: Option<JobKind>,
     pub status: Option<JobStatus>,
@@ -176,6 +184,9 @@ impl JobStore {
             }
             if meta.parent_job_id.is_none() {
                 meta.parent_job_id = existing.parent_job_id;
+            }
+            if meta.profile_id.is_empty() {
+                meta.profile_id = existing.profile_id;
             }
         }
         // If a job with the same id already exists, replace it.
@@ -297,6 +308,9 @@ impl JobStore {
             .iter()
             .filter(|j| {
                 filter.connection_id.as_ref().map_or(true, |id| &j.connection_id == id)
+                    && filter.profile_id.as_ref().map_or(true, |id| {
+                        j.profile_id.is_empty() || &j.profile_id == id
+                    })
                     && filter.database.as_ref().map_or(true, |db| &j.database == db)
                     && filter.kind.map_or(true, |k| j.kind == k)
                     && filter.status.map_or(true, |s| j.status == s)
@@ -430,6 +444,7 @@ mod tests {
             kind,
             status: JobStatus::Queued,
             connection_id: "conn-1".into(),
+            profile_id: "profile-1".into(),
             database: "test-db".into(),
             collections: vec!["col-a".into()],
             created_at: "2024-01-01T00:00:00+00:00".into(),

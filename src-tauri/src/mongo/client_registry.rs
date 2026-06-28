@@ -50,6 +50,27 @@ impl ClientRegistry {
             .ok_or_else(|| AppError::ConnectionNotFound(connection_id.to_string()))
     }
 
+    /// Return the id of any currently-open connection for the given profile,
+    /// if one exists. Used by the scheduler to re-attach a persisted job to a
+    /// live connection after the original (ephemeral) connection id is gone.
+    pub async fn connection_for_profile(&self, profile_id: &str) -> Option<String> {
+        self.inner
+            .read()
+            .await
+            .iter()
+            .find(|(_, e)| e.profile_id == profile_id)
+            .map(|(id, _)| id.clone())
+    }
+
+    pub async fn only_connection_id(&self) -> Option<String> {
+        let guard = self.inner.read().await;
+        if guard.len() == 1 {
+            guard.keys().next().cloned()
+        } else {
+            None
+        }
+    }
+
     pub async fn remove(&self, connection_id: &str) -> AppResult<ClientEntry> {
         self.inner
             .write()

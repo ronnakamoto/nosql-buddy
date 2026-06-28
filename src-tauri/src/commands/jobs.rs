@@ -15,6 +15,8 @@ pub struct ListJobsRequest {
     #[serde(default)]
     pub connection_id: Option<String>,
     #[serde(default)]
+    pub profile_id: Option<String>,
+    #[serde(default)]
     pub database: Option<String>,
     #[serde(default)]
     pub kind: Option<String>,
@@ -42,6 +44,7 @@ pub struct JobDetailResponse {
 pub async fn list_jobs(request: ListJobsRequest, state: State<'_, AppState>) -> AppResult<ListJobsResponse> {
     let filter = JobFilter {
         connection_id: request.connection_id,
+        profile_id: request.profile_id,
         database: request.database,
         kind: request.kind.and_then(|k| match k.as_str() {
             "dump" => Some(crate::mongo::job_store::JobKind::Dump),
@@ -129,6 +132,8 @@ pub struct UpdateScheduleRequest {
     pub cron: String,
     pub enabled: bool,
     pub retention_count: Option<u32>,
+    #[serde(default)]
+    pub profile_id: Option<String>,
 }
 
 #[tauri::command]
@@ -156,6 +161,11 @@ pub async fn update_schedule(
         retention_count: request.retention_count,
         next_run_at: next,
     });
+    if meta.profile_id.is_empty() {
+        if let Some(profile_id) = request.profile_id {
+            meta.profile_id = profile_id;
+        }
+    }
     state.jobs.create_job(meta.clone()).await;
     Ok(meta)
 }
