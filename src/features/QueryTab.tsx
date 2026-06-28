@@ -1387,7 +1387,7 @@ export function QueryTab({
             </div>
           )}
           {mode === "sql" && (
-            <div className="pane__body" style={{ display: "grid", gridTemplateRows: "auto 1fr 1fr 1fr" }}>
+            <div className="pane__body" style={{ display: "grid", gridTemplateRows: "auto minmax(160px, 1fr) minmax(120px, 1fr) minmax(120px, 1fr)" }}>
               <div className="sql-toolbar" style={{ display: "flex", gap: 8, alignItems: "center", padding: "var(--space-2) var(--space-3)", flexWrap: "wrap" }}>
                 <button
                   className="btn btn--sm"
@@ -1414,13 +1414,13 @@ export function QueryTab({
                   ariaLabel="SQL query"
                 />
               </div>
-              <div>
+              <div className="editor__pane">
                 <div className="editor__toolbar">
                   <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>
                     Generated pipeline
                   </span>
                 </div>
-                <pre className="json-view" style={{ background: "var(--surface)" }}>
+                <pre className="json-view" style={{ background: "var(--surface)", flex: "1 1 0", overflow: "auto", margin: 0 }}>
                   {sqlResult ? (
                     <code
                       className="language-json"
@@ -1438,7 +1438,7 @@ export function QueryTab({
                   </div>
                 )}
               </div>
-              <div>
+              <div className="editor__pane">
                 <div className="editor__toolbar" style={{ display: "flex", gap: 8, alignItems: "center" }}>
                   <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>
                     Query code
@@ -1466,7 +1466,7 @@ export function QueryTab({
                     <Alert tone={copyNotice.tone} compact>{copyNotice.text}</Alert>
                   )}
                 </div>
-                <pre className="json-view" style={{ background: "var(--surface)" }}>
+                <pre className="json-view" style={{ background: "var(--surface)", flex: "1 1 0", overflow: "auto", margin: 0 }}>
                   {sqlResult ? (
                     <code
                       className={`language-${PRISM_LANG[sqlLanguage]}`}
