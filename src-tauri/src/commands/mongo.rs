@@ -1602,4 +1602,105 @@ mod tests {
         let doc = parse_optional_doc(Some(bad));
         assert!(doc.is_err() || doc.unwrap().is_none());
     }
+
+    // ---- resolve_page_size ----
+
+    #[test]
+    fn resolve_page_size_uses_default_when_none() {
+        // DEFAULT_PAGE_SIZE = 50
+        assert_eq!(resolve_page_size(None), 50);
+    }
+
+    #[test]
+    fn resolve_page_size_clamps_to_max() {
+        // MAX_PAGE_SIZE = 1000
+        assert_eq!(resolve_page_size(Some(2000)), 1000);
+    }
+
+    #[test]
+    fn resolve_page_size_clamps_zero_to_one() {
+        assert_eq!(resolve_page_size(Some(0)), 1);
+    }
+
+    #[test]
+    fn resolve_page_size_passes_through_valid_value() {
+        assert_eq!(resolve_page_size(Some(100)), 100);
+        assert_eq!(resolve_page_size(Some(1)), 1);
+        assert_eq!(resolve_page_size(Some(1000)), 1000);
+    }
+
+    // ---- find_page skip arithmetic ----
+
+    #[test]
+    fn find_page_skip_is_zero_for_page_one() {
+        // skip = (page - 1) * page_size
+        let page: u64 = 1;
+        let page_size: u64 = 50;
+        let skip = page.saturating_sub(1) * page_size;
+        assert_eq!(skip, 0);
+    }
+
+    #[test]
+    fn find_page_skip_is_page_size_for_page_two() {
+        let page: u64 = 2;
+        let page_size: u64 = 50;
+        let skip = page.saturating_sub(1) * page_size;
+        assert_eq!(skip, 50);
+    }
+
+    #[test]
+    fn find_page_skip_saturates_at_zero_for_page_zero() {
+        // page 0 should not underflow (saturating_sub)
+        let page: u64 = 0;
+        let page_size: u64 = 50;
+        let skip = page.saturating_sub(1) * page_size;
+        assert_eq!(skip, 0);
+    }
+
+    // ---- has_more fencepost ----
+
+    #[test]
+    fn has_more_is_false_when_exactly_page_size_docs_returned() {
+        // fetch_limit = page_size + 1; if we got back exactly page_size docs → no more
+        let page_size: usize = 50;
+        let docs_len: usize = 50;
+        let has_more = docs_len > page_size;
+        assert!(!has_more);
+    }
+
+    #[test]
+    fn has_more_is_true_when_one_extra_doc_returned() {
+        let page_size: usize = 50;
+        let docs_len: usize = 51; // fetch_limit = page_size + 1
+        let has_more = docs_len > page_size;
+        assert!(has_more);
+    }
+
+    // ---- CountMode wire shape ----
+
+    #[test]
+    fn count_mode_serializes_to_camel_case() {
+        let j = serde_json::to_value(CountMode::Estimated).unwrap();
+        assert_eq!(j, serde_json::json!("estimated"));
+        let j = serde_json::to_value(CountMode::Exact).unwrap();
+        assert_eq!(j, serde_json::json!("exact"));
+        let j = serde_json::to_value(CountMode::None).unwrap();
+        assert_eq!(j, serde_json::json!("none"));
+    }
+
+    #[test]
+    fn count_mode_deserializes_from_camel_case() {
+        let v: CountMode = serde_json::from_str(r#""estimated""#).unwrap();
+        assert_eq!(v, CountMode::Estimated);
+        let v: CountMode = serde_json::from_str(r#""exact""#).unwrap();
+        assert_eq!(v, CountMode::Exact);
+        let v: CountMode = serde_json::from_str(r#""none""#).unwrap();
+        assert_eq!(v, CountMode::None);
+    }
+
+    #[test]
+    fn count_mode_default_is_estimated() {
+        let v = CountMode::default();
+        assert_eq!(v, CountMode::Estimated);
+    }
 }

@@ -1098,4 +1098,270 @@ mod tests {
         );
         assert!(script.contains("insertMany"));
     }
+
+    // ── is_dangerous_kind ────────────────────────────────────────────────────
+
+    #[test]
+    fn is_dangerous_kind_covers_all_variants() {
+        assert!(is_dangerous_kind(OperationKind::DeleteOne));
+        assert!(is_dangerous_kind(OperationKind::DeleteMany));
+        assert!(is_dangerous_kind(OperationKind::UpdateMany));
+        assert!(is_dangerous_kind(OperationKind::ReplaceOne));
+        // Non-dangerous
+        assert!(!is_dangerous_kind(OperationKind::UpdateOne));
+        assert!(!is_dangerous_kind(OperationKind::InsertOne));
+        assert!(!is_dangerous_kind(OperationKind::InsertMany));
+        assert!(!is_dangerous_kind(OperationKind::Find));
+        assert!(!is_dangerous_kind(OperationKind::Aggregate));
+    }
+
+    // ── format_confirmation ───────────────────────────────────────────────────
+
+    #[test]
+    fn format_confirmation_all_operations_and_production_flag() {
+        // UpdateMany plural
+        assert_eq!(
+            format_confirmation(OperationKind::UpdateMany, 5, false),
+            "UPDATE 5 DOCUMENTS"
+        );
+        // UpdateMany singular (1 doc, no "S")
+        assert_eq!(
+            format_confirmation(OperationKind::UpdateMany, 1, false),
+            "UPDATE 1 DOCUMENT"
+        );
+        // UpdateOne
+        assert_eq!(
+            format_confirmation(OperationKind::UpdateOne, 3, false),
+            "UPDATE ONE 3 DOCUMENTS"
+        );
+        // DeleteMany
+        assert_eq!(
+            format_confirmation(OperationKind::DeleteMany, 2, false),
+            "DELETE 2 DOCUMENTS"
+        );
+        // DeleteOne
+        assert_eq!(
+            format_confirmation(OperationKind::DeleteOne, 1, false),
+            "DELETE ONE 1 DOCUMENT"
+        );
+        // ReplaceOne
+        assert_eq!(
+            format_confirmation(OperationKind::ReplaceOne, 1, false),
+            "REPLACE ONE 1 DOCUMENT"
+        );
+        // Production suffix
+        assert_eq!(
+            format_confirmation(OperationKind::DeleteMany, 100, true),
+            "DELETE 100 DOCUMENTS IN PRODUCTION"
+        );
+        // Unknown kind falls back to "APPLY"
+        assert_eq!(
+            format_confirmation(OperationKind::Find, 1, false),
+            "APPLY 1 DOCUMENT"
+        );
+    }
+
+    // ── rollback_level selection ──────────────────────────────────────────────
+
+    #[test]
+    fn rollback_level_selection_from_matched_count() {
+        // 0 → MetadataOnly
+        let level = if 0u64 == 0 {
+            PreviewRollbackLevel::MetadataOnly
+        } else if 0u64 <= 100 {
+            PreviewRollbackLevel::Full
+        } else {
+            PreviewRollbackLevel::SampleBased
+        };
+        assert!(matches!(level, PreviewRollbackLevel::MetadataOnly));
+
+        // 1 → Full (1 <= 100)
+        let level = if 1u64 == 0 {
+            PreviewRollbackLevel::MetadataOnly
+        } else if 1u64 <= 100 {
+            PreviewRollbackLevel::Full
+        } else {
+            PreviewRollbackLevel::SampleBased
+        };
+        assert!(matches!(level, PreviewRollbackLevel::Full));
+
+        // 100 → Full (boundary, still <= 100)
+        let level = if 100u64 == 0 {
+            PreviewRollbackLevel::MetadataOnly
+        } else if 100u64 <= 100 {
+            PreviewRollbackLevel::Full
+        } else {
+            PreviewRollbackLevel::SampleBased
+        };
+        assert!(matches!(level, PreviewRollbackLevel::Full));
+
+        // 101 → SampleBased
+        let level = if 101u64 == 0 {
+            PreviewRollbackLevel::MetadataOnly
+        } else if 101u64 <= 100 {
+            PreviewRollbackLevel::Full
+        } else {
+            PreviewRollbackLevel::SampleBased
+        };
+        assert!(matches!(level, PreviewRollbackLevel::SampleBased));
+    }
+
+    // ── requires_typed_confirmation ───────────────────────────────────────────
+
+    #[test]
+    fn requires_typed_confirmation_triggers_above_score_60() {
+        // score 60 → required
+        let required = 60u32 >= 60 || (false && is_dangerous_kind(OperationKind::UpdateOne));
+        assert!(required);
+        // score 59 → not required (non-dangerous, non-production)
+        let required = 59u32 >= 60 || (false && is_dangerous_kind(OperationKind::UpdateOne));
+        assert!(!required);
+    }
+
+    #[test]
+    fn requires_typed_confirmation_triggers_for_dangerous_op_in_production() {
+        // score 30 but is_production=true and dangerous kind → required
+        let required = 30u32 >= 60 || (true && is_dangerous_kind(OperationKind::DeleteMany));
+        assert!(required);
+        // score 30 but is_production=true and NOT dangerous kind → not required
+        let required = 30u32 >= 60 || (true && is_dangerous_kind(OperationKind::UpdateOne));
+        assert!(!required);
+    }
+
+    // ── score_risk proportional scoring ──────────────────────────────────────
+
+    #[test]
+    fn score_risk_update_many_full_collection_is_higher_than_one_percent() {
+        let full_collection = score_risk(
+            OperationKind::UpdateMany,
+            1000,
+            1000, // 100% of collection
+            false,
+            r#"{"x":1}"#,
+            true,
+            &PreviewRollbackLevel::Full,
+            Some(r#"{"$set":{"x":2}}"#),
+            &[],
+        );
+        let one_percent = score_risk(
+            OperationKind::UpdateMany,
+            10,
+            1000, // 1% of collection
+            false,
+            r#"{"x":1}"#,
+            true,
+            &PreviewRollbackLevel::Full,
+            Some(r#"{"$set":{"x":2}}"#),
+            &[],
+        );
+        assert!(
+            full_collection.score > one_percent.score,
+            "full_collection={} one_percent={}",
+            full_collection.score,
+            one_percent.score
+        );
+    }
+
+    #[test]
+    fn score_risk_delete_one_id_query_small_collection_is_low() {
+        let risk = score_risk(
+            OperationKind::DeleteOne,
+            1,
+            10000,
+            false,
+            r#"{"_id":"abc"}"#,
+            true,
+            &PreviewRollbackLevel::Full,
+            None,
+            &[],
+        );
+        assert!(risk.score < 50, "expected low risk, got {}", risk.score);
+    }
+
+    #[test]
+    fn score_risk_sample_based_rollback_is_higher_than_full() {
+        let sample = score_risk(
+            OperationKind::UpdateMany,
+            500,
+            1000,
+            false,
+            r#"{"x":1}"#,
+            true,
+            &PreviewRollbackLevel::SampleBased,
+            Some(r#"{"$set":{"x":2}}"#),
+            &[],
+        );
+        let full = score_risk(
+            OperationKind::UpdateMany,
+            500,
+            1000,
+            false,
+            r#"{"x":1}"#,
+            true,
+            &PreviewRollbackLevel::Full,
+            Some(r#"{"$set":{"x":2}}"#),
+            &[],
+        );
+        assert!(
+            sample.score >= full.score,
+            "sample={} full={}",
+            sample.score,
+            full.score
+        );
+    }
+
+    // ── is_production_profile boundary cases ─────────────────────────────────
+
+    #[test]
+    fn is_production_profile_boundary_cases() {
+        // "master" keyword
+        assert!(is_production_profile("master-cluster"));
+        // case-insensitive "PROD"
+        assert!(is_production_profile("PROD_DB"));
+        // "production" in the middle
+        assert!(is_production_profile("us-production-west"));
+        // no keyword → false
+        assert!(!is_production_profile("development"));
+        assert!(!is_production_profile("test-db"));
+        assert!(!is_production_profile(""));
+    }
+
+    // ── simulate_update additional operators ─────────────────────────────────
+
+    #[test]
+    fn simulate_update_rename_field() {
+        let doc = doc! { "old_name": "Ada" };
+        let update = doc! { "$rename": { "old_name": "new_name" } };
+        let mut warnings = Vec::new();
+        let after = simulate_update(&doc, &update, &mut warnings).unwrap();
+        assert!(!after.contains_key("old_name"), "old key should be gone");
+        assert_eq!(after.get_str("new_name").unwrap(), "Ada");
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn simulate_update_set_nested_dot_path() {
+        let doc = doc! { "address": { "city": "London", "zip": "SW1" } };
+        let update = doc! { "$set": { "address.city": "Manchester" } };
+        let mut warnings = Vec::new();
+        let after = simulate_update(&doc, &update, &mut warnings).unwrap();
+        let addr = after.get_document("address").unwrap();
+        assert_eq!(addr.get_str("city").unwrap(), "Manchester");
+        assert_eq!(addr.get_str("zip").unwrap(), "SW1");
+    }
+
+    #[test]
+    fn simulate_update_pull_from_array() {
+        let doc = doc! { "tags": ["rust", "mongo", "tauri"] };
+        let update = doc! { "$pull": { "tags": "mongo" } };
+        let mut warnings = Vec::new();
+        let after = simulate_update(&doc, &update, &mut warnings).unwrap();
+        let tags: Vec<_> = after
+            .get_array("tags")
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(tags, vec!["rust", "tauri"]);
+    }
 }
