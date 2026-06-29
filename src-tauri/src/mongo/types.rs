@@ -11,7 +11,12 @@ use serde::{Deserialize, Serialize};
 pub enum AuthMechanism {
     #[default]
     None,
+    // kebab-case would give "scram-sha1" (no dash before digit); the frontend
+    // and connection form both use "scram-sha-1" / "scram-sha-256", so we
+    // pin the wire name explicitly.
+    #[serde(rename = "scram-sha-1")]
     ScramSha1,
+    #[serde(rename = "scram-sha-256")]
     ScramSha256,
     X509,
     Ldap,

@@ -1,8 +1,9 @@
 import { useMemo } from "react";
 import CodeMirror from "@uiw/react-codemirror";
-import { EditorView, keymap, placeholder as placeholderExt } from "@codemirror/view";
+import { EditorView, keymap, placeholder as placeholderExt, tooltips } from "@codemirror/view";
 import { json } from "@codemirror/lang-json";
 import { sql } from "@codemirror/lang-sql";
+import { linter, lintGutter, type Diagnostic } from "@codemirror/lint";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
 import {
@@ -14,6 +15,69 @@ import {
   type CompletionResult as CMCompletionResult,
 } from "@codemirror/autocomplete";
 import { getSuggestions, type EditorContext, type Suggestion } from "../lib/autocomplete";
+
+import { lintJsonText, autoFixJson } from "../lib/jsonLint";
+
+const isMac = navigator.platform.startsWith("Mac") || navigator.platform === "iPhone";
+const FIX_SHORTCUT = isMac ? "\u2318\u21E7F" : "Ctrl+Shift+F";
+
+/** Apply autoFixJson to the current editor content. */
+function applyAutoFix(view: EditorView): boolean {
+  const text = view.state.doc.toString();
+  const fixed = autoFixJson(text);
+  if (fixed === null) return false;
+  view.dispatch({
+    changes: { from: 0, to: text.length, insert: fixed },
+  });
+  return true;
+}
+
+/** Build a custom DOM node for a lint action button with an inset
+ *  keyboard-shortcut badge, similar to Zed's button style. */
+function renderFixAction(view: EditorView): Node {
+  const btn = document.createElement("button");
+  btn.className = "cm-fix-btn";
+  btn.type = "button";
+
+  const label = document.createElement("span");
+  label.textContent = "Fix all";
+
+  const kbd = document.createElement("kbd");
+  kbd.className = "cm-fix-btn__kbd";
+  kbd.textContent = FIX_SHORTCUT;
+
+  btn.append(label, kbd);
+  btn.addEventListener("click", () => applyAutoFix(view));
+  return btn;
+}
+
+/** Adapter: CodeMirror linter callback → pure lintJsonText function.
+ *  Attaches a custom-rendered "Fix all" button with kbd badge to the
+ *  first diagnostic when autofix is available. */
+function mongoJsonLinter(view: EditorView): Diagnostic[] {
+  const text = view.state.doc.toString();
+  const raw = lintJsonText(text);
+  const fixable = autoFixJson(text) !== null;
+  return raw.map((d, i): Diagnostic => {
+    const diag: Diagnostic = {
+      from: d.from,
+      to: d.to,
+      severity: d.severity,
+      message: d.message,
+    };
+    if (fixable && i === 0) {
+      diag.renderMessage = (v: EditorView) => {
+        const wrapper = document.createElement("span");
+        wrapper.className = "cm-fix-wrapper";
+        const msg = document.createElement("span");
+        msg.textContent = d.message;
+        wrapper.append(msg, renderFixAction(v));
+        return wrapper;
+      };
+    }
+    return diag;
+  });
+}
 
 export interface CodeEditorSchema {
   topLevelFields: string[];
@@ -112,6 +176,9 @@ const editorTheme = EditorView.theme({
   },
   ".cm-completionDetail": { color: "var(--ink-muted)", fontStyle: "normal", marginLeft: "1em" },
   ".cm-completionIcon": { paddingRight: "0.6em", opacity: "0.7" },
+  ".cm-lint-marker-error": { content: "'!'", color: "var(--danger-500)" },
+  ".cm-lintRange-error": { backgroundImage: "none", textDecoration: "wavy underline var(--danger-500)" },
+  ".cm-gutter-lint": { width: "1.2em" },
 });
 
 const compactTheme = EditorView.theme({
@@ -165,7 +232,15 @@ export function CodeEditor({
       editorTheme,
       syntaxHighlighting(highlightStyle),
       EditorView.lineWrapping,
+      tooltips({ parent: document.body }),
     ];
+    if (context !== "sql") {
+      exts.push(
+        linter(mongoJsonLinter, { delay: 300 }),
+        lintGutter(),
+        keymap.of([{ key: "Mod-Shift-f", run: applyAutoFix }]),
+      );
+    }
     if (compact) exts.push(compactTheme);
     if (placeholder) exts.push(placeholderExt(placeholder));
     if (ariaLabel) exts.push(EditorView.contentAttributes.of({ "aria-label": ariaLabel }));

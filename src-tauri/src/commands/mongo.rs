@@ -13,6 +13,7 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::mongo::bson_json::{doc_to_display_json, doc_to_extjson, parse_optional_doc};
 use crate::mongo::client_registry::list_collections as registry_list_collections;
+use crate::mongo::safe_change::{SafeChangePreview, SafeChangePreviewRequest};
 use crate::mongo::types::{
     CollationDto, CollectionKind, CollectionStats, CollectionSummary, DatabaseSummary,
     DocumentPage, ExplainResult, IndexInfo, IndexStats,
@@ -204,6 +205,7 @@ pub async fn find_documents(
     state: State<'_, AppState>,
 ) -> AppResult<DocumentPage> {
     let entry = state.clients.get(&request.connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
     let skip = request.skip.unwrap_or(0);
     let filter = parse_optional_doc(Some(&request.filter_json))?.unwrap_or_default();
@@ -234,6 +236,24 @@ pub async fn find_documents(
         .iter()
         .map(doc_to_display_json)
         .collect::<AppResult<Vec<_>>>()?;
+
+    // Record timeline entry.
+    let ctx = crate::mongo::operation_recorder::RecordContext::new(
+        profile_id,
+        request.connection_id.clone(),
+        request.database.clone(),
+        request.collection.clone(),
+    );
+    crate::mongo::operation_recorder::record_find(
+        &state.timeline,
+        &ctx,
+        &request.filter_json,
+        docs.len() as u64,
+        elapsed,
+        false,
+    )
+    .await;
+
     Ok(DocumentPage {
         documents,
         limit,
@@ -299,6 +319,7 @@ pub async fn find_page(
     state: State<'_, AppState>,
 ) -> AppResult<DocumentPage> {
     let entry = state.clients.get(&request.connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let page_size = resolve_page_size(request.page_size);
     let user_filter = parse_optional_doc(Some(&request.filter_json))?.unwrap_or_default();
     let projection = parse_optional_doc(request.projection_json.as_deref())?;
@@ -349,6 +370,26 @@ pub async fn find_page(
         CountMode::Estimated => estimate_count(&coll).await,
     };
 
+    // Record timeline entry only for the initial page (page 1) to avoid
+    // flooding the timeline with pagination noise.
+    if request.page <= 1 {
+        let ctx = crate::mongo::operation_recorder::RecordContext::new(
+            profile_id,
+            request.connection_id.clone(),
+            request.database.clone(),
+            request.collection.clone(),
+        );
+        crate::mongo::operation_recorder::record_find(
+            &state.timeline,
+            &ctx,
+            &request.filter_json,
+            docs.len() as u64,
+            elapsed,
+            false,
+        )
+        .await;
+    }
+
     let documents = docs
         .iter()
         .map(doc_to_display_json)
@@ -380,6 +421,7 @@ pub async fn aggregate_documents(
     state: State<'_, AppState>,
 ) -> AppResult<DocumentPage> {
     let entry = state.clients.get(&request.connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
     let mut pipeline: Vec<Document> = serde_json::from_str(&request.pipeline_json)?;
     if !pipeline.iter().any(|s| s.get("$limit").is_some()) {
@@ -398,6 +440,24 @@ pub async fn aggregate_documents(
         .iter()
         .map(doc_to_display_json)
         .collect::<AppResult<Vec<_>>>()?;
+
+    // Record timeline entry.
+    let ctx = crate::mongo::operation_recorder::RecordContext::new(
+        profile_id,
+        request.connection_id.clone(),
+        request.database.clone(),
+        request.collection.clone(),
+    );
+    crate::mongo::operation_recorder::record_aggregate(
+        &state.timeline,
+        &ctx,
+        &request.pipeline_json,
+        docs.len() as u64,
+        elapsed,
+        false,
+    )
+    .await;
+
     Ok(DocumentPage {
         documents,
         limit,
@@ -435,6 +495,7 @@ pub async fn aggregate_page(
     state: State<'_, AppState>,
 ) -> AppResult<DocumentPage> {
     let entry = state.clients.get(&request.connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let page_size = resolve_page_size(request.page_size);
     let skip = request.page.saturating_sub(1) * page_size as u64;
     let mut pipeline: Vec<Document> = serde_json::from_str(&request.pipeline_json)?;
@@ -482,6 +543,26 @@ pub async fn aggregate_page(
     } else {
         None
     };
+
+    // Record timeline entry only for the initial page (page 1) to avoid
+    // flooding the timeline with pagination noise.
+    if request.page <= 1 {
+        let ctx = crate::mongo::operation_recorder::RecordContext::new(
+            profile_id,
+            request.connection_id.clone(),
+            request.database.clone(),
+            request.collection.clone(),
+        );
+        crate::mongo::operation_recorder::record_aggregate(
+            &state.timeline,
+            &ctx,
+            &request.pipeline_json,
+            docs.len() as u64,
+            elapsed,
+            false,
+        )
+        .await;
+    }
 
     let documents = docs
         .iter()
@@ -630,6 +711,7 @@ pub async fn create_index(
     state: State<'_, AppState>,
 ) -> AppResult<String> {
     let entry = state.clients.get(&request.connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let key: Document = serde_json::from_str(&request.key_json)?;
     let coll = entry
         .client
@@ -661,7 +743,9 @@ pub async fn create_index(
         .keys(key)
         .options(Some(options))
         .build();
+    let started = Instant::now();
     coll.create_index(model).await?;
+    let elapsed = started.elapsed().as_millis() as u64;
     let _ = crate::audit::interceptor::record_create_index(
         &state.audit_log,
         &request.database,
@@ -679,6 +763,24 @@ pub async fn create_index(
         }))
         .unwrap_or_default(),
     );
+
+    // Record timeline entry.
+    let ctx = crate::mongo::operation_recorder::RecordContext::new(
+        profile_id,
+        request.connection_id.clone(),
+        request.database.clone(),
+        request.collection.clone(),
+    );
+    crate::mongo::operation_recorder::record_index_create(
+        &state.timeline,
+        &ctx,
+        &request.key_json,
+        elapsed,
+        false,
+        None,
+    )
+    .await;
+
     Ok(request.name)
 }
 
@@ -691,17 +793,38 @@ pub async fn drop_index(
     state: State<'_, AppState>,
 ) -> AppResult<()> {
     let entry = state.clients.get(&connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let coll = entry
         .client
         .database(&database)
         .collection::<Document>(&collection);
+    let started = Instant::now();
     coll.drop_index(&name).await?;
+    let elapsed = started.elapsed().as_millis() as u64;
     let _ = crate::audit::interceptor::record_drop_index(
         &state.audit_log,
         &database,
         &collection,
         &name,
     );
+
+    // Record timeline entry.
+    let ctx = crate::mongo::operation_recorder::RecordContext::new(
+        profile_id,
+        connection_id.clone(),
+        database.clone(),
+        collection.clone(),
+    );
+    crate::mongo::operation_recorder::record_index_drop(
+        &state.timeline,
+        &ctx,
+        &name,
+        elapsed,
+        false,
+        None,
+    )
+    .await;
+
     Ok(())
 }
 
@@ -926,12 +1049,15 @@ pub async fn insert_document(
     state: State<'_, AppState>,
 ) -> AppResult<String> {
     let entry = state.clients.get(&request.connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let doc: Document = serde_json::from_str(&request.document_json)?;
     let coll = entry
         .client
         .database(&request.database)
         .collection::<Document>(&request.collection);
+    let start = Instant::now();
     let result = coll.insert_one(doc.clone()).await?;
+    let elapsed = start.elapsed().as_millis() as u64;
     let id = result
         .inserted_id
         .as_object_id()
@@ -950,7 +1076,48 @@ pub async fn insert_document(
         &request.document_json,
     );
 
+    // Record timeline entry.
+    let ctx = crate::mongo::operation_recorder::RecordContext::new(
+        profile_id,
+        request.connection_id.clone(),
+        request.database.clone(),
+        request.collection.clone(),
+    );
+    crate::mongo::operation_recorder::record_insert(
+        &state.timeline,
+        &ctx,
+        crate::mongo::timeline_store::OperationKind::InsertOne,
+        &request.document_json,
+        1,
+        elapsed,
+        false,
+        None,
+    )
+    .await;
+
     Ok(id)
+}
+
+/// Optional Safe Change preview metadata carried alongside a write command.
+/// All fields are optional so non-Safe-Change callers can omit the payload.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SafeChangeMeta {
+    pub risk_score: Option<u8>,
+    pub risk_reasons: Option<Vec<String>>,
+    pub rollback_script: Option<String>,
+    pub rollback_level: crate::mongo::timeline_store::RollbackLevel,
+}
+
+impl SafeChangeMeta {
+    fn into_recorder_metadata(self) -> crate::mongo::operation_recorder::SafeChangeMetadata {
+        crate::mongo::operation_recorder::SafeChangeMetadata {
+            risk_score: self.risk_score,
+            risk_reasons: self.risk_reasons,
+            rollback_script: self.rollback_script,
+            rollback_level: self.rollback_level,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -963,6 +1130,8 @@ pub struct UpdateRequest {
     pub update_json: String,
     pub multi: bool,
     pub upsert: bool,
+    #[serde(default)]
+    pub safe_change_meta: SafeChangeMeta,
 }
 
 #[tauri::command]
@@ -971,6 +1140,7 @@ pub async fn update_documents(
     state: State<'_, AppState>,
 ) -> AppResult<UpdateResult> {
     let entry = state.clients.get(&request.connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let filter = parse_optional_doc(Some(&request.filter_json))?.unwrap_or_default();
     let update = parse_optional_doc(Some(&request.update_json))?
         .ok_or_else(|| AppError::InvalidBson("update document must be a JSON object".into()))?;
@@ -979,11 +1149,13 @@ pub async fn update_documents(
         .database(&request.database)
         .collection::<Document>(&request.collection);
     let opts = mongodb::options::UpdateOptions::builder().upsert(request.upsert).build();
+    let start = Instant::now();
     let res = if request.multi {
         coll.update_many(filter, update).with_options(opts).await?
     } else {
         coll.update_one(filter, update).with_options(opts).await?
     };
+    let elapsed = start.elapsed().as_millis() as u64;
 
     // Record audit event.
     let _ = crate::audit::interceptor::record_update(
@@ -993,6 +1165,33 @@ pub async fn update_documents(
         &request.filter_json,
         &request.update_json,
     );
+
+    // Record timeline entry.
+    let ctx = crate::mongo::operation_recorder::RecordContext::new(
+        profile_id,
+        request.connection_id.clone(),
+        request.database.clone(),
+        request.collection.clone(),
+    );
+    let update_kind = if request.multi {
+        crate::mongo::timeline_store::OperationKind::UpdateMany
+    } else {
+        crate::mongo::timeline_store::OperationKind::UpdateOne
+    };
+    crate::mongo::operation_recorder::record_update(
+        &state.timeline,
+        &ctx,
+        update_kind,
+        &request.filter_json,
+        &request.update_json,
+        res.matched_count,
+        res.modified_count,
+        elapsed,
+        false,
+        None,
+        request.safe_change_meta.into_recorder_metadata(),
+    )
+    .await;
 
     Ok(UpdateResult {
         matched_count: res.matched_count,
@@ -1009,6 +1208,8 @@ pub struct ReplaceRequest {
     pub filter_json: String,
     pub replacement_json: String,
     pub upsert: bool,
+    #[serde(default)]
+    pub safe_change_meta: SafeChangeMeta,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1025,6 +1226,7 @@ pub async fn replace_document(
     state: State<'_, AppState>,
 ) -> AppResult<ReplaceResult> {
     let entry = state.clients.get(&request.connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let filter = parse_optional_doc(Some(&request.filter_json))?.unwrap_or_default();
     let replacement: Document = serde_json::from_str(&request.replacement_json)?;
     let coll = entry
@@ -1032,7 +1234,9 @@ pub async fn replace_document(
         .database(&request.database)
         .collection::<Document>(&request.collection);
     let opts = mongodb::options::ReplaceOptions::builder().upsert(request.upsert).build();
+    let start = Instant::now();
     let res = coll.replace_one(filter, replacement).with_options(opts).await?;
+    let elapsed = start.elapsed().as_millis() as u64;
 
     let _ = crate::audit::interceptor::record_update(
         &state.audit_log,
@@ -1041,6 +1245,27 @@ pub async fn replace_document(
         &request.filter_json,
         &request.replacement_json,
     );
+
+    // Record timeline entry.
+    let ctx = crate::mongo::operation_recorder::RecordContext::new(
+        profile_id,
+        request.connection_id.clone(),
+        request.database.clone(),
+        request.collection.clone(),
+    );
+    crate::mongo::operation_recorder::record_replace_one(
+        &state.timeline,
+        &ctx,
+        &request.filter_json,
+        &request.replacement_json,
+        res.matched_count,
+        res.modified_count,
+        elapsed,
+        false,
+        None,
+        request.safe_change_meta.into_recorder_metadata(),
+    )
+    .await;
 
     Ok(ReplaceResult {
         matched_count: res.matched_count,
@@ -1079,11 +1304,14 @@ pub async fn insert_many_documents(
         return Err(AppError::Validation("documents array must not be empty".into()));
     }
     let entry = state.clients.get(&request.connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let coll = entry
         .client
         .database(&request.database)
         .collection::<Document>(&request.collection);
+    let start = Instant::now();
     let result = coll.insert_many(docs).await?;
+    let elapsed = start.elapsed().as_millis() as u64;
     let ids: Vec<String> = result
         .inserted_ids
         .values()
@@ -1100,6 +1328,24 @@ pub async fn insert_many_documents(
         &request.collection,
         &request.documents_json,
     );
+
+    // Record timeline entry.
+    let ctx = crate::mongo::operation_recorder::RecordContext::new(
+        profile_id,
+        request.connection_id.clone(),
+        request.database.clone(),
+        request.collection.clone(),
+    );
+    crate::mongo::operation_recorder::record_insert_many(
+        &state.timeline,
+        &ctx,
+        &request.documents_json,
+        ids.len() as u64,
+        elapsed,
+        false,
+        None,
+    )
+    .await;
 
     Ok(InsertManyResult {
         inserted_count: ids.len() as u64,
@@ -1124,15 +1370,19 @@ pub async fn delete_documents(
     database: String,
     collection: String,
     filter_json: String,
+    safe_change_meta: Option<SafeChangeMeta>,
     state: State<'_, AppState>,
 ) -> AppResult<u64> {
     let entry = state.clients.get(&connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let filter = parse_optional_doc(Some(&filter_json))?.unwrap_or_default();
     let coll = entry
         .client
         .database(&database)
         .collection::<Document>(&collection);
+    let start = Instant::now();
     let res = coll.delete_many(filter).await?;
+    let elapsed = start.elapsed().as_millis() as u64;
 
     // Record audit event.
     let _ = crate::audit::interceptor::record_delete(
@@ -1141,6 +1391,26 @@ pub async fn delete_documents(
         &collection,
         &filter_json,
     );
+
+    // Record timeline entry.
+    let ctx = crate::mongo::operation_recorder::RecordContext::new(
+        profile_id,
+        connection_id.clone(),
+        database.clone(),
+        collection.clone(),
+    );
+    crate::mongo::operation_recorder::record_delete(
+        &state.timeline,
+        &ctx,
+        crate::mongo::timeline_store::OperationKind::DeleteMany,
+        &filter_json,
+        res.deleted_count,
+        elapsed,
+        false,
+        None,
+        safe_change_meta.unwrap_or_default().into_recorder_metadata(),
+    )
+    .await;
 
     Ok(res.deleted_count)
 }
@@ -1201,6 +1471,18 @@ pub struct VqbTranslateRequest {
 #[tauri::command]
 pub async fn translate_vqb(request: VqbTranslateRequest) -> AppResult<serde_json::Value> {
     crate::mongo::vqb::to_filter(&request.node)
+}
+
+/// Safe Change Mode: preview a write operation before it is executed.
+/// Returns matched count, before/after samples, field-level diffs, risk score,
+/// rollback plan, and whether typed confirmation is required.
+#[tauri::command]
+pub async fn safe_change_preview(
+    request: SafeChangePreviewRequest,
+    state: State<'_, AppState>,
+) -> AppResult<SafeChangePreview> {
+    let entry = state.clients.get(&request.connection_id).await?;
+    crate::mongo::safe_change::preview_operation(&entry, &request).await
 }
 
 #[allow(dead_code)]
@@ -1286,6 +1568,7 @@ mod tests {
             update_json: "{ \"$set\": { \"x\": 1 } }".into(),
             multi: true,
             upsert: true,
+            safe_change_meta: SafeChangeMeta::default(),
         };
         let json = serde_json::to_string(&req).expect("serialize");
         assert!(json.contains("\"upsert\":true"), "upsert must serialize as camelCase");
@@ -1301,6 +1584,7 @@ mod tests {
             filter_json: "{ \"_id\": \"abc\" }".into(),
             replacement_json: "{ \"name\": \"new\" }".into(),
             upsert: false,
+            safe_change_meta: SafeChangeMeta::default(),
         };
         let json = serde_json::to_string(&req).expect("serialize");
         let back: ReplaceRequest = serde_json::from_str(&json).expect("deserialize");
@@ -1349,5 +1633,106 @@ mod tests {
         let bad = "\"not an object\"";
         let doc = parse_optional_doc(Some(bad));
         assert!(doc.is_err() || doc.unwrap().is_none());
+    }
+
+    // ---- resolve_page_size ----
+
+    #[test]
+    fn resolve_page_size_uses_default_when_none() {
+        // DEFAULT_PAGE_SIZE = 50
+        assert_eq!(resolve_page_size(None), 50);
+    }
+
+    #[test]
+    fn resolve_page_size_clamps_to_max() {
+        // MAX_PAGE_SIZE = 1000
+        assert_eq!(resolve_page_size(Some(2000)), 1000);
+    }
+
+    #[test]
+    fn resolve_page_size_clamps_zero_to_one() {
+        assert_eq!(resolve_page_size(Some(0)), 1);
+    }
+
+    #[test]
+    fn resolve_page_size_passes_through_valid_value() {
+        assert_eq!(resolve_page_size(Some(100)), 100);
+        assert_eq!(resolve_page_size(Some(1)), 1);
+        assert_eq!(resolve_page_size(Some(1000)), 1000);
+    }
+
+    // ---- find_page skip arithmetic ----
+
+    #[test]
+    fn find_page_skip_is_zero_for_page_one() {
+        // skip = (page - 1) * page_size
+        let page: u64 = 1;
+        let page_size: u64 = 50;
+        let skip = page.saturating_sub(1) * page_size;
+        assert_eq!(skip, 0);
+    }
+
+    #[test]
+    fn find_page_skip_is_page_size_for_page_two() {
+        let page: u64 = 2;
+        let page_size: u64 = 50;
+        let skip = page.saturating_sub(1) * page_size;
+        assert_eq!(skip, 50);
+    }
+
+    #[test]
+    fn find_page_skip_saturates_at_zero_for_page_zero() {
+        // page 0 should not underflow (saturating_sub)
+        let page: u64 = 0;
+        let page_size: u64 = 50;
+        let skip = page.saturating_sub(1) * page_size;
+        assert_eq!(skip, 0);
+    }
+
+    // ---- has_more fencepost ----
+
+    #[test]
+    fn has_more_is_false_when_exactly_page_size_docs_returned() {
+        // fetch_limit = page_size + 1; if we got back exactly page_size docs → no more
+        let page_size: usize = 50;
+        let docs_len: usize = 50;
+        let has_more = docs_len > page_size;
+        assert!(!has_more);
+    }
+
+    #[test]
+    fn has_more_is_true_when_one_extra_doc_returned() {
+        let page_size: usize = 50;
+        let docs_len: usize = 51; // fetch_limit = page_size + 1
+        let has_more = docs_len > page_size;
+        assert!(has_more);
+    }
+
+    // ---- CountMode wire shape ----
+
+    #[test]
+    fn count_mode_serializes_to_camel_case() {
+        let j = serde_json::to_value(CountMode::Estimated).unwrap();
+        assert_eq!(j, serde_json::json!("estimated"));
+        let j = serde_json::to_value(CountMode::Exact).unwrap();
+        assert_eq!(j, serde_json::json!("exact"));
+        let j = serde_json::to_value(CountMode::None).unwrap();
+        assert_eq!(j, serde_json::json!("none"));
+    }
+
+    #[test]
+    fn count_mode_deserializes_from_camel_case() {
+        let v: CountMode = serde_json::from_str(r#""estimated""#).unwrap();
+        assert_eq!(v, CountMode::Estimated);
+        let v: CountMode = serde_json::from_str(r#""exact""#).unwrap();
+        assert_eq!(v, CountMode::Exact);
+        let v: CountMode = serde_json::from_str(r#""none""#).unwrap();
+        assert_eq!(v, CountMode::None);
+    }
+
+    #[test]
+    fn count_mode_default_is_estimated() {
+        let v = CountMode::default();
+        assert_eq!(v, CountMode::Estimated);
     }
 }

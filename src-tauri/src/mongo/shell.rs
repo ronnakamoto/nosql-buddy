@@ -60,6 +60,7 @@ use crate::audit::interceptor;
 use crate::audit::AuditLog;
 use crate::error::{AppError, AppResult};
 use crate::mongo::client_registry::ClientEntry;
+use crate::mongo::timeline_store::OperationKind;
 
 // ---------- Public types ----------
 
@@ -81,6 +82,25 @@ pub struct ShellTable {
     pub execution_ms: u64,
 }
 
+/// Metadata about a MongoDB operation performed inside the shell so the
+/// caller can record it in the Data Timeline.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellOperation {
+    pub kind: OperationKind,
+    pub database: String,
+    pub collection: String,
+    pub query_json: Option<String>,
+    pub update_json: Option<String>,
+    pub matched_count: Option<u64>,
+    pub modified_count: Option<u64>,
+    pub inserted_count: Option<u64>,
+    pub deleted_count: Option<u64>,
+    pub execution_ms: Option<u64>,
+    pub errored: bool,
+    pub error_message: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShellResponse {
@@ -90,6 +110,7 @@ pub struct ShellResponse {
     pub last_database: Option<String>,
     pub active_database: String,
     pub execution_ms: u64,
+    pub operations: Vec<ShellOperation>,
 }
 
 #[derive(Default)]
@@ -133,6 +154,7 @@ thread_local! {
     static SHELL_LAST_PIPELINE: RefCell<Vec<JsonValue>> = const { RefCell::new(Vec::new()) };
     static SHELL_LAST_COLLECTION: RefCell<Option<String>> = const { RefCell::new(None) };
     static SHELL_AUDIT_LOG: RefCell<Option<Arc<AuditLog>>> = const { RefCell::new(None) };
+    static SHELL_OPERATIONS: RefCell<Vec<ShellOperation>> = const { RefCell::new(Vec::new()) };
 }
 
 fn push_output(o: ShellOutput) {
@@ -141,6 +163,18 @@ fn push_output(o: ShellOutput) {
 
 fn take_outputs() -> Vec<ShellOutput> {
     SHELL_OUTPUT.with(|b| std::mem::take(&mut *b.borrow_mut()))
+}
+
+fn push_operation(op: ShellOperation) {
+    SHELL_OPERATIONS.with(|b| b.borrow_mut().push(op));
+}
+
+fn take_operations() -> Vec<ShellOperation> {
+    SHELL_OPERATIONS.with(|b| std::mem::take(&mut *b.borrow_mut()))
+}
+
+fn clear_operations() {
+    SHELL_OPERATIONS.with(|b| b.borrow_mut().clear());
 }
 
 fn set_entry(e: Arc<ClientEntry>) {
@@ -295,6 +329,7 @@ fn run_shell_thread(rx: Receiver<ShellMessage>, initial_db: String) {
                 SHELL_OUTPUT.with(|b| b.borrow_mut().clear());
                 SHELL_LAST_PIPELINE.with(|b| b.borrow_mut().clear());
                 SHELL_LAST_COLLECTION.with(|c| *c.borrow_mut() = None);
+                clear_operations();
                 let started = std::time::Instant::now();
 
                 // Pre-process `use <db>` directives (boa doesn't
@@ -394,6 +429,7 @@ fn run_shell_thread(rx: Receiver<ShellMessage>, initial_db: String) {
                     }
                 }
 
+                let operations = take_operations();
                 let response = ShellResponse {
                     outputs,
                     last_pipeline: if last_pipeline.is_empty() {
@@ -405,6 +441,7 @@ fn run_shell_thread(rx: Receiver<ShellMessage>, initial_db: String) {
                     last_database: Some(active_database.clone()),
                     active_database,
                     execution_ms,
+                    operations,
                 };
                 let _ = respond.send(Ok(response));
             }
@@ -1046,6 +1083,22 @@ fn dispatch_sync(
                     let _ = interceptor::record_insert(audit, db, coll, &json);
                 }
             });
+            if let Ok(json) = serde_json::to_string(&doc_for_audit) {
+                push_operation(ShellOperation {
+                    kind: OperationKind::InsertOne,
+                    database: db.to_string(),
+                    collection: coll.to_string(),
+                    query_json: None,
+                    update_json: Some(json),
+                    matched_count: None,
+                    modified_count: None,
+                    inserted_count: Some(1),
+                    deleted_count: None,
+                    execution_ms: None,
+                    errored: false,
+                    error_message: None,
+                });
+            }
             push_output(ShellOutput::Text {
                 value: format!(
                     "Inserted 1 document (id: {})",
@@ -1092,6 +1145,22 @@ fn dispatch_sync(
                     }
                 }
             });
+            if let Ok(json) = serde_json::to_string(&docs_for_audit) {
+                push_operation(ShellOperation {
+                    kind: OperationKind::InsertMany,
+                    database: db.to_string(),
+                    collection: coll.to_string(),
+                    query_json: None,
+                    update_json: Some(json),
+                    matched_count: None,
+                    modified_count: None,
+                    inserted_count: Some(res.inserted_ids.len() as u64),
+                    deleted_count: None,
+                    execution_ms: None,
+                    errored: false,
+                    error_message: None,
+                });
+            }
             push_output(ShellOutput::Text {
                 value: format!(
                     "Inserted {} document{}",
@@ -1142,6 +1211,29 @@ fn dispatch_sync(
                     let _ = interceptor::record_update(audit, db, coll, &fj, &uj);
                 }
             });
+            if let (Ok(fj), Ok(uj)) = (
+                serde_json::to_string(&filter_for_audit),
+                serde_json::to_string(&update_for_audit),
+            ) {
+                push_operation(ShellOperation {
+                    kind: if multi {
+                        OperationKind::UpdateMany
+                    } else {
+                        OperationKind::UpdateOne
+                    },
+                    database: db.to_string(),
+                    collection: coll.to_string(),
+                    query_json: Some(fj),
+                    update_json: Some(uj),
+                    matched_count: Some(res.matched_count),
+                    modified_count: Some(res.modified_count),
+                    inserted_count: None,
+                    deleted_count: None,
+                    execution_ms: None,
+                    errored: false,
+                    error_message: None,
+                });
+            }
             push_output(ShellOutput::Text {
                 value: format!(
                     "Matched {} · Modified {}{}",
@@ -1193,6 +1285,25 @@ fn dispatch_sync(
                     let _ = interceptor::record_update(audit, db, coll, &fj, &rj);
                 }
             });
+            if let (Ok(fj), Ok(rj)) = (
+                serde_json::to_string(&filter_for_audit),
+                serde_json::to_string(&repl_for_audit),
+            ) {
+                push_operation(ShellOperation {
+                    kind: OperationKind::ReplaceOne,
+                    database: db.to_string(),
+                    collection: coll.to_string(),
+                    query_json: Some(fj),
+                    update_json: Some(rj),
+                    matched_count: Some(res.matched_count),
+                    modified_count: Some(res.modified_count),
+                    inserted_count: None,
+                    deleted_count: None,
+                    execution_ms: None,
+                    errored: false,
+                    error_message: None,
+                });
+            }
             push_output(ShellOutput::Text {
                 value: format!(
                     "Matched {} · Modified {}{}",
@@ -1231,6 +1342,26 @@ fn dispatch_sync(
                     let _ = interceptor::record_delete(audit, db, coll, &fj);
                 }
             });
+            if let Ok(fj) = serde_json::to_string(&filter_for_audit) {
+                push_operation(ShellOperation {
+                    kind: if multi {
+                        OperationKind::DeleteMany
+                    } else {
+                        OperationKind::DeleteOne
+                    },
+                    database: db.to_string(),
+                    collection: coll.to_string(),
+                    query_json: Some(fj),
+                    update_json: None,
+                    matched_count: None,
+                    modified_count: None,
+                    inserted_count: None,
+                    deleted_count: Some(res.deleted_count),
+                    execution_ms: None,
+                    errored: false,
+                    error_message: None,
+                });
+            }
             push_output(ShellOutput::Text {
                 value: format!(
                     "Deleted {} document{}",
@@ -1253,6 +1384,20 @@ fn dispatch_sync(
             .map_err(|e| js_err(e.to_string()))?;
             try_audit(|audit| {
                 let _ = interceptor::record_drop_collection(audit, db, coll);
+            });
+            push_operation(ShellOperation {
+                kind: OperationKind::CollectionDrop,
+                database: db.to_string(),
+                collection: coll.to_string(),
+                query_json: None,
+                update_json: None,
+                matched_count: None,
+                modified_count: None,
+                inserted_count: None,
+                deleted_count: None,
+                execution_ms: None,
+                errored: false,
+                error_message: None,
             });
             push_output(ShellOutput::Text {
                 value: format!("Dropped collection {}.{}", db, coll),
@@ -1316,6 +1461,25 @@ fn dispatch_sync(
                     let _ = interceptor::record_create_index(audit, db, coll, &kj, &oj);
                 }
             });
+            if let (Ok(kj), Ok(_oj)) = (
+                serde_json::to_string(&keys_for_audit),
+                serde_json::to_string(&opts_for_audit),
+            ) {
+                push_operation(ShellOperation {
+                    kind: OperationKind::IndexCreate,
+                    database: db.to_string(),
+                    collection: coll.to_string(),
+                    query_json: None,
+                    update_json: Some(kj),
+                    matched_count: None,
+                    modified_count: None,
+                    inserted_count: None,
+                    deleted_count: None,
+                    execution_ms: None,
+                    errored: false,
+                    error_message: None,
+                });
+            }
             push_output(ShellOutput::Text {
                 value: format!("Created index '{}'", res.index_name),
             });
@@ -1346,6 +1510,20 @@ fn dispatch_sync(
             .map_err(|e| js_err(e.to_string()))?;
             try_audit(|audit| {
                 let _ = interceptor::record_drop_index(audit, db, coll, &name_for_output);
+            });
+            push_operation(ShellOperation {
+                kind: OperationKind::IndexDrop,
+                database: db.to_string(),
+                collection: coll.to_string(),
+                query_json: Some(name_for_output.clone()),
+                update_json: None,
+                matched_count: None,
+                modified_count: None,
+                inserted_count: None,
+                deleted_count: None,
+                execution_ms: None,
+                errored: false,
+                error_message: None,
             });
             push_output(ShellOutput::Text {
                 value: format!("Dropped index '{}'", name_for_output),
@@ -1383,6 +1561,20 @@ fn dispatch_sync(
             .map_err(|e| js_err(e.to_string()))?;
             try_audit(|audit| {
                 let _ = interceptor::record_rename_collection(audit, db, coll, &new_name_for_audit);
+            });
+            push_operation(ShellOperation {
+                kind: OperationKind::CollectionRename,
+                database: db.to_string(),
+                collection: coll.to_string(),
+                query_json: Some(new_name_for_output.clone()),
+                update_json: None,
+                matched_count: None,
+                modified_count: None,
+                inserted_count: None,
+                deleted_count: None,
+                execution_ms: None,
+                errored: false,
+                error_message: None,
             });
             push_output(ShellOutput::Text {
                 value: format!("Renamed {}.{} → {}.{}", db, coll, db, new_name_for_output),
@@ -1464,6 +1656,25 @@ fn dispatch_sync(
                     let _ = interceptor::record_update(audit, db, coll, &fj, &uj);
                 }
             });
+            if let (Ok(fj), Ok(uj)) = (
+                serde_json::to_string(&filter_for_audit),
+                serde_json::to_string(&update_for_audit),
+            ) {
+                push_operation(ShellOperation {
+                    kind: OperationKind::UpdateOne,
+                    database: db.to_string(),
+                    collection: coll.to_string(),
+                    query_json: Some(fj),
+                    update_json: Some(uj),
+                    matched_count: Some(if result.is_some() { 1 } else { 0 }),
+                    modified_count: Some(if result.is_some() { 1 } else { 0 }),
+                    inserted_count: None,
+                    deleted_count: None,
+                    execution_ms: None,
+                    errored: false,
+                    error_message: None,
+                });
+            }
             SHELL_LAST_COLLECTION.with(|c| *c.borrow_mut() = Some(coll.to_string()));
             push_output(ShellOutput::Text {
                 value: format!(
@@ -1505,6 +1716,22 @@ fn dispatch_sync(
                     let _ = interceptor::record_delete(audit, db, coll, &fj);
                 }
             });
+            if let Ok(fj) = serde_json::to_string(&filter_for_audit) {
+                push_operation(ShellOperation {
+                    kind: OperationKind::DeleteOne,
+                    database: db.to_string(),
+                    collection: coll.to_string(),
+                    query_json: Some(fj),
+                    update_json: None,
+                    matched_count: None,
+                    modified_count: None,
+                    inserted_count: None,
+                    deleted_count: Some(if result.is_some() { 1 } else { 0 }),
+                    execution_ms: None,
+                    errored: false,
+                    error_message: None,
+                });
+            }
             SHELL_LAST_COLLECTION.with(|c| *c.borrow_mut() = Some(coll.to_string()));
             push_output(ShellOutput::Text {
                 value: format!(
@@ -1559,6 +1786,25 @@ fn dispatch_sync(
                     let _ = interceptor::record_update(audit, db, coll, &fj, &rj);
                 }
             });
+            if let (Ok(fj), Ok(rj)) = (
+                serde_json::to_string(&filter_for_audit),
+                serde_json::to_string(&repl_for_audit),
+            ) {
+                push_operation(ShellOperation {
+                    kind: OperationKind::ReplaceOne,
+                    database: db.to_string(),
+                    collection: coll.to_string(),
+                    query_json: Some(fj),
+                    update_json: Some(rj),
+                    matched_count: Some(if result.is_some() { 1 } else { 0 }),
+                    modified_count: Some(if result.is_some() { 1 } else { 0 }),
+                    inserted_count: None,
+                    deleted_count: None,
+                    execution_ms: None,
+                    errored: false,
+                    error_message: None,
+                });
+            }
             SHELL_LAST_COLLECTION.with(|c| *c.borrow_mut() = Some(coll.to_string()));
             push_output(ShellOutput::Text {
                 value: format!(

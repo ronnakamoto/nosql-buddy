@@ -24,9 +24,13 @@ import AuditPanel from "./components/AuditPanel";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { JobsHub } from "./features/jobs/JobsHub";
 import { DataModelTab } from "./features/dataModel/DataModelTab";
+import { TimelinePanel } from "./features/timeline/TimelinePanel";
 import { DumpWizard } from "./features/backupRestore/DumpWizard";
 import { RestoreWizard } from "./features/backupRestore/RestoreWizard";
 import type { CollectionItem } from "./features/backupRestore/CollectionCheckList";
+import { ConfirmDialog } from "./components/ConfirmDialog";
+import { ShortcutsMap } from "./components/ShortcutsMap";
+import { ShortcutButton } from "./components/ShortcutButton";
 import {
   Search,
   Terminal,
@@ -49,6 +53,7 @@ import {
   Upload,
   RefreshCw,
   Network,
+  History,
 } from "lucide-react";
 
 type AuditView = "chooser" | "dev" | "production" | "settings";
@@ -60,6 +65,7 @@ type Tab =
   | { id: string; kind: "shell"; connectionId: string; database: string; collection: string }
   | { id: string; kind: "audit"; auditMode: AuditMode; auditView: AuditView }
   | { id: string; kind: "jobs"; connectionId?: string | null; profileId?: string | null }
+  | { id: string; kind: "timeline"; connectionId?: string | null; profileId?: string | null; database?: string | null; collection?: string | null }
   | { id: string; kind: "diagram"; connectionId: string; database: string };
 
 interface ActiveConnection {
@@ -83,12 +89,14 @@ function NewTabMenu({
   onOpenAudit,
   onOpenJobs,
   onOpenDiagram,
+  onOpenTimeline,
 }: {
   onNewQuery: () => void;
   onNewShell: () => void;
   onOpenAudit: () => void;
   onOpenJobs: () => void;
   onOpenDiagram: () => void;
+  onOpenTimeline: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ top: number; left: number | null; right: number | null }>({ top: 0, left: 0, right: null });
@@ -137,7 +145,7 @@ function NewTabMenu({
         }}
         aria-label="New tab"
         aria-expanded={open}
-        title="New tab"
+        title="New tab (CmdOrCtrl+T)"
       >
         <Plus size={16} />
       </button>
@@ -160,6 +168,7 @@ function NewTabMenu({
             <span className="new-tab-menu__icon" aria-hidden="true"><Search size={14} /></span>
             <span className="new-tab-menu__label">Query</span>
             <span className="new-tab-menu__hint">Find documents</span>
+            <span className="kbd">CmdOrCtrl+T</span>
           </button>
           <button
             className="new-tab-menu__item"
@@ -187,6 +196,15 @@ function NewTabMenu({
             <span className="new-tab-menu__icon" aria-hidden="true"><HardDrive size={14} /></span>
             <span className="new-tab-menu__label">Jobs</span>
             <span className="new-tab-menu__hint">Dump, restore, export, import</span>
+          </button>
+          <button
+            className="new-tab-menu__item"
+            role="menuitem"
+            onClick={() => { setOpen(false); onOpenTimeline(); }}
+          >
+            <span className="new-tab-menu__icon" aria-hidden="true"><History size={14} /></span>
+            <span className="new-tab-menu__label">Timeline</span>
+            <span className="new-tab-menu__hint">Operation history & audit trail</span>
           </button>
           <button
             className="new-tab-menu__item"
@@ -573,6 +591,7 @@ export default function App() {
   const [connFormKey, setConnFormKey] = useState(0);
   const [connSwitcherOpen, setConnSwitcherOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [shortcutsMapOpen, setShortcutsMapOpen] = useState(false);
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -582,6 +601,7 @@ export default function App() {
   const [restoreTarget, setRestoreTarget] = useState<{ connectionId: string; database: string } | null>(null);
   const [refreshingConn, setRefreshingConn] = useState(false);
   const [refreshingDb, setRefreshingDb] = useState<string | null>(null);
+  const [pendingDeleteProfile, setPendingDeleteProfile] = useState<ProfileSummary | null>(null);
   const toasts = useToasts();
 
   // Initial load
@@ -656,6 +676,9 @@ export default function App() {
         e.preventDefault();
         const el = document.querySelector(".app__sidebar");
         if (el) (el as HTMLElement).style.display = "";
+      } else if (mod && e.key === "?") {
+        e.preventDefault();
+        setShortcutsMapOpen(true);
       }
     };
     window.addEventListener("keydown", handler);
@@ -807,8 +830,14 @@ export default function App() {
     }
   }, [settings, toasts]);
 
-  const deleteProfile = useCallback(async (profile: ProfileSummary) => {
-    if (!window.confirm(`Delete connection "${profile.name}"?`)) return;
+  const deleteProfile = useCallback((profile: ProfileSummary) => {
+    setPendingDeleteProfile(profile);
+  }, []);
+
+  const confirmDeleteProfile = useCallback(async () => {
+    if (!pendingDeleteProfile) return;
+    const profile = pendingDeleteProfile;
+    setPendingDeleteProfile(null);
     try {
       await commands.deleteProfile(profile.id);
       await refreshProfiles();
@@ -816,7 +845,7 @@ export default function App() {
     } catch (e) {
       toasts.push(describeError(e), "error");
     }
-  }, [toasts]);
+  }, [pendingDeleteProfile, toasts]);
 
   const openQueryTab = useCallback((connectionId: string, database: string, collection: string) => {
     const id = `q:${connectionId}:${database}:${collection}:${Date.now()}`;
@@ -890,6 +919,13 @@ export default function App() {
         hint: "Quick navigation and commands",
         shortcut: "CmdOrCtrl+K",
         run: () => setPaletteOpen(true),
+      },
+      {
+        id: "shortcuts-map",
+        label: "Keyboard shortcuts",
+        hint: "View all available keyboard shortcuts",
+        shortcut: "CmdOrCtrl+?",
+        run: () => setShortcutsMapOpen(true),
       },
     ];
     if (active) {
@@ -1194,9 +1230,11 @@ export default function App() {
                         ? <Terminal size={14} />
                         : t.kind === "jobs"
                           ? <HardDrive size={14} />
-                          : t.kind === "diagram"
-                            ? <Network size={14} />
-                            : <ShieldCheck size={14} />}
+                          : t.kind === "timeline"
+                            ? <History size={14} />
+                            : t.kind === "diagram"
+                              ? <Network size={14} />
+                              : <ShieldCheck size={14} />}
               </span>
               <span className="tab__label">
                 {t.kind === "query"
@@ -1211,7 +1249,9 @@ export default function App() {
                           ? t.database
                           : t.kind === "jobs"
                             ? "Jobs"
-                            : "Audit Log"}
+                            : t.kind === "timeline"
+                              ? "Timeline"
+                              : "Audit Log"}
               </span>
               <span className="tab__kind" aria-hidden="true">
                 {t.kind === "query"
@@ -1226,7 +1266,9 @@ export default function App() {
                           ? "Model"
                           : t.kind === "jobs"
                             ? "Jobs"
-                            : "ZK"}
+                            : t.kind === "timeline"
+                              ? "Timeline"
+                              : "ZK"}
               </span>
               <span
                 className="tab__close"
@@ -1273,6 +1315,21 @@ export default function App() {
                   active.databases[0]?.name ?? "admin",
                 )
               }
+              onOpenTimeline={() => {
+                const id = `timeline-${Date.now()}`;
+                setTabs((prev) => [
+                  ...prev,
+                  {
+                    id,
+                    kind: "timeline",
+                    connectionId: active?.handle.connectionId ?? null,
+                    profileId: active?.handle.profileId ?? null,
+                    database: null,
+                    collection: null,
+                  },
+                ]);
+                setActiveTabId(id);
+              }}
             />
           )}
         </div>
@@ -1297,9 +1354,14 @@ export default function App() {
               NoSQLBuddy supports clusters, replica sets, and sharded topologies.
             </p>
             <div className="row row--end">
-              <button className="btn btn--primary" onClick={() => setConnectionFormOpen(true)}>
+              <ShortcutButton
+                variant="primary"
+                shortcut="CmdOrCtrl+N"
+                onClick={() => setConnectionFormOpen(true)}
+                className="btn btn--primary"
+              >
                 New connection
-              </button>
+              </ShortcutButton>
             </div>
           </div>
         )}
@@ -1353,6 +1415,10 @@ export default function App() {
         onClose={() => setPaletteOpen(false)}
         items={paletteItems}
       />
+      <ShortcutsMap
+        open={shortcutsMapOpen}
+        onClose={() => setShortcutsMapOpen(false)}
+      />
       <ToastStack toasts={toasts.toasts} onDismiss={toasts.dismiss} />
       {dumpTarget && (
         <DumpWizard
@@ -1370,6 +1436,14 @@ export default function App() {
           onRestored={refreshConnection}
         />
       )}
+      <ConfirmDialog
+        open={pendingDeleteProfile !== null}
+        title="Delete connection?"
+        description={`"${pendingDeleteProfile?.name}" will be permanently removed. Any saved credentials for this connection will be deleted.`}
+        confirmLabel="Delete connection"
+        onConfirm={() => void confirmDeleteProfile()}
+        onCancel={() => setPendingDeleteProfile(null)}
+      />
     </div>
     </ToastProvider>
   );
@@ -1451,6 +1525,15 @@ const TabPane = memo(function TabPane({
   }
   if (tab.kind === "jobs") {
     return <JobsHub connectionId={tab.connectionId} profileId={tab.profileId} />;
+  }
+  if (tab.kind === "timeline") {
+    return (
+      <TimelinePanel
+        profileId={tab.profileId}
+        database={tab.database}
+        collection={tab.collection}
+      />
+    );
   }
   if (tab.kind === "diagram") {
     return <DataModelTab connectionId={tab.connectionId} database={tab.database} />;

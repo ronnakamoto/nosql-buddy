@@ -20,6 +20,7 @@ use crate::mongo::import_export::io_util::validate_source_path;
 use crate::mongo::import_export::json_source::{JsonImportShape, JsonSource};
 use crate::mongo::import_export::mapping::{FieldMappingEntry, FieldMappingTransform};
 use crate::mongo::job_store::{JobKind, JobMeta, JobStatus};
+use crate::mongo::operation_recorder::RecordContext;
 use crate::state::AppState;
 
 const DEFAULT_BATCH_SIZE: usize = 1000;
@@ -147,6 +148,7 @@ pub async fn run_import(
     app: tauri::AppHandle,
 ) -> AppResult<ImportResult> {
     let entry = state.clients.get(&request.connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let collection = entry
         .client
         .database(&request.database)
@@ -158,6 +160,7 @@ pub async fn run_import(
         request.options.batch_size.unwrap_or(DEFAULT_BATCH_SIZE),
         inserted.clone(),
     ));
+    let started = std::time::Instant::now();
 
     // Compose the transform chain: currently just the optional field mapping.
     let mut transforms: Vec<Box<dyn crate::mongo::import_export::core::Transform>> = Vec::new();
@@ -211,6 +214,29 @@ pub async fn run_import(
     let msg = format!("Imported {} documents, {} errors", inserted.load(Ordering::Relaxed), report.errors);
     state.jobs.update_status(&request.job_id, status, msg.clone()).await;
     notify_job_completed(&app, &request.job_id, "Import", &msg);
+
+    let elapsed = started.elapsed().as_millis() as u64;
+    let ctx = RecordContext::new(
+        profile_id,
+        request.connection_id.clone(),
+        request.database.clone(),
+        request.collection.clone(),
+    );
+    let source_summary = serde_json::json!({
+        "format": request.format,
+        "sourceKind": request.source.kind,
+        "path": request.source.path,
+    });
+    crate::mongo::operation_recorder::record_import(
+        &state.timeline,
+        &ctx,
+        &serde_json::to_string(&source_summary).unwrap_or_default(),
+        inserted.load(Ordering::Relaxed),
+        elapsed,
+        false,
+        None,
+    )
+    .await;
 
     Ok(ImportResult {
         job_id: report.job_id,

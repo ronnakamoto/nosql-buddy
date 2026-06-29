@@ -7,6 +7,7 @@ import "@fontsource/ibm-plex-mono/600.css";
 import App from "./App";
 import "./styles.css";
 import "./features/dataModel/dataModel.css";
+import "./features/timeline/timeline.css";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("Missing #root");

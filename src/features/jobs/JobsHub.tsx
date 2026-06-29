@@ -4,6 +4,7 @@ import { useJobStore } from "./useJobStore";
 import { JobListItem } from "./JobListItem";
 import { EditScheduleModal } from "./EditScheduleModal";
 import { Alert } from "../../components/Alert";
+import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { DumpWizard } from "../backupRestore/DumpWizard";
 import { RestoreWizard } from "../backupRestore/RestoreWizard";
 
@@ -32,6 +33,7 @@ export function JobsHub({ connectionId, profileId }: JobsHubProps) {
   const [wizard, setWizard] = useState<"dump" | "restore" | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [editingScheduleId, setEditingScheduleId] = useState<string | null>(null);
+  const [pendingDeleteJobId, setPendingDeleteJobId] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
 
@@ -253,7 +255,7 @@ export function JobsHub({ connectionId, profileId }: JobsHubProps) {
                 job={job}
                 scheduledRuns={runsFor(job.jobId)}
                 onCancel={cancelJob}
-                onDelete={deleteJob}
+                onDelete={setPendingDeleteJobId}
                 onRerun={rerunJob}
                 onToggleSchedule={toggleSchedule}
                 onEditSchedule={setEditingScheduleId}
@@ -291,7 +293,7 @@ export function JobsHub({ connectionId, profileId }: JobsHubProps) {
             key={job.jobId}
             job={job}
             onCancel={cancelJob}
-            onDelete={deleteJob}
+            onDelete={setPendingDeleteJobId}
             onRerun={rerunJob}
             onToggleSchedule={toggleSchedule}
             onEditSchedule={setEditingScheduleId}
@@ -320,6 +322,17 @@ export function JobsHub({ connectionId, profileId }: JobsHubProps) {
           onSave={saveSchedule}
         />
       )}
+      <ConfirmDialog
+        open={pendingDeleteJobId !== null}
+        title="Delete job?"
+        description="The job and its run history will be permanently removed. Any scheduled recurrence for this job will also be cancelled."
+        confirmLabel="Delete job"
+        onConfirm={() => {
+          if (pendingDeleteJobId) deleteJob(pendingDeleteJobId);
+          setPendingDeleteJobId(null);
+        }}
+        onCancel={() => setPendingDeleteJobId(null)}
+      />
     </div>
   );
 }

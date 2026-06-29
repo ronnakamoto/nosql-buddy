@@ -27,6 +27,7 @@ use crate::mongo::import_export::placeholders::{resolve_path, PlaceholderContext
 use crate::mongo::import_export::source_cursor::CursorSource;
 use crate::mongo::import_export::source_mem::VecSource;
 use crate::mongo::job_store::{JobKind, JobMeta, JobStatus};
+use crate::mongo::operation_recorder::RecordContext;
 use crate::state::AppState;
 
 const COLUMN_SAMPLE: u32 = 200;
@@ -163,8 +164,10 @@ pub async fn export_documents(
 /// Core export logic callable from both the command handler and the scheduler.
 pub async fn run_export(request: &ExportRequest, state: &AppState, app: &tauri::AppHandle) -> AppResult<ExportResult> {
     let entry = state.clients.get(&request.connection_id).await?;
+    let profile_id = entry.profile_id.clone();
     let db = entry.client.database(&request.database);
     let coll = db.collection::<Document>(&request.collection);
+    let started = std::time::Instant::now();
 
     // Resolve the field-mapping transform once, up front, so both the column
     // derivation and the pipeline see the same validated table.
@@ -306,6 +309,29 @@ pub async fn run_export(request: &ExportRequest, state: &AppState, app: &tauri::
         .take();
 
     notify_job_completed(app, &request.job_id, "Export", &format!("Exported {} documents", report.processed));
+
+    let elapsed = started.elapsed().as_millis() as u64;
+    let ctx = RecordContext::new(
+        profile_id,
+        request.connection_id.clone(),
+        request.database.clone(),
+        request.collection.clone(),
+    );
+    let source_summary = serde_json::json!({
+        "mode": request.source.mode,
+        "format": request.format,
+        "destinationKind": request.destination.kind,
+    });
+    crate::mongo::operation_recorder::record_export(
+        &state.timeline,
+        &ctx,
+        &serde_json::to_string(&source_summary).unwrap_or_default(),
+        report.processed,
+        elapsed,
+        false,
+        None,
+    )
+    .await;
 
     Ok(ExportResult {
         job_id: report.job_id,
