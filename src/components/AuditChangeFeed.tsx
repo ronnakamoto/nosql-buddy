@@ -1,5 +1,10 @@
 import { useMemo, useState, useRef, useCallback } from "react";
-import type { AuditEvent } from "../ipc/commands";
+import type {
+  AuditDomain,
+  AuditEvent,
+  DomainRootInfo,
+  DomainSuperProofResult,
+} from "../ipc/commands";
 import { Badge, Button, EmptyState, Spinner } from "./AuditUi";
 import { CircleDashed } from "lucide-react";
 import { InfoPopover } from "./InfoPopover";
@@ -95,6 +100,7 @@ interface EventRowProps {
 }
 
 function EventRow({ event, selected, proofLoading, onSelect, onProof, style }: EventRowProps) {
+  const deploymentLabel = event.deploymentId || "unattributed";
   return (
     <div
       className={`audit-event-row ${selected ? "audit-event-row--selected" : ""}`}
@@ -103,7 +109,7 @@ function EventRow({ event, selected, proofLoading, onSelect, onProof, style }: E
     >
       <Badge tone={opTone(event.operation)}>{event.operation}</Badge>
       <span className="audit-event-row__ns">
-        {event.database}.{event.collection}
+        {deploymentLabel} · {event.database}.{event.collection} · #{event.sequence}
       </span>
       <span className="audit-event-row__time">{relativeTime(event.timestamp)}</span>
       <span className="audit-event-row__leaf">leaf {event.leafHex.slice(0, 10)}…</span>
@@ -195,6 +201,19 @@ function VirtualList({
 
 export interface AuditChangeFeedProps {
   events: AuditEvent[];
+  domains?: AuditDomain[];
+  selectedDeploymentId?: string | null;
+  selectedDatabase?: string | null;
+  onDomainChange?: (deploymentId: string | null, database: string | null) => void;
+  /** Per-domain root + status for the currently selected domain. */
+  domainInfo?: DomainRootInfo | null;
+  domainBusy?: boolean;
+  onSetLegalHold?: (hold: boolean) => void;
+  onPruneDomain?: () => void;
+  /** Aggregation super-root over all domain roots + selective-disclosure proof. */
+  superRootHex?: string | null;
+  superProof?: DomainSuperProofResult | null;
+  onProveInSuperRoot?: () => void;
   collapsed: boolean;
   onToggle: () => void;
   proofIndex: number | null;
@@ -205,6 +224,17 @@ export interface AuditChangeFeedProps {
 
 export function AuditChangeFeed({
   events,
+  domains = [],
+  selectedDeploymentId = null,
+  selectedDatabase = null,
+  onDomainChange,
+  domainInfo = null,
+  domainBusy = false,
+  onSetLegalHold,
+  onPruneDomain,
+  superRootHex = null,
+  superProof = null,
+  onProveInSuperRoot,
   collapsed,
   onToggle,
   proofIndex,
@@ -215,9 +245,17 @@ export function AuditChangeFeed({
   const [opFilter, setOpFilter] = useState<OpFilter>("all");
   const [search, setSearch] = useState("");
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const selectedDomainLabel = selectedDeploymentId && selectedDatabase
+    ? `${selectedDeploymentId || "unattributed"} · ${selectedDatabase}`
+    : "All domains";
 
   const filtered = useMemo(() => {
     let list = events.slice().reverse(); // newest first
+    if (selectedDeploymentId !== null && selectedDatabase !== null) {
+      list = list.filter(
+        (e) => e.deploymentId === selectedDeploymentId && e.database === selectedDatabase,
+      );
+    }
     if (opFilter !== "all") {
       list = list.filter((e) => e.operation.toLowerCase().includes(opFilter));
     }
@@ -225,13 +263,15 @@ export function AuditChangeFeed({
       const q = search.trim().toLowerCase();
       list = list.filter(
         (e) =>
+          e.deploymentId.toLowerCase().includes(q) ||
           e.database.toLowerCase().includes(q) ||
           e.collection.toLowerCase().includes(q) ||
-          e.leafHex.toLowerCase().startsWith(q),
+          e.leafHex.toLowerCase().startsWith(q) ||
+          String(e.sequence).includes(q),
       );
     }
     return list;
-  }, [events, opFilter, search]);
+  }, [events, opFilter, search, selectedDatabase, selectedDeploymentId]);
 
   const selectedEvent = selectedIndex !== null
     ? events.find((e) => e.index === selectedIndex) ?? null
@@ -281,13 +321,161 @@ export function AuditChangeFeed({
                 </button>
               ))}
             </div>
+            <select
+              aria-label="Audit domain"
+              className="audit-feed-search"
+              value={
+                selectedDeploymentId !== null && selectedDatabase !== null
+                  ? `${selectedDeploymentId}\u0000${selectedDatabase}`
+                  : ""
+              }
+              onChange={(e) => {
+                if (!e.target.value) {
+                  onDomainChange?.(null, null);
+                  return;
+                }
+                const [deploymentId, database] = e.target.value.split("\u0000");
+                onDomainChange?.(deploymentId, database);
+              }}
+            >
+              <option value="">All domains</option>
+              {domains.map((domain) => (
+                <option
+                  key={`${domain.deploymentId}\u0000${domain.database}`}
+                  value={`${domain.deploymentId}\u0000${domain.database}`}
+                >
+                  {(domain.deploymentId || "unattributed")} · {domain.database} ({domain.eventCount})
+                </option>
+              ))}
+            </select>
             <input
               className="audit-feed-search"
-              placeholder="Search db, collection, or leaf…"
+              placeholder="Search deployment, db, collection, sequence, or leaf…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
           </div>
+
+          {domains.length > 0 && (
+            <div
+              aria-label="Audit domain groups"
+              style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}
+            >
+              <button
+                className={`audit-filter-chip ${selectedDeploymentId === null ? "audit-filter-chip--active" : ""}`}
+                onClick={() => onDomainChange?.(null, null)}
+              >
+                All domains · {domains.reduce((sum, domain) => sum + domain.eventCount, 0)}
+              </button>
+              {domains.map((domain) => {
+                const active =
+                  selectedDeploymentId === domain.deploymentId &&
+                  selectedDatabase === domain.database;
+                return (
+                  <button
+                    key={`${domain.deploymentId}\u0000${domain.database}`}
+                    className={`audit-filter-chip ${active ? "audit-filter-chip--active" : ""}`}
+                    onClick={() => onDomainChange?.(domain.deploymentId, domain.database)}
+                  >
+                    {(domain.deploymentId || "unattributed")} · {domain.database} · {domain.eventCount}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          <div style={{ marginBottom: 8, color: "var(--ink-muted)", fontSize: "var(--font-size-xs)" }}>
+            Domain: {selectedDomainLabel}
+          </div>
+
+          {selectedDeploymentId !== null && selectedDatabase !== null && domainInfo && (
+            <div
+              aria-label="Domain segment"
+              className="audit-domain-segment"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                flexWrap: "wrap",
+                gap: 8,
+                marginBottom: 8,
+                padding: "8px 10px",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-md)",
+                background: "var(--surface)",
+                fontSize: "var(--font-size-xs)",
+              }}
+            >
+              <span style={{ color: "var(--ink-muted)" }}>
+                Domain root <code>{domainInfo.rootHex.slice(0, 16)}…</code> · {domainInfo.eventCount}{" "}
+                event{domainInfo.eventCount === 1 ? "" : "s"}
+              </span>
+              {domainInfo.legalHold && <Badge tone="warning">legal hold</Badge>}
+              {domainInfo.retainedRoots.length > 0 && (
+                <Badge tone="info">{domainInfo.retainedRoots.length} pruned</Badge>
+              )}
+              <div style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  loading={domainBusy}
+                  onClick={() => onSetLegalHold?.(!domainInfo.legalHold)}
+                >
+                  {domainInfo.legalHold ? "Lift legal hold" : "Legal hold"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  loading={domainBusy}
+                  disabled={domainInfo.legalHold || domainInfo.eventCount === 0}
+                  onClick={() => onPruneDomain?.()}
+                  title={
+                    domainInfo.legalHold
+                      ? "Lift the legal hold before pruning"
+                      : "Logically prune this domain (retains a Merkle commitment)"
+                  }
+                >
+                  Prune
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  loading={domainBusy}
+                  onClick={() => onProveInSuperRoot?.()}
+                  title="Prove this domain root is included in the aggregation super-root"
+                >
+                  Prove in super-root
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {(superRootHex || superProof) && (
+            <div
+              aria-label="Domain super-root"
+              className="audit-domain-super-root"
+              style={{
+                marginBottom: 8,
+                padding: "8px 10px",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-md)",
+                background: "var(--surface)",
+                fontSize: "var(--font-size-xs)",
+                color: "var(--ink-muted)",
+              }}
+            >
+              {superRootHex && (
+                <div>
+                  Super-root <code>{superRootHex.slice(0, 16)}…</code>
+                </div>
+              )}
+              {superProof && (
+                <div style={{ marginTop: 4 }}>
+                  Included at position {superProof.position} · leaf{" "}
+                  <code>{superProof.leafHex.slice(0, 16)}…</code>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Event list */}
           {events.length === 0 ? (

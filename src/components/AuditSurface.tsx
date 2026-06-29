@@ -11,6 +11,8 @@ import commands, {
   type OplogIntegrityReport,
   type ProofResult,
   type VerificationRecord,
+  type DomainRootInfo,
+  type DomainSuperProofResult,
   formatError,
 } from "../ipc/commands";
 import { useToast } from "../context/ToastContext";
@@ -48,6 +50,13 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
   // ─── Core data ────────────────────────────────────────────────────────
   const [status, setStatus] = useState<AuditStatus | null>(null);
   const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [selectedDeploymentId, setSelectedDeploymentId] = useState<string | null>(null);
+  const [selectedDatabase, setSelectedDatabase] = useState<string | null>(null);
+  const [domainInfos, setDomainInfos] = useState<DomainRootInfo[]>([]);
+  const [domainInfo, setDomainInfo] = useState<DomainRootInfo | null>(null);
+  const [domainBusy, setDomainBusy] = useState(false);
+  const [superRootHex, setSuperRootHex] = useState<string | null>(null);
+  const [superProof, setSuperProof] = useState<DomainSuperProofResult | null>(null);
   const [epochs, setEpochs] = useState<Epoch[]>([]);
   const [currentEpoch, setCurrentEpoch] = useState<Epoch | null>(null);
   const [onchainRoot, setOnchainRoot] = useState<OnChainRoot | null>(null);
@@ -127,26 +136,49 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
   // ─── Polling ─────────────────────────────────────────────────────────
   const refresh = useCallback(async () => {
     try {
-      const [s, e, eps, ep] = await Promise.all([
-        commands.auditGetStatus(),
-        commands.auditListEvents(),
+      const [s, e, eps, ep, domainList, superRoot] = await Promise.all([
+        commands.auditGetStatus(selectedDeploymentId, selectedDatabase),
+        commands.auditListEvents(selectedDeploymentId, selectedDatabase),
         commands.auditListEpochs(),
         commands.auditCurrentEpoch(),
+        commands.auditListDomains(),
+        commands.auditGetDomainSuperRoot(),
       ]);
       setStatus(s);
       setEvents(e);
       setEpochs(eps);
       setCurrentEpoch(ep);
+      setDomainInfos(domainList);
+      setSuperRootHex(superRoot.superRootHex);
     } catch {
       // Silent poll failure.
     }
-  }, []);
+  }, [selectedDatabase, selectedDeploymentId]);
 
   useEffect(() => {
     refresh();
     const interval = setInterval(refresh, POLL_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [refresh]);
+
+  useEffect(() => {
+    if (selectedDeploymentId === null || selectedDatabase === null) {
+      setDomainInfo(null);
+      return;
+    }
+    setDomainInfo(
+      domainInfos.find(
+        (domain) =>
+          domain.deploymentId === selectedDeploymentId &&
+          domain.database === selectedDatabase,
+      ) ?? null,
+    );
+  }, [domainInfos, selectedDatabase, selectedDeploymentId]);
+
+  // Reset any stale super-root proof when the selected domain changes.
+  useEffect(() => {
+    setSuperProof(null);
+  }, [selectedDatabase, selectedDeploymentId]);
 
   const refreshOnchainRoot = useCallback(async () => {
     try {
@@ -328,6 +360,8 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
       setPinataResult(null);
       setCurrentProof(null);
       setOplogReport(null);
+      setDomainInfos([]);
+      setDomainInfo(null);
       await refresh();
       await refreshOnchainRoot();
       await refreshVerificationHistory();
@@ -337,6 +371,52 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
       setResetBusy(false);
     }
   }, [refresh, refreshOnchainRoot, refreshVerificationHistory]);
+
+  const handleSetLegalHold = useCallback(async (hold: boolean) => {
+    if (selectedDeploymentId === null || selectedDatabase === null) return;
+    setDomainBusy(true);
+    try {
+      await commands.auditSetLegalHold(selectedDeploymentId, selectedDatabase, hold);
+      await refresh();
+    } catch (err) {
+      toast.push(formatError(err), "error");
+    } finally {
+      setDomainBusy(false);
+    }
+  }, [refresh, selectedDatabase, selectedDeploymentId]);
+
+  const handleProveInSuperRoot = useCallback(async () => {
+    if (selectedDeploymentId === null || selectedDatabase === null) return;
+    setDomainBusy(true);
+    try {
+      const proof = await commands.auditGenerateDomainSuperProof(
+        selectedDeploymentId,
+        selectedDatabase,
+      );
+      setSuperProof(proof);
+      setSuperRootHex(proof.superRootHex);
+    } catch (err) {
+      toast.push(formatError(err), "error");
+    } finally {
+      setDomainBusy(false);
+    }
+  }, [selectedDatabase, selectedDeploymentId, toast]);
+
+  const handlePruneDomain = useCallback(async () => {
+    if (selectedDeploymentId === null || selectedDatabase === null) return;
+    setDomainBusy(true);
+    try {
+      await commands.auditPruneDomain(selectedDeploymentId, selectedDatabase);
+      setProofIndex(null);
+      setProofResult(null);
+      setCurrentProof(null);
+      await refresh();
+    } catch (err) {
+      toast.push(formatError(err), "error");
+    } finally {
+      setDomainBusy(false);
+    }
+  }, [refresh, selectedDatabase, selectedDeploymentId]);
 
   // ─── Adaptive section collapse ────────────────────────────────────────
   // When batch is sealed/committed, collapse the feed so the commit action leads.
@@ -431,6 +511,24 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
         {/* ─── 3. Change Feed ───────────────────────────────────────────── */}
         <AuditChangeFeed
           events={events}
+          domains={domainInfos.length > 0 ? domainInfos : (status?.domains ?? [])}
+          selectedDeploymentId={selectedDeploymentId}
+          selectedDatabase={selectedDatabase}
+          onDomainChange={(deploymentId, database) => {
+            setSelectedDeploymentId(deploymentId);
+            setSelectedDatabase(database);
+            setDomainInfo(null);
+            setProofIndex(null);
+            setProofResult(null);
+            setCurrentProof(null);
+          }}
+          domainInfo={domainInfo}
+          domainBusy={domainBusy}
+          onSetLegalHold={handleSetLegalHold}
+          onPruneDomain={handlePruneDomain}
+          superRootHex={superRootHex}
+          superProof={superProof}
+          onProveInSuperRoot={handleProveInSuperRoot}
           collapsed={feedCollapsed}
           onToggle={() => setFeedCollapsed((v) => !v)}
           proofIndex={proofIndex}

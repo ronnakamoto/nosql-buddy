@@ -12,13 +12,13 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use tauri::Manager;
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{interval, sleep};
-use tauri::Manager;
 
 use crate::commands::dump::{run_dump, DumpRequest};
 use crate::commands::export::{run_export, ExportRequest};
-use crate::events::{emit_job_status_changed, chrono_now};
+use crate::events::{chrono_now, emit_job_status_changed};
 use crate::mongo::client_registry::{build_client, ClientEntry};
 use crate::mongo::job_store::{JobKind, JobMeta, JobStatus};
 use crate::state::AppState;
@@ -100,7 +100,10 @@ async fn tick(
         new_meta.parent_job_id = Some(original_id.clone()); // Link run to its template.
         new_meta.message = "Queued by scheduler".into();
         state.jobs.create_job(new_meta.clone()).await;
-        state.jobs.log_info(&new_id, "Scheduled job triggered").await;
+        state
+            .jobs
+            .log_info(&new_id, "Scheduled job triggered")
+            .await;
 
         // Update next_run_at and queue retention BEFORE spawning so we
         // don't borrow original_id after moving it into the async block.
@@ -156,9 +159,11 @@ async fn tick(
         let meta_clone = meta.clone();
         let in_flight_clone = in_flight.clone();
         let original_id_for_spawn = original_id.clone();
-        let permit = semaphore.clone().acquire_owned().await.map_err(|e| {
-            SchedulerError::Internal(format!("semaphore closed: {e}"))
-        })?;
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|e| SchedulerError::Internal(format!("semaphore closed: {e}")))?;
 
         tokio::spawn(async move {
             let _permit = permit; // hold until task completes
@@ -174,7 +179,10 @@ async fn tick(
 
     // Run retention cleanup once per tick for all triggered jobs.
     for (original_id, retention) in retention_queue {
-        let removed = state.jobs.cleanup_retention(&original_id, retention as usize).await;
+        let removed = state
+            .jobs
+            .cleanup_retention(&original_id, retention as usize)
+            .await;
         if removed > 0 {
             tracing::debug!(removed, job_id = %original_id, "retention cleanup removed old jobs");
         }
@@ -186,7 +194,10 @@ async fn tick(
 /// Parse a cron expression and return the next occurrence as an RFC3339 string.
 fn next_run_from_cron(cron_expr: &str) -> Option<String> {
     let schedule = cron::Schedule::from_str(cron_expr).ok()?;
-    schedule.upcoming(chrono::Local).next().map(|dt| dt.to_rfc3339())
+    schedule
+        .upcoming(chrono::Local)
+        .next()
+        .map(|dt| dt.to_rfc3339())
 }
 
 /// Reconstruct the original request from `config_json` and execute it.
@@ -211,7 +222,10 @@ async fn execute_scheduled_job(
         Ok(id) => id,
         Err(e) => {
             let msg = format!("Scheduled job could not connect: {e}");
-            state.jobs.update_status(new_job_id, JobStatus::Failed, msg.clone()).await;
+            state
+                .jobs
+                .update_status(new_job_id, JobStatus::Failed, msg.clone())
+                .await;
             state.jobs.log_error(new_job_id, &msg).await;
             emit_job_status_changed(app, new_job_id, "failed", &msg, Some(chrono_now()));
             return Err(e);
@@ -239,7 +253,10 @@ async fn execute_scheduled_job(
             if let Err(e) = run_dump(&request, state.inner(), app).await {
                 let msg = format!("Scheduled dump failed: {e}");
                 tracing::error!(job_id = %new_job_id, error = %e, "scheduled dump failed");
-                state.jobs.update_status(new_job_id, JobStatus::Failed, msg.clone()).await;
+                state
+                    .jobs
+                    .update_status(new_job_id, JobStatus::Failed, msg.clone())
+                    .await;
                 state.jobs.log_error(new_job_id, &msg).await;
                 emit_job_status_changed(app, new_job_id, "failed", &msg, Some(chrono_now()));
                 return Err(SchedulerError::JobFailed(e.to_string()));
@@ -257,7 +274,10 @@ async fn execute_scheduled_job(
             if let Err(e) = run_export(&request, state.inner(), app).await {
                 let msg = format!("Scheduled export failed: {e}");
                 tracing::error!(job_id = %new_job_id, error = %e, "scheduled export failed");
-                state.jobs.update_status(new_job_id, JobStatus::Failed, msg.clone()).await;
+                state
+                    .jobs
+                    .update_status(new_job_id, JobStatus::Failed, msg.clone())
+                    .await;
                 state.jobs.log_error(new_job_id, &msg).await;
                 emit_job_status_changed(app, new_job_id, "failed", &msg, Some(chrono_now()));
                 return Err(SchedulerError::JobFailed(e.to_string()));
@@ -304,6 +324,7 @@ async fn resolve_connection(
         .await
         .map_err(|e| SchedulerError::Connection(e.to_string()))?;
     let connection_id = uuid::Uuid::new_v4().to_string();
+    let deployment_id = crate::audit::change_stream::fetch_deployment_id(&client).await;
     state
         .clients
         .insert(
@@ -312,6 +333,7 @@ async fn resolve_connection(
                 client,
                 profile_id: profile.id.clone(),
                 name: profile.name.clone(),
+                deployment_id,
                 opened_at: chrono::Utc::now(),
             },
         )
@@ -341,12 +363,17 @@ enum SchedulerError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mongo::job_store::{JobKind, JobMeta, JobStatus, ScheduleConfig, JobStore, JobFilter};
+    use crate::mongo::job_store::{
+        JobFilter, JobKind, JobMeta, JobStatus, JobStore, ScheduleConfig,
+    };
 
     #[test]
     fn next_run_from_cron_produces_future_date() {
         let next = next_run_from_cron("0 0 2 * * *");
-        assert!(next.is_some(), "cron parsing should succeed for valid expression");
+        assert!(
+            next.is_some(),
+            "cron parsing should succeed for valid expression"
+        );
         let dt = chrono::DateTime::parse_from_rfc3339(&next.unwrap()).unwrap();
         assert!(dt > chrono::Local::now() - chrono::Duration::days(1));
     }
@@ -412,7 +439,9 @@ mod tests {
         store.create_job(meta).await;
 
         let new_next = "2025-01-01T00:00:00+00:00".to_string();
-        store.update_next_run("sched-1", Some(new_next.clone())).await;
+        store
+            .update_next_run("sched-1", Some(new_next.clone()))
+            .await;
 
         let job = store.get("sched-1").await.unwrap();
         assert_eq!(job.schedule.unwrap().next_run_at, Some(new_next));
@@ -433,7 +462,8 @@ mod tests {
         store.create_job(template).await;
         // Five generated runs (children).
         for i in 0..5 {
-            let mut meta = JobMeta::new(format!("ret-{i}"), JobKind::Dump, "c1".into(), "db".into());
+            let mut meta =
+                JobMeta::new(format!("ret-{i}"), JobKind::Dump, "c1".into(), "db".into());
             meta.status = JobStatus::Done;
             meta.created_at = format!("2024-01-0{}T00:00:00+00:00", 5 - i);
             meta.parent_job_id = Some("tmpl".into());

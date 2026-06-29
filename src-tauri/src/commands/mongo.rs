@@ -296,7 +296,9 @@ fn default_page() -> u64 {
 /// default applied when unset. Kept tiny so every entry point shares one
 /// definition of the bound.
 fn resolve_page_size(req_size: Option<u32>) -> u32 {
-    req_size.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, MAX_PAGE_SIZE)
+    req_size
+        .unwrap_or(DEFAULT_PAGE_SIZE)
+        .clamp(1, MAX_PAGE_SIZE)
 }
 
 /// Fast approximate count via collection metadata. Returns `(count, true)`
@@ -748,23 +750,29 @@ pub async fn create_index(
     let started = Instant::now();
     coll.create_index(model).await?;
     let elapsed = started.elapsed().as_millis() as u64;
-    let _ = crate::audit::interceptor::record_create_index(
-        &state.audit_log,
-        &request.database,
-        &request.collection,
-        &request.key_json,
-        &serde_json::to_string(&serde_json::json!({
-            "name": request.name,
-            "unique": request.unique,
-            "sparse": request.sparse,
-            "hidden": request.hidden,
-            "ttlSeconds": request.ttl_seconds,
-            "partialFilterExpression": request.partial_filter_expression_json,
-            "collation": request.collation,
-            "wildcardProjection": request.wildcard_projection_json,
-        }))
-        .unwrap_or_default(),
-    );
+    // Capture only when change streams aren't the authoritative path for this
+    // deployment (standalone/unknown); rs/sharded writes are captured by the
+    // change-stream listener, so recording here too would double-count.
+    if !crate::audit::change_stream::supports_change_streams(&entry.deployment_id) {
+        let _ = crate::audit::interceptor::record_create_index(
+            &state.audit_log,
+            &entry.deployment_id,
+            &request.database,
+            &request.collection,
+            &request.key_json,
+            &serde_json::to_string(&serde_json::json!({
+                "name": request.name,
+                "unique": request.unique,
+                "sparse": request.sparse,
+                "hidden": request.hidden,
+                "ttlSeconds": request.ttl_seconds,
+                "partialFilterExpression": request.partial_filter_expression_json,
+                "collation": request.collation,
+                "wildcardProjection": request.wildcard_projection_json,
+            }))
+            .unwrap_or_default(),
+        );
+    }
 
     // Record timeline entry.
     let ctx = crate::mongo::operation_recorder::RecordContext::new(
@@ -803,12 +811,15 @@ pub async fn drop_index(
     let started = Instant::now();
     coll.drop_index(&name).await?;
     let elapsed = started.elapsed().as_millis() as u64;
-    let _ = crate::audit::interceptor::record_drop_index(
-        &state.audit_log,
-        &database,
-        &collection,
-        &name,
-    );
+    if !crate::audit::change_stream::supports_change_streams(&entry.deployment_id) {
+        let _ = crate::audit::interceptor::record_drop_index(
+            &state.audit_log,
+            &entry.deployment_id,
+            &database,
+            &collection,
+            &name,
+        );
+    }
 
     // Record timeline entry.
     let ctx = crate::mongo::operation_recorder::RecordContext::new(
@@ -1070,13 +1081,16 @@ pub async fn insert_document(
                 .unwrap_or_default()
         });
 
-    // Record audit event.
-    let _ = crate::audit::interceptor::record_insert(
-        &state.audit_log,
-        &request.database,
-        &request.collection,
-        &request.document_json,
-    );
+    // Record audit event (only when change streams aren't the capture path).
+    if !crate::audit::change_stream::supports_change_streams(&entry.deployment_id) {
+        let _ = crate::audit::interceptor::record_insert(
+            &state.audit_log,
+            &entry.deployment_id,
+            &request.database,
+            &request.collection,
+            &request.document_json,
+        );
+    }
 
     // Record timeline entry.
     let ctx = crate::mongo::operation_recorder::RecordContext::new(
@@ -1150,7 +1164,9 @@ pub async fn update_documents(
         .client
         .database(&request.database)
         .collection::<Document>(&request.collection);
-    let opts = mongodb::options::UpdateOptions::builder().upsert(request.upsert).build();
+    let opts = mongodb::options::UpdateOptions::builder()
+        .upsert(request.upsert)
+        .build();
     let start = Instant::now();
     let res = if request.multi {
         coll.update_many(filter, update).with_options(opts).await?
@@ -1159,14 +1175,17 @@ pub async fn update_documents(
     };
     let elapsed = start.elapsed().as_millis() as u64;
 
-    // Record audit event.
-    let _ = crate::audit::interceptor::record_update(
-        &state.audit_log,
-        &request.database,
-        &request.collection,
-        &request.filter_json,
-        &request.update_json,
-    );
+    // Record audit event (only when change streams aren't the capture path).
+    if !crate::audit::change_stream::supports_change_streams(&entry.deployment_id) {
+        let _ = crate::audit::interceptor::record_update(
+            &state.audit_log,
+            &entry.deployment_id,
+            &request.database,
+            &request.collection,
+            &request.filter_json,
+            &request.update_json,
+        );
+    }
 
     // Record timeline entry.
     let ctx = crate::mongo::operation_recorder::RecordContext::new(
@@ -1235,18 +1254,26 @@ pub async fn replace_document(
         .client
         .database(&request.database)
         .collection::<Document>(&request.collection);
-    let opts = mongodb::options::ReplaceOptions::builder().upsert(request.upsert).build();
+    let opts = mongodb::options::ReplaceOptions::builder()
+        .upsert(request.upsert)
+        .build();
     let start = Instant::now();
-    let res = coll.replace_one(filter, replacement).with_options(opts).await?;
+    let res = coll
+        .replace_one(filter, replacement)
+        .with_options(opts)
+        .await?;
     let elapsed = start.elapsed().as_millis() as u64;
 
-    let _ = crate::audit::interceptor::record_update(
-        &state.audit_log,
-        &request.database,
-        &request.collection,
-        &request.filter_json,
-        &request.replacement_json,
-    );
+    if !crate::audit::change_stream::supports_change_streams(&entry.deployment_id) {
+        let _ = crate::audit::interceptor::record_update(
+            &state.audit_log,
+            &entry.deployment_id,
+            &request.database,
+            &request.collection,
+            &request.filter_json,
+            &request.replacement_json,
+        );
+    }
 
     // Record timeline entry.
     let ctx = crate::mongo::operation_recorder::RecordContext::new(
@@ -1303,7 +1330,9 @@ pub async fn insert_many_documents(
 ) -> AppResult<InsertManyResult> {
     let docs: Vec<Document> = serde_json::from_str(&request.documents_json)?;
     if docs.is_empty() {
-        return Err(AppError::Validation("documents array must not be empty".into()));
+        return Err(AppError::Validation(
+            "documents array must not be empty".into(),
+        ));
     }
     let entry = state.clients.get(&request.connection_id).await?;
     let profile_id = entry.profile_id.clone();
@@ -1324,12 +1353,15 @@ pub async fn insert_many_documents(
         })
         .collect();
 
-    let _ = crate::audit::interceptor::record_insert(
-        &state.audit_log,
-        &request.database,
-        &request.collection,
-        &request.documents_json,
-    );
+    if !crate::audit::change_stream::supports_change_streams(&entry.deployment_id) {
+        let _ = crate::audit::interceptor::record_insert(
+            &state.audit_log,
+            &entry.deployment_id,
+            &request.database,
+            &request.collection,
+            &request.documents_json,
+        );
+    }
 
     // Record timeline entry.
     let ctx = crate::mongo::operation_recorder::RecordContext::new(
@@ -1386,13 +1418,16 @@ pub async fn delete_documents(
     let res = coll.delete_many(filter).await?;
     let elapsed = start.elapsed().as_millis() as u64;
 
-    // Record audit event.
-    let _ = crate::audit::interceptor::record_delete(
-        &state.audit_log,
-        &database,
-        &collection,
-        &filter_json,
-    );
+    // Record audit event (only when change streams aren't the capture path).
+    if !crate::audit::change_stream::supports_change_streams(&entry.deployment_id) {
+        let _ = crate::audit::interceptor::record_delete(
+            &state.audit_log,
+            &entry.deployment_id,
+            &database,
+            &collection,
+            &filter_json,
+        );
+    }
 
     // Record timeline entry.
     let ctx = crate::mongo::operation_recorder::RecordContext::new(
@@ -1410,7 +1445,9 @@ pub async fn delete_documents(
         elapsed,
         false,
         None,
-        safe_change_meta.unwrap_or_default().into_recorder_metadata(),
+        safe_change_meta
+            .unwrap_or_default()
+            .into_recorder_metadata(),
     )
     .await;
 
@@ -1576,7 +1613,10 @@ mod tests {
             safe_change_meta: SafeChangeMeta::default(),
         };
         let json = serde_json::to_string(&req).expect("serialize");
-        assert!(json.contains("\"upsert\":true"), "upsert must serialize as camelCase");
+        assert!(
+            json.contains("\"upsert\":true"),
+            "upsert must serialize as camelCase"
+        );
         assert!(json.contains("\"multi\":true"));
     }
 

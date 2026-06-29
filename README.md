@@ -11,6 +11,7 @@ NoSQLBuddy connects to MongoDB, lets you browse data, run queries, build aggrega
 - [Features](#features)
 - [Using NoSQLBuddy](#using-nosqlbuddy) — how to use the core features
 - [ZK Audit Log](#zk-audit-log) — [Dev Mode](#dev-mode-full-stack-locally) · [Production Mode](#production-mode-in-app-your-keys)
+- [Audit domains and selective disclosure](#audit-domains-and-selective-disclosure-desktop-app)
 - [Standalone audit service](#standalone-audit-service-nosqlbuddy-audit) (advanced / reference)
 - [Deploying the audit service to a server](#deploying-the-audit-service-to-a-server)
 - [Security](#security)
@@ -101,6 +102,7 @@ docker compose run --rm seeder   # re-seed the demo data
 - **Explain plan visualization** — Parse `explain` output into a navigable tree to diagnose slow queries.
 - **Driver code generation** — Export queries and pipelines to Node.js, Python, Java, C#, Ruby, Rust, and the MongoDB shell.
 - **ZK audit log** — Tamper-evident Poseidon Merkle tree, Groth16 inclusion proofs, epoch batching with IPFS publishing and Stellar on-chain commitments (testnet or mainnet), multi-publisher K-of-N threshold attestation, and reader-mode verification against on-chain roots. Two modes: **Dev Mode** (full stack locally via Docker) and **Production Mode** (in-app pipeline with your own keys).
+- **Audit domains & selective disclosure** — Events are segmented per `(deployment, database)` domain, each with its own secondary Merkle root, so you can prove one tenant's record without revealing any other domain's data. An aggregation **super-root** over all domain roots (anchored in the on-chain commit metadata) lets you prove a domain is part of the committed state, and per-domain **legal hold** and **retention/pruning** manage lifecycle while keeping the anchored history intact and verifiable.
 - **Oplog completeness** — Deterministic SHA-256 Merkle tree over MongoDB's oplog (`local.oplog.rs`), binding the audit log to the same ground truth that MongoDB's replication protocol uses. An independent replica member (run by the auditor/regulator) provides a trust anchor that detects any omitted writes. The on-chain commitment stores both the audit log root and the oplog root, and independent attesters submit ed25519 attestations over the oplog root for durable, post-rollover verification.
 - **Standalone audit service** — `nosqlbuddy-audit` runs independently of the desktop app, capturing MongoDB change stream events, batching into epochs, publishing to IPFS, and committing Merkle roots on-chain via an HTTP API. Signs transactions natively (ed25519 + Soroban RPC) — no `stellar` CLI required. Includes an interactive `setup` wizard for one-command key generation, contract deployment, and attester authorization.
 - **Native desktop experience** — Built on Tauri v2 for a small footprint, native menus, and consistent shortcuts on macOS, Windows, and Linux.
@@ -255,6 +257,22 @@ Runs the in-app audit pipeline with **your own Stellar keypair** and contract. C
 6. Click **Commit Now** to close the epoch, pin to IPFS, and commit the root on-chain via native signing.
 
 **Switching modes:** Click **Settings** in the audit panel, then toggle between Dev and Production. The panel re-routes immediately.
+
+### Audit domains and selective disclosure
+
+Beyond the single global Merkle tree, the desktop app segments the audit log into **domains** so you can disclose one tenant's history without exposing everyone else's. A domain is the pair `(deployment, database)` — for example `rs:rs0 · sales`. Events recorded before segmentation (with no deployment identity) form a backward-compatible **unattributed** domain.
+
+These features live in the **Audit tab → Change Feed**: domain filter chips, a per-domain status panel (root, event count, legal-hold and pruned badges), and actions to prove inclusion and manage lifecycle. They apply to both Dev and Production mode.
+
+**Per-domain roots & selective disclosure.** Each domain has its own secondary Merkle root, computed deterministically from that domain's leaves in the (tamper-verified) global log. You can generate an inclusion proof for a single record against its domain root — proving that one event is in the log without revealing any other domain's records.
+
+**Aggregation super-root.** A second Merkle tree is built over all per-domain roots (one leaf per domain, each leaf binding `deployment | database | domainRoot`). Its **super-root** commits to the *set* of domain roots, and a short inclusion proof can show that a given domain's root is part of the committed state. The super-root is anchored on-chain by being written into the epoch's commit metadata (`domainSuperRoot=<hex>`), so no contract redeploy is needed. The "Prove in super-root" action returns a proof that is cryptographically verifiable (the leaf hashes up to the super-root through its authentication path).
+
+**Legal hold.** A domain can be placed under legal hold, which blocks pruning/retention until the hold is lifted. Holds are persisted and survive restarts.
+
+**Retention / pruning.** A domain can be *logically* pruned: its active event metadata is dropped from the live view, but a compact **retained Merkle commitment** (root, event count, last index, timestamp) is kept. The append-only global tree, sled state, and on-chain anchor are never modified — so the anchored history stays complete and verifiable, and the pruned domain still participates in the super-root via its retained root. Pruning is refused while a legal hold is active.
+
+> **Guarantee layers.** Integrity (events weren't altered) and inclusion (a proof that an event is in the log) are provided per domain. Completeness (no writes were omitted) is currently a global guarantee via the oplog protocol below; per-domain completeness is not yet sliced out.
 
 ## Standalone audit service (`nosqlbuddy-audit`)
 

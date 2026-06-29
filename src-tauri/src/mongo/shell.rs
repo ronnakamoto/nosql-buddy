@@ -190,11 +190,27 @@ fn set_audit_log(log: Arc<AuditLog>) {
 /// recording must never break the user's shell operation.
 fn try_audit<F>(f: F)
 where
-    F: FnOnce(&Arc<AuditLog>),
+    F: FnOnce(&Arc<AuditLog>, &str),
 {
     SHELL_AUDIT_LOG.with(|c| {
         if let Some(ref audit) = *c.borrow() {
-            f(audit);
+            SHELL_ENTRY.with(|entry_cell| {
+                let borrow = entry_cell.borrow();
+                let deployment_id = borrow
+                    .as_ref()
+                    .map(|entry| entry.deployment_id.as_str())
+                    .unwrap_or("");
+                // Skip the interceptor capture path on deployments where the
+                // change-stream listener is the authoritative capture path
+                // (replica sets / sharded clusters). Otherwise shell-executed
+                // writes would be recorded twice — once here and once when the
+                // change stream observes the same write. On standalone/unknown
+                // deployments there is no change stream, so this is the only
+                // capture path and it runs.
+                if !crate::audit::change_stream::supports_change_streams(deployment_id) {
+                    f(audit, deployment_id);
+                }
+            });
         }
     });
 }
@@ -568,12 +584,9 @@ fn install_host(ctx: &mut Context) {
         let active_db = SHELL_ACTIVE_DB.with(|c| c.borrow().clone());
         let result = with_entry(|entry| {
             let database = entry.client.database(&active_db);
-            runtime_block_on(async move {
-                database
-                    .run_command(cmd_doc)
-                    .await
-                    .map_err(AppError::mongo)
-            })
+            runtime_block_on(
+                async move { database.run_command(cmd_doc).await.map_err(AppError::mongo) },
+            )
         });
         match result {
             Ok(doc) => bson_to_js(bson::Bson::Document(doc), ctx),
@@ -669,12 +682,9 @@ fn install_db_stub(ctx: &mut Context) {
         let active_db = SHELL_ACTIVE_DB.with(|c| c.borrow().clone());
         let result = with_entry(|entry| {
             let database = entry.client.database(&active_db);
-            runtime_block_on(async move {
-                database
-                    .run_command(cmd_doc)
-                    .await
-                    .map_err(AppError::mongo)
-            })
+            runtime_block_on(
+                async move { database.run_command(cmd_doc).await.map_err(AppError::mongo) },
+            )
         });
         match result {
             Ok(doc) => bson_to_js(bson::Bson::Document(doc), ctx),
@@ -916,10 +926,7 @@ fn dispatch_sync(
                     .limit(50)
                     .await
                     .map_err(AppError::mongo)?;
-                cursor
-                    .try_collect()
-                    .await
-                    .map_err(AppError::mongo)
+                cursor.try_collect().await.map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
             SHELL_LAST_COLLECTION.with(|c| *c.borrow_mut() = Some(coll.to_string()));
@@ -1010,13 +1017,11 @@ fn dispatch_sync(
                     .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
-            let docs: Vec<Document> = runtime_block_on(async move {
-                cursor
-                    .try_collect()
-                    .await
-                    .map_err(AppError::mongo)
-            })
-            .map_err(|e| js_err(e.to_string()))?;
+            let docs: Vec<Document> =
+                runtime_block_on(
+                    async move { cursor.try_collect().await.map_err(AppError::mongo) },
+                )
+                .map_err(|e| js_err(e.to_string()))?;
             let arr = JsArray::new(ctx);
             for (i, d) in docs.iter().enumerate() {
                 let js = bson_to_js(bson::Bson::Document(d.clone()), ctx)?;
@@ -1078,9 +1083,9 @@ fn dispatch_sync(
                     .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
-            try_audit(|audit| {
+            try_audit(|audit, dep| {
                 if let Ok(json) = serde_json::to_string(&doc_for_audit) {
-                    let _ = interceptor::record_insert(audit, db, coll, &json);
+                    let _ = interceptor::record_insert(audit, dep, db, coll, &json);
                 }
             });
             if let Ok(json) = serde_json::to_string(&doc_for_audit) {
@@ -1138,10 +1143,10 @@ fn dispatch_sync(
                     .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
-            try_audit(|audit| {
+            try_audit(|audit, dep| {
                 for doc in &docs_for_audit {
                     if let Ok(json) = serde_json::to_string(doc) {
-                        let _ = interceptor::record_insert(audit, db, coll, &json);
+                        let _ = interceptor::record_insert(audit, dep, db, coll, &json);
                     }
                 }
             });
@@ -1203,12 +1208,12 @@ fn dispatch_sync(
                 .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
-            try_audit(|audit| {
+            try_audit(|audit, dep| {
                 if let (Ok(fj), Ok(uj)) = (
                     serde_json::to_string(&filter_for_audit),
                     serde_json::to_string(&update_for_audit),
                 ) {
-                    let _ = interceptor::record_update(audit, db, coll, &fj, &uj);
+                    let _ = interceptor::record_update(audit, dep, db, coll, &fj, &uj);
                 }
             });
             if let (Ok(fj), Ok(uj)) = (
@@ -1277,12 +1282,12 @@ fn dispatch_sync(
                     .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
-            try_audit(|audit| {
+            try_audit(|audit, dep| {
                 if let (Ok(fj), Ok(rj)) = (
                     serde_json::to_string(&filter_for_audit),
                     serde_json::to_string(&repl_for_audit),
                 ) {
-                    let _ = interceptor::record_update(audit, db, coll, &fj, &rj);
+                    let _ = interceptor::record_update(audit, dep, db, coll, &fj, &rj);
                 }
             });
             if let (Ok(fj), Ok(rj)) = (
@@ -1337,9 +1342,9 @@ fn dispatch_sync(
                 .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
-            try_audit(|audit| {
+            try_audit(|audit, dep| {
                 if let Ok(fj) = serde_json::to_string(&filter_for_audit) {
-                    let _ = interceptor::record_delete(audit, db, coll, &fj);
+                    let _ = interceptor::record_delete(audit, dep, db, coll, &fj);
                 }
             });
             if let Ok(fj) = serde_json::to_string(&filter_for_audit) {
@@ -1382,8 +1387,8 @@ fn dispatch_sync(
                     .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
-            try_audit(|audit| {
-                let _ = interceptor::record_drop_collection(audit, db, coll);
+            try_audit(|audit, dep| {
+                let _ = interceptor::record_drop_collection(audit, dep, db, coll);
             });
             push_operation(ShellOperation {
                 kind: OperationKind::CollectionDrop,
@@ -1453,12 +1458,12 @@ fn dispatch_sync(
                     .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
-            try_audit(|audit| {
+            try_audit(|audit, dep| {
                 if let (Ok(kj), Ok(oj)) = (
                     serde_json::to_string(&keys_for_audit),
                     serde_json::to_string(&opts_for_audit),
                 ) {
-                    let _ = interceptor::record_create_index(audit, db, coll, &kj, &oj);
+                    let _ = interceptor::record_create_index(audit, dep, db, coll, &kj, &oj);
                 }
             });
             if let (Ok(kj), Ok(_oj)) = (
@@ -1508,8 +1513,8 @@ fn dispatch_sync(
                     .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
-            try_audit(|audit| {
-                let _ = interceptor::record_drop_index(audit, db, coll, &name_for_output);
+            try_audit(|audit, dep| {
+                let _ = interceptor::record_drop_index(audit, dep, db, coll, &name_for_output);
             });
             push_operation(ShellOperation {
                 kind: OperationKind::IndexDrop,
@@ -1559,8 +1564,14 @@ fn dispatch_sync(
                     .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
-            try_audit(|audit| {
-                let _ = interceptor::record_rename_collection(audit, db, coll, &new_name_for_audit);
+            try_audit(|audit, dep| {
+                let _ = interceptor::record_rename_collection(
+                    audit,
+                    dep,
+                    db,
+                    coll,
+                    &new_name_for_audit,
+                );
             });
             push_operation(ShellOperation {
                 kind: OperationKind::CollectionRename,
@@ -1595,8 +1606,8 @@ fn dispatch_sync(
                     .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
-            try_audit(|audit| {
-                let _ = interceptor::record_drop_database(audit, db);
+            try_audit(|audit, dep| {
+                let _ = interceptor::record_drop_database(audit, dep, db);
             });
             push_output(ShellOutput::Text {
                 value: format!("Dropped database {}", db),
@@ -1648,12 +1659,12 @@ fn dispatch_sync(
                 a.await.map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
-            try_audit(|audit| {
+            try_audit(|audit, dep| {
                 if let (Ok(fj), Ok(uj)) = (
                     serde_json::to_string(&filter_for_audit),
                     serde_json::to_string(&update_for_audit),
                 ) {
-                    let _ = interceptor::record_update(audit, db, coll, &fj, &uj);
+                    let _ = interceptor::record_update(audit, dep, db, coll, &fj, &uj);
                 }
             });
             if let (Ok(fj), Ok(uj)) = (
@@ -1711,9 +1722,9 @@ fn dispatch_sync(
                 a.await.map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
-            try_audit(|audit| {
+            try_audit(|audit, dep| {
                 if let Ok(fj) = serde_json::to_string(&filter_for_audit) {
-                    let _ = interceptor::record_delete(audit, db, coll, &fj);
+                    let _ = interceptor::record_delete(audit, dep, db, coll, &fj);
                 }
             });
             if let Ok(fj) = serde_json::to_string(&filter_for_audit) {
@@ -1778,12 +1789,12 @@ fn dispatch_sync(
                 a.await.map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
-            try_audit(|audit| {
+            try_audit(|audit, dep| {
                 if let (Ok(fj), Ok(rj)) = (
                     serde_json::to_string(&filter_for_audit),
                     serde_json::to_string(&repl_for_audit),
                 ) {
-                    let _ = interceptor::record_update(audit, db, coll, &fj, &rj);
+                    let _ = interceptor::record_update(audit, dep, db, coll, &fj, &rj);
                 }
             });
             if let (Ok(fj), Ok(rj)) = (
@@ -1876,9 +1887,9 @@ fn dispatch_sync(
                                 .map_err(AppError::mongo)
                         })
                         .map_err(|e| js_err(e.to_string()))?;
-                        try_audit(|audit| {
+                        try_audit(|audit, dep| {
                             if let Ok(json) = serde_json::to_string(&doc_for_audit) {
-                                let _ = interceptor::record_insert(audit, db, coll, &json);
+                                let _ = interceptor::record_insert(audit, dep, db, coll, &json);
                             }
                         });
                         inserted += 1;
@@ -1903,17 +1914,15 @@ fn dispatch_sync(
                             } else {
                                 c.update_one(filter, update_mods)
                             };
-                            a.upsert(upsert)
-                                .await
-                                .map_err(AppError::mongo)
+                            a.upsert(upsert).await.map_err(AppError::mongo)
                         })
                         .map_err(|e| js_err(e.to_string()))?;
-                        try_audit(|audit| {
+                        try_audit(|audit, dep| {
                             if let (Ok(fj), Ok(uj)) = (
                                 serde_json::to_string(&filter_for_audit),
                                 serde_json::to_string(&update_for_audit),
                             ) {
-                                let _ = interceptor::record_update(audit, db, coll, &fj, &uj);
+                                let _ = interceptor::record_update(audit, dep, db, coll, &fj, &uj);
                             }
                         });
                         matched += res.matched_count;
@@ -1945,12 +1954,12 @@ fn dispatch_sync(
                                 .map_err(AppError::mongo)
                         })
                         .map_err(|e| js_err(e.to_string()))?;
-                        try_audit(|audit| {
+                        try_audit(|audit, dep| {
                             if let (Ok(fj), Ok(rj)) = (
                                 serde_json::to_string(&filter_for_audit),
                                 serde_json::to_string(&repl_for_audit),
                             ) {
-                                let _ = interceptor::record_update(audit, db, coll, &fj, &rj);
+                                let _ = interceptor::record_update(audit, dep, db, coll, &fj, &rj);
                             }
                         });
                         matched += res.matched_count;
@@ -1976,9 +1985,9 @@ fn dispatch_sync(
                             r.map_err(AppError::mongo)
                         })
                         .map_err(|e| js_err(e.to_string()))?;
-                        try_audit(|audit| {
+                        try_audit(|audit, dep| {
                             if let Ok(fj) = serde_json::to_string(&filter_for_audit) {
-                                let _ = interceptor::record_delete(audit, db, coll, &fj);
+                                let _ = interceptor::record_delete(audit, dep, db, coll, &fj);
                             }
                         });
                         deleted += res.deleted_count;

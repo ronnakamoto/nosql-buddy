@@ -59,6 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             app_lib::mongo::client_registry::ClientEntry {
                 profile_id: "smoke".into(),
                 name: "smoke".into(),
+                deployment_id: "smoke".into(),
                 client: built.clone(),
                 opened_at: chrono::Utc::now(),
             },

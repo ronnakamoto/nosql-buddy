@@ -23,6 +23,9 @@ use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use tokio::sync::Mutex as TokioMutex;
 use stellar_xdr::curr::{
     AccountId, ContractId, DecoratedSignature, Hash, HostFunction, InvokeContractArgs,
     InvokeHostFunctionOp, LedgerEntryData, LedgerKey, LedgerKeyAccount, Limits, Memo, MuxedAccount,
@@ -464,6 +467,60 @@ struct SimulationResultEntry {
 
 // ─── Transaction submission ───────────────────────────────────────────
 
+/// Poll the Soroban RPC `getTransaction` method until the transaction is applied,
+/// rejected, or times out.
+async fn wait_for_transaction(rpc_url: &str, tx_hash: &str) -> AuditResult<GetTransactionResult> {
+    let client = reqwest::Client::new();
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getTransaction",
+        "params": {
+            "hash": tx_hash
+        }
+    });
+
+    let mut attempt = 0;
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_secs(if attempt == 0 { 2 } else { 3 })).await;
+        attempt += 1;
+
+        let resp = client
+            .post(rpc_url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| AuditError::Validation(format!("RPC getTransaction failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            continue;
+        }
+        let body = resp.text().await.unwrap_or_default();
+        let result: Result<JsonRpcResponse<GetTransactionResult>, _> = serde_json::from_str(&body);
+        if let Ok(res) = result {
+            if let Some(tx_res) = res.result {
+                match tx_res.status.as_str() {
+                    "SUCCESS" | "FAILED" => return Ok(tx_res),
+                    "NOT_FOUND" => {}
+                    _ => {} // e.g. PENDING
+                }
+            }
+        }
+        if attempt > 15 {
+            return Err(AuditError::Validation(format!(
+                "transaction {tx_hash} timed out waiting for confirmation"
+            )));
+        }
+    }
+}
+
+#[derive(Deserialize, Debug)]
+struct GetTransactionResult {
+    status: String,
+    #[serde(rename = "resultXdr")]
+    result_xdr: Option<String>,
+}
+
 /// Submit a signed transaction via the Soroban RPC `sendTransaction` method.
 async fn send_transaction(rpc_url: &str, envelope: &TransactionEnvelope) -> AuditResult<String> {
     let xdr_bytes = envelope
@@ -520,13 +577,156 @@ async fn send_transaction(rpc_url: &str, envelope: &TransactionEnvelope) -> Audi
         .ok_or_else(|| AuditError::Validation("sendTransaction returned no result".to_string()))?;
 
     if send_result.status == "ERROR" {
+        let xdr = send_result.error_result_xdr.unwrap_or_default();
+        let code = decode_tx_result_code(&xdr);
+        let name = code.map(tx_result_code_name).unwrap_or("unknown");
+        let code_str = code.map(|c| c.to_string()).unwrap_or_else(|| "?".to_string());
         return Err(AuditError::Validation(format!(
-            "transaction rejected: {}",
-            send_result.error_result_xdr.unwrap_or_default()
+            "transaction rejected: {name} ({code_str}): {xdr}"
         )));
     }
 
     Ok(send_result.hash)
+}
+
+/// Decode the `TransactionResult` XDR returned by `sendTransaction` on rejection
+/// and extract the result code. The XDR layout is `feeCharged` (i64, 8 bytes)
+/// followed by the `TransactionResultResult` union discriminant (i32, 4 bytes),
+/// which is the `TransactionResultCode`.
+fn decode_tx_result_code(error_result_xdr_b64: &str) -> Option<i32> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(error_result_xdr_b64)
+        .ok()?;
+    if bytes.len() < 12 {
+        return None;
+    }
+    Some(i32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]))
+}
+
+/// Map a Stellar `TransactionResultCode` to its name for human-readable errors.
+fn tx_result_code_name(code: i32) -> &'static str {
+    match code {
+        0 => "txSUCCESS",
+        -1 => "txFAILED",
+        -2 => "txTOO_EARLY",
+        -3 => "txTOO_LATE",
+        -4 => "txMISSING_OPERATION",
+        -5 => "txBAD_SEQ",
+        -6 => "txBAD_AUTH",
+        -7 => "txINSUFFICIENT_BALANCE",
+        -8 => "txNO_ACCOUNT",
+        -9 => "txINSUFFICIENT_FEE",
+        -10 => "txBAD_AUTH_EXTRA",
+        -11 => "txINTERNAL_ERROR",
+        -12 => "txNOT_SUPPORTED",
+        -13 => "txFEE_BUMP_INNER_FAILED",
+        -14 => "txBAD_SPONSORSHIP",
+        -15 => "txBAD_MIN_SEQ_AGE_OR_GAP",
+        -16 => "txMALFORMED",
+        -17 => "txSOROBAN_INVALID",
+        _ => "unknown",
+    }
+}
+
+/// True if the error is a `txBAD_SEQ` rejection (stale account sequence).
+fn is_bad_seq_error(err: &AuditError) -> bool {
+    err.to_string().contains("txBAD_SEQ")
+}
+
+/// Maximum number of `txBAD_SEQ` retries before giving up.
+const MAX_BAD_SEQ_RETRIES: u32 = 5;
+
+/// Return a process-wide async lock keyed by signing account. Serializing
+/// submissions from the same account prevents two in-flight transactions from
+/// racing on the account sequence number — the RPC ledger only reflects a new
+/// sequence once the prior transaction has been applied, so concurrent or
+/// rapid back-to-back submissions otherwise collide with `txBAD_SEQ`.
+fn submit_lock_for(public_key: &[u8; 32]) -> Arc<TokioMutex<()>> {
+    static LOCKS: OnceLock<StdMutex<HashMap<[u8; 32], Arc<TokioMutex<()>>>>> = OnceLock::new();
+    let map = LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .entry(*public_key)
+        .or_insert_with(|| Arc::new(TokioMutex::new(())))
+        .clone()
+}
+
+/// Build → simulate → sign → submit → confirm a contract invocation, serialized
+/// per signing account and retried on `txBAD_SEQ` with a freshly fetched
+/// sequence. Returns the tx hash and the simulation result so callers can parse
+/// the contract return value from `sim_result.results[0].xdr`.
+async fn submit_invoke_with_retry(
+    rpc_url: &str,
+    keypair: &StellarKeypair,
+    network_passphrase: &str,
+    contract_id: &str,
+    function_name: &str,
+    args: Vec<ScVal>,
+    base_fee: u32,
+) -> AuditResult<(String, SimulationResult)> {
+    let public_key = keypair.public_bytes();
+    let lock = submit_lock_for(&public_key);
+    let _guard = lock.lock().await;
+
+    let mut attempt: u32 = 0;
+    loop {
+        // 1. Fetch the current account sequence from the same RPC node we submit
+        //    to (re-fetched on each retry so a stale sequence self-heals).
+        let sequence = get_account_sequence_from_rpc(rpc_url, &public_key).await?;
+
+        // 2. Build, simulate, attach Soroban data + auth, and sign.
+        let tx = build_invoke_transaction(
+            &public_key,
+            sequence,
+            contract_id,
+            function_name,
+            args.clone(),
+            base_fee,
+        )?;
+        let sim_result = simulate_transaction(rpc_url, &tx).await?;
+        let signed_tx = attach_soroban_data_and_auth(&tx, &sim_result)?;
+        let decorated_sig =
+            sign_transaction(&signed_tx, &keypair.signing_key, network_passphrase)?;
+        let signatures: VecM<DecoratedSignature, 20> = vec![decorated_sig]
+            .try_into()
+            .map_err(|e: stellar_xdr::curr::Error| {
+                AuditError::Validation(format!("too many signatures: {e}"))
+            })?;
+        let envelope = TransactionEnvelope::Tx(TransactionV1Envelope {
+            tx: signed_tx,
+            signatures,
+        });
+
+        // 3. Submit. On txBAD_SEQ, re-fetch the sequence and retry with backoff.
+        match send_transaction(rpc_url, &envelope).await {
+            Ok(tx_hash) => {
+                // 4. Wait for the ledger to apply the tx so the account sequence
+                //    advances before the lock is released and the next submission
+                //    runs. A FAILED on-chain result is surfaced to the caller.
+                let confirmed = wait_for_transaction(rpc_url, &tx_hash).await?;
+                if confirmed.status == "FAILED" {
+                    return Err(AuditError::Validation(format!(
+                        "transaction {tx_hash} failed on-chain: {}",
+                        confirmed.result_xdr.unwrap_or_default()
+                    )));
+                }
+                return Ok((tx_hash, sim_result));
+            }
+            Err(e) if is_bad_seq_error(&e) && attempt < MAX_BAD_SEQ_RETRIES => {
+                attempt += 1;
+                tracing::warn!(
+                    attempt,
+                    function_name,
+                    "on-chain submission rejected with txBAD_SEQ; re-fetching account sequence and retrying"
+                );
+                tokio::time::sleep(tokio::time::Duration::from_millis(
+                    750 * attempt as u64,
+                ))
+                .await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -617,10 +817,7 @@ pub async fn commit_root_native(
     contract_id: &str,
     network_passphrase: &str,
 ) -> AuditResult<CommitResult> {
-    // 1. Get account sequence number from the Soroban RPC ledger.
-    let sequence = get_account_sequence_from_rpc(rpc_url, &keypair.public_bytes()).await?;
-
-    // 2. Build ScVal args: root (Bytes), metadata (String).
+    // Build ScVal args: root (Bytes), metadata (String).
     let root_bytes = hex::decode(root_hex)
         .map_err(|e| AuditError::Validation(format!("invalid root hex: {e}")))?;
 
@@ -634,85 +831,19 @@ pub async fn commit_root_native(
 
     let args = vec![root_scval, metadata_scval];
 
-    // 3. Build the transaction.
-    let tx = build_invoke_transaction(
-        &keypair.public_bytes(),
-        sequence,
+    // Submit (serialized per account, confirmed, and retried on txBAD_SEQ).
+    let (tx_hash, sim_result) = submit_invoke_with_retry(
+        rpc_url,
+        keypair,
+        network_passphrase,
         contract_id,
         "commit_root",
         args,
         100, // base fee per operation (stroops)
-    )?;
+    )
+    .await?;
 
-    // 4. Simulate the transaction.
-    let sim_result = simulate_transaction(rpc_url, &tx).await?;
-
-    // 5. Attach the simulation's SorobanTransactionData to the transaction.
-    let soroban_data_xdr = base64::engine::general_purpose::STANDARD
-        .decode(&sim_result.transaction_data())
-        .map_err(|e| AuditError::Validation(format!("base64 decode transactionData: {e}")))?;
-    let soroban_data = SorobanTransactionData::from_xdr(&soroban_data_xdr, Limits::none())
-        .map_err(|e| AuditError::Validation(format!("decode SorobanTransactionData: {e}")))?;
-
-    let mut signed_tx = tx.clone();
-    signed_tx.ext = TransactionExt::V1(soroban_data);
-    signed_tx.fee = sim_result.max_fee_stroops();
-    signed_tx.fee = sim_result.max_fee_stroops();
-
-    // 6. Attach auth entries if the simulation returned any.
-    if !sim_result.results.is_empty() && !sim_result.results[0].auth.is_empty() {
-        let auth_entries: Result<Vec<SorobanAuthorizationEntry>, AuditError> = sim_result.results
-            [0]
-        .auth
-        .iter()
-        .map(|auth_b64| {
-            let auth_xdr = base64::engine::general_purpose::STANDARD
-                .decode(auth_b64)
-                .map_err(|e| AuditError::Validation(format!("base64 decode auth: {e}")))?;
-            SorobanAuthorizationEntry::from_xdr(&auth_xdr, Limits::none())
-                .map_err(|e| AuditError::Validation(format!("decode auth: {e}")))
-        })
-        .collect();
-
-        let auth_entries = auth_entries?;
-        let auth_vecm: VecM<SorobanAuthorizationEntry> =
-            auth_entries
-                .try_into()
-                .map_err(|e: stellar_xdr::curr::Error| {
-                    AuditError::Validation(format!("too many auth entries: {e}"))
-                })?;
-
-        // Rebuild the operations with auth attached. VecM doesn't impl DerefMut,
-        // so we reconstruct the operation list.
-        let mut ops = signed_tx.operations.to_vec();
-        if let OperationBody::InvokeHostFunction(ref mut invoke_op) = ops[0].body {
-            invoke_op.auth = auth_vecm;
-        }
-        signed_tx.operations = ops.try_into().map_err(|e: stellar_xdr::curr::Error| {
-            AuditError::Validation(format!("too many operations: {e}"))
-        })?;
-    }
-
-    // 7. Sign the transaction.
-    let decorated_sig = sign_transaction(&signed_tx, &keypair.signing_key, network_passphrase)?;
-
-    // 8. Build the signed envelope.
-    let signatures: VecM<DecoratedSignature, 20> =
-        vec![decorated_sig]
-            .try_into()
-            .map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("too many signatures: {e}"))
-            })?;
-
-    let signed_envelope = TransactionEnvelope::Tx(TransactionV1Envelope {
-        tx: signed_tx,
-        signatures,
-    });
-
-    // 9. Submit the transaction.
-    let tx_hash = send_transaction(rpc_url, &signed_envelope).await?;
-
-    // 10. Parse the return value from the simulation to get the on-chain sequence.
+    // Parse the return value from the simulation to get the on-chain sequence.
     let on_chain_sequence = if !sim_result.results.is_empty() {
         let return_val_xdr = base64::engine::general_purpose::STANDARD
             .decode(&sim_result.results[0].xdr)
@@ -755,8 +886,6 @@ pub async fn commit_root_with_oplog_native(
     contract_id: &str,
     network_passphrase: &str,
 ) -> AuditResult<CommitResult> {
-    let sequence = get_account_sequence_from_rpc(rpc_url, &keypair.public_bytes()).await?;
-
     let root_bytes = hex::decode(root_hex)
         .map_err(|e| AuditError::Validation(format!("invalid root hex: {e}")))?;
     let root_scval = ScVal::Bytes(ScBytes(root_bytes.clone().try_into().map_err(
@@ -784,73 +913,16 @@ pub async fn commit_root_with_oplog_native(
         metadata_scval,
     ];
 
-    let tx = build_invoke_transaction(
-        &keypair.public_bytes(),
-        sequence,
+    let (tx_hash, sim_result) = submit_invoke_with_retry(
+        rpc_url,
+        keypair,
+        network_passphrase,
         contract_id,
         "commit_root_with_oplog",
         args,
         100,
-    )?;
-
-    let sim_result = simulate_transaction(rpc_url, &tx).await?;
-
-    let soroban_data_xdr = base64::engine::general_purpose::STANDARD
-        .decode(&sim_result.transaction_data())
-        .map_err(|e| AuditError::Validation(format!("base64 decode transactionData: {e}")))?;
-    let soroban_data = SorobanTransactionData::from_xdr(&soroban_data_xdr, Limits::none())
-        .map_err(|e| AuditError::Validation(format!("decode SorobanTransactionData: {e}")))?;
-
-    let mut signed_tx = tx.clone();
-    signed_tx.ext = TransactionExt::V1(soroban_data);
-    signed_tx.fee = sim_result.max_fee_stroops();
-
-    if !sim_result.results.is_empty() && !sim_result.results[0].auth.is_empty() {
-        let auth_entries: Result<Vec<SorobanAuthorizationEntry>, AuditError> = sim_result.results
-            [0]
-        .auth
-        .iter()
-        .map(|auth_b64| {
-            let auth_xdr = base64::engine::general_purpose::STANDARD
-                .decode(auth_b64)
-                .map_err(|e| AuditError::Validation(format!("base64 decode auth: {e}")))?;
-            SorobanAuthorizationEntry::from_xdr(&auth_xdr, Limits::none())
-                .map_err(|e| AuditError::Validation(format!("decode auth: {e}")))
-        })
-        .collect();
-
-        let auth_entries = auth_entries?;
-        let auth_vecm: VecM<SorobanAuthorizationEntry> =
-            auth_entries
-                .try_into()
-                .map_err(|e: stellar_xdr::curr::Error| {
-                    AuditError::Validation(format!("too many auth entries: {e}"))
-                })?;
-
-        let mut ops = signed_tx.operations.to_vec();
-        if let OperationBody::InvokeHostFunction(ref mut invoke_op) = ops[0].body {
-            invoke_op.auth = auth_vecm;
-        }
-        signed_tx.operations = ops.try_into().map_err(|e: stellar_xdr::curr::Error| {
-            AuditError::Validation(format!("too many operations: {e}"))
-        })?;
-    }
-
-    let decorated_sig = sign_transaction(&signed_tx, &keypair.signing_key, network_passphrase)?;
-
-    let signatures: VecM<DecoratedSignature, 20> =
-        vec![decorated_sig]
-            .try_into()
-            .map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("too many signatures: {e}"))
-            })?;
-
-    let signed_envelope = TransactionEnvelope::Tx(TransactionV1Envelope {
-        tx: signed_tx,
-        signatures,
-    });
-
-    let tx_hash = send_transaction(rpc_url, &signed_envelope).await?;
+    )
+    .await?;
 
     let on_chain_sequence = if !sim_result.results.is_empty() {
         let return_val_xdr = base64::engine::general_purpose::STANDARD
@@ -891,9 +963,6 @@ pub async fn attest_oplog_native(
     contract_id: &str,
     network_passphrase: &str,
 ) -> AuditResult<()> {
-    let acct_sequence =
-        get_account_sequence_from_rpc(rpc_url, &attester_keypair.public_bytes()).await?;
-
     // Build the attester Address ScVal from the keypair's public key.
     let attester_address_scval = ScVal::Address(ScAddress::Account(AccountId(
         PublicKey::PublicKeyTypeEd25519(Uint256(attester_keypair.public_bytes())),
@@ -913,77 +982,16 @@ pub async fn attest_oplog_native(
         signature_scval,
     ];
 
-    let tx = build_invoke_transaction(
-        &attester_keypair.public_bytes(),
-        acct_sequence,
+    submit_invoke_with_retry(
+        rpc_url,
+        attester_keypair,
+        network_passphrase,
         contract_id,
         "attest_oplog",
         args,
         100,
-    )?;
-
-    let sim_result = simulate_transaction(rpc_url, &tx).await?;
-
-    let soroban_data_xdr = base64::engine::general_purpose::STANDARD
-        .decode(&sim_result.transaction_data())
-        .map_err(|e| AuditError::Validation(format!("base64 decode transactionData: {e}")))?;
-    let soroban_data = SorobanTransactionData::from_xdr(&soroban_data_xdr, Limits::none())
-        .map_err(|e| AuditError::Validation(format!("decode SorobanTransactionData: {e}")))?;
-
-    let mut signed_tx = tx.clone();
-    signed_tx.ext = TransactionExt::V1(soroban_data);
-    signed_tx.fee = sim_result.max_fee_stroops();
-
-    if !sim_result.results.is_empty() && !sim_result.results[0].auth.is_empty() {
-        let auth_entries: Result<Vec<SorobanAuthorizationEntry>, AuditError> = sim_result.results
-            [0]
-        .auth
-        .iter()
-        .map(|auth_b64| {
-            let auth_xdr = base64::engine::general_purpose::STANDARD
-                .decode(auth_b64)
-                .map_err(|e| AuditError::Validation(format!("base64 decode auth: {e}")))?;
-            SorobanAuthorizationEntry::from_xdr(&auth_xdr, Limits::none())
-                .map_err(|e| AuditError::Validation(format!("decode auth: {e}")))
-        })
-        .collect();
-
-        let auth_entries = auth_entries?;
-        let auth_vecm: VecM<SorobanAuthorizationEntry> =
-            auth_entries
-                .try_into()
-                .map_err(|e: stellar_xdr::curr::Error| {
-                    AuditError::Validation(format!("too many auth entries: {e}"))
-                })?;
-
-        let mut ops = signed_tx.operations.to_vec();
-        if let OperationBody::InvokeHostFunction(ref mut invoke_op) = ops[0].body {
-            invoke_op.auth = auth_vecm;
-        }
-        signed_tx.operations = ops.try_into().map_err(|e: stellar_xdr::curr::Error| {
-            AuditError::Validation(format!("too many operations: {e}"))
-        })?;
-    }
-
-    let decorated_sig = sign_transaction(
-        &signed_tx,
-        &attester_keypair.signing_key,
-        network_passphrase,
-    )?;
-
-    let signatures: VecM<DecoratedSignature, 20> =
-        vec![decorated_sig]
-            .try_into()
-            .map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("too many signatures: {e}"))
-            })?;
-
-    let signed_envelope = TransactionEnvelope::Tx(TransactionV1Envelope {
-        tx: signed_tx,
-        signatures,
-    });
-
-    send_transaction(rpc_url, &signed_envelope).await?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -1008,10 +1016,7 @@ pub async fn verify_inclusion_native(
     contract_id: &str,
     network_passphrase: &str,
 ) -> AuditResult<VerifyInclusionResult> {
-    // 1. Get account sequence number from the Soroban RPC ledger.
-    let sequence = get_account_sequence_from_rpc(rpc_url, &keypair.public_bytes()).await?;
-
-    // 2. Build ScVal args: root (Bytes), proof (Map), vk (Map).
+    // Build ScVal args: root (Bytes), proof (Map), vk (Map).
     let root_bytes = hex::decode(root_hex)
         .map_err(|e| AuditError::Validation(format!("invalid root hex: {e}")))?;
     let root_scval = ScVal::Bytes(ScBytes(root_bytes.clone().try_into().map_err(
@@ -1029,81 +1034,19 @@ pub async fn verify_inclusion_native(
 
     let args = vec![root_scval, proof_scval, vk_scval];
 
-    // 3. Build the transaction.
-    let tx = build_invoke_transaction(
-        &keypair.public_bytes(),
-        sequence,
+    // Submit (serialized per account, confirmed, and retried on txBAD_SEQ).
+    let (tx_hash, sim_result) = submit_invoke_with_retry(
+        rpc_url,
+        keypair,
+        network_passphrase,
         contract_id,
         "verify_inclusion",
         args,
         100,
-    )?;
+    )
+    .await?;
 
-    // 4. Simulate the transaction.
-    let sim_result = simulate_transaction(rpc_url, &tx).await?;
-
-    // 5. Attach the simulation's SorobanTransactionData.
-    let soroban_data_xdr = base64::engine::general_purpose::STANDARD
-        .decode(&sim_result.transaction_data())
-        .map_err(|e| AuditError::Validation(format!("base64 decode transactionData: {e}")))?;
-    let soroban_data = SorobanTransactionData::from_xdr(&soroban_data_xdr, Limits::none())
-        .map_err(|e| AuditError::Validation(format!("decode SorobanTransactionData: {e}")))?;
-
-    let mut signed_tx = tx.clone();
-    signed_tx.ext = TransactionExt::V1(soroban_data);
-    signed_tx.fee = sim_result.max_fee_stroops();
-
-    // 6. Attach auth entries if the simulation returned any.
-    if !sim_result.results.is_empty() && !sim_result.results[0].auth.is_empty() {
-        let auth_entries: Result<Vec<SorobanAuthorizationEntry>, AuditError> = sim_result.results
-            [0]
-        .auth
-        .iter()
-        .map(|auth_b64| {
-            let auth_xdr = base64::engine::general_purpose::STANDARD
-                .decode(auth_b64)
-                .map_err(|e| AuditError::Validation(format!("base64 decode auth: {e}")))?;
-            SorobanAuthorizationEntry::from_xdr(&auth_xdr, Limits::none())
-                .map_err(|e| AuditError::Validation(format!("decode auth: {e}")))
-        })
-        .collect();
-
-        let auth_entries = auth_entries?;
-        let auth_vecm: VecM<SorobanAuthorizationEntry> =
-            auth_entries
-                .try_into()
-                .map_err(|e: stellar_xdr::curr::Error| {
-                    AuditError::Validation(format!("too many auth entries: {e}"))
-                })?;
-
-        let mut ops = signed_tx.operations.to_vec();
-        if let OperationBody::InvokeHostFunction(ref mut invoke_op) = ops[0].body {
-            invoke_op.auth = auth_vecm;
-        }
-        signed_tx.operations = ops.try_into().map_err(|e: stellar_xdr::curr::Error| {
-            AuditError::Validation(format!("too many operations: {e}"))
-        })?;
-    }
-
-    // 7. Sign the transaction.
-    let decorated_sig = sign_transaction(&signed_tx, &keypair.signing_key, network_passphrase)?;
-
-    let signatures: VecM<DecoratedSignature, 20> =
-        vec![decorated_sig]
-            .try_into()
-            .map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("too many signatures: {e}"))
-            })?;
-
-    let signed_envelope = TransactionEnvelope::Tx(TransactionV1Envelope {
-        tx: signed_tx,
-        signatures,
-    });
-
-    // 8. Submit the transaction.
-    let tx_hash = send_transaction(rpc_url, &signed_envelope).await?;
-
-    // 9. Parse the return value to get the verification result.
+    // Parse the return value to get the verification result.
     //    Soroban encodes Result<bool, CommitmentError> as:
     //      Ok(v)  -> ScVal::Vec(Some(ScVec([ScVal::Bool(v)])))
     //      Err(e) -> ScVal::Vec(Some(ScVec([ScVal::Error(...)])))
@@ -1674,29 +1617,6 @@ fn attach_soroban_data_and_auth(
     Ok(signed_tx)
 }
 
-/// Sign a transaction and submit it via the Soroban RPC.
-async fn sign_and_send(
-    tx: &Transaction,
-    signing_key: &SigningKey,
-    network_passphrase: &str,
-    rpc_url: &str,
-) -> AuditResult<String> {
-    let decorated_sig = sign_transaction(tx, signing_key, network_passphrase)?;
-
-    let signatures: VecM<DecoratedSignature, 20> =
-        vec![decorated_sig]
-            .try_into()
-            .map_err(|e: stellar_xdr::curr::Error| {
-                AuditError::Validation(format!("too many signatures: {e}"))
-            })?;
-
-    let envelope = TransactionEnvelope::Tx(TransactionV1Envelope {
-        tx: tx.clone(),
-        signatures,
-    });
-    send_transaction(rpc_url, &envelope).await
-}
-
 /// Call `initialize(admin)` on the contract via native signing.
 ///
 /// Used by the setup wizard to initialize a newly deployed contract.
@@ -1707,30 +1627,20 @@ pub async fn initialize_contract_native(
     rpc_url: &str,
     network_passphrase: &str,
 ) -> AuditResult<()> {
-    let sequence = get_account_sequence_from_rpc(rpc_url, &admin_keypair.public_bytes()).await?;
-
     let admin_scval = ScVal::Address(ScAddress::Account(AccountId(
         PublicKey::PublicKeyTypeEd25519(Uint256(admin_keypair.public_bytes())),
     )));
 
     let args = vec![admin_scval];
 
-    let tx = build_invoke_transaction(
-        &admin_keypair.public_bytes(),
-        sequence,
+    submit_invoke_with_retry(
+        rpc_url,
+        admin_keypair,
+        network_passphrase,
         contract_id,
         "initialize",
         args,
         100,
-    )?;
-
-    let sim_result = simulate_transaction(rpc_url, &tx).await?;
-    let signed_tx = attach_soroban_data_and_auth(&tx, &sim_result)?;
-    sign_and_send(
-        &signed_tx,
-        &admin_keypair.signing_key,
-        network_passphrase,
-        rpc_url,
     )
     .await?;
     Ok(())
@@ -1752,8 +1662,6 @@ pub async fn authorize_attester_native(
     rpc_url: &str,
     network_passphrase: &str,
 ) -> AuditResult<()> {
-    let sequence = get_account_sequence_from_rpc(rpc_url, &admin_keypair.public_bytes()).await?;
-
     // Decode the attester's G... address to public key bytes.
     let attester_pubkey_bytes = decode_account_id_strkey(attester_address).ok_or_else(|| {
         AuditError::Validation(format!(
@@ -1774,22 +1682,14 @@ pub async fn authorize_attester_native(
 
     let args = vec![attester_addr_scval, pubkey_scval];
 
-    let tx = build_invoke_transaction(
-        &admin_keypair.public_bytes(),
-        sequence,
+    submit_invoke_with_retry(
+        rpc_url,
+        admin_keypair,
+        network_passphrase,
         contract_id,
         "authorize_attester",
         args,
         100,
-    )?;
-
-    let sim_result = simulate_transaction(rpc_url, &tx).await?;
-    let signed_tx = attach_soroban_data_and_auth(&tx, &sim_result)?;
-    sign_and_send(
-        &signed_tx,
-        &admin_keypair.signing_key,
-        network_passphrase,
-        rpc_url,
     )
     .await?;
     Ok(())
@@ -1974,6 +1874,27 @@ mod tests {
     fn test_crc16_xmodem_known_vector() {
         // CRC16-XModem of "123456789" is 0x31C3.
         assert_eq!(crc16_xmodem(b"123456789"), 0x31C3);
+    }
+
+    #[test]
+    fn test_decode_tx_result_code_bad_seq() {
+        // The exact TransactionResult XDR a Soroban RPC returns on a stale
+        // sequence: feeCharged=0x93D1, result code -5 (txBAD_SEQ).
+        let code = decode_tx_result_code("AAAAAAAAk9H////7AAAAAA==");
+        assert_eq!(code, Some(-5));
+        assert_eq!(tx_result_code_name(code.unwrap()), "txBAD_SEQ");
+        assert!(is_bad_seq_error(&AuditError::Validation(
+            "transaction rejected: txBAD_SEQ (-5): AAAAAAAAk9H////7AAAAAA==".to_string()
+        )));
+        assert!(!is_bad_seq_error(&AuditError::Validation(
+            "transaction rejected: txINSUFFICIENT_FEE (-9): x".to_string()
+        )));
+    }
+
+    #[test]
+    fn test_decode_tx_result_code_rejects_malformed() {
+        assert_eq!(decode_tx_result_code("not-base64!!"), None);
+        assert_eq!(decode_tx_result_code("AAAA"), None); // too short
     }
 
     #[test]

@@ -24,6 +24,7 @@ pub struct ClientEntry {
     pub client: Arc<Client>,
     pub profile_id: String,
     pub name: String,
+    pub deployment_id: String,
     pub opened_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -249,7 +250,11 @@ pub async fn list_collections(client: &Client, db: &str) -> AppResult<Vec<Collec
     Ok(out)
 }
 
-pub(crate) async fn classify_collection_name(client: &Client, db: &str, name: &str) -> CollectionKind {
+pub(crate) async fn classify_collection_name(
+    client: &Client,
+    db: &str,
+    name: &str,
+) -> CollectionKind {
     let info = client
         .database(db)
         .run_command(bson::doc! {

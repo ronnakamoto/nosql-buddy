@@ -958,6 +958,60 @@ export interface AuditStatus {
   leafCount: number;
   eventCount: number;
   treeHeight: number;
+  domains: AuditDomain[];
+}
+
+export interface AuditDomain {
+  deploymentId: string;
+  database: string;
+  eventCount: number;
+}
+
+/** A retained commitment to a logically pruned audit domain segment. */
+export interface DomainRetentionRoot {
+  rootHex: string;
+  eventCount: number;
+  maxIndex: number;
+  prunedAt: string;
+}
+
+/** A single audit domain plus its secondary Merkle root and status. */
+export interface DomainRootInfo {
+  deploymentId: string;
+  database: string;
+  rootHex: string;
+  eventCount: number;
+  legalHold: boolean;
+  retainedRoots: DomainRetentionRoot[];
+}
+
+/** A selective-disclosure inclusion proof against one domain's root. */
+export interface DomainProofResult {
+  deploymentId: string;
+  database: string;
+  position: number;
+  leafHex: string;
+  rootHex: string;
+  pathElements: string[];
+  pathIndices: number[];
+}
+
+/** The aggregation super-root over every per-domain root. */
+export interface DomainSuperRootResult {
+  superRootHex: string;
+  domains: DomainRootInfo[];
+}
+
+/** An inclusion proof that a domain root is part of the super-root. */
+export interface DomainSuperProofResult {
+  deploymentId: string;
+  database: string;
+  domainRootHex: string;
+  superRootHex: string;
+  position: number;
+  leafHex: string;
+  pathElements: string[];
+  pathIndices: number[];
 }
 
 /** An audit event recorded in the ZK audit log. */
@@ -967,6 +1021,8 @@ export interface AuditEvent {
   operation: string;
   database: string;
   collection: string;
+  deploymentId: string;
+  sequence: number;
   timestamp: string;
 }
 
@@ -1179,8 +1235,10 @@ const commands = {
     invoke<void>("update_settings", { settings }),
 
   // --- ZK Audit ---
-  auditGetStatus: () => invoke<AuditStatus>("audit_get_status"),
-  auditListEvents: () => invoke<AuditEvent[]>("audit_list_events"),
+  auditGetStatus: (deploymentId?: string | null, database?: string | null) =>
+    invoke<AuditStatus>("audit_get_status", { deploymentId, database }),
+  auditListEvents: (deploymentId?: string | null, database?: string | null) =>
+    invoke<AuditEvent[]>("audit_list_events", { deploymentId, database }),
   auditGetRoot: () => invoke<string>("audit_get_root"),
   auditGenerateProof: (
     index: number,
@@ -1214,11 +1272,13 @@ const commands = {
     database: string,
     collection: string,
     payload: string,
+    deploymentId?: string | null,
   ) =>
     invoke<number>("audit_record_event", {
       operation,
       database,
       collection,
+      deploymentId,
       payload,
     }),
   auditCommitRoot: (metadata?: string) =>
@@ -1233,6 +1293,35 @@ const commands = {
   auditMarkEpochCommitted: (epochNumber: number, txHash: string) =>
     invoke<void>("audit_mark_epoch_committed", { epochNumber, txHash }),
   auditResetData: () => invoke<void>("audit_reset_data"),
+
+  // --- ZK Audit: Phase 2 — per-domain segmentation ---
+  auditListDomains: () => invoke<DomainRootInfo[]>("audit_list_domains"),
+  auditGetDomainRoot: (deploymentId: string, database: string) =>
+    invoke<DomainRootInfo>("audit_get_domain_root", { deploymentId, database }),
+  auditGetDomainSuperRoot: () =>
+    invoke<DomainSuperRootResult>("audit_get_domain_super_root"),
+  auditGenerateDomainProof: (
+    deploymentId: string,
+    database: string,
+    position: number,
+  ) =>
+    invoke<DomainProofResult>("audit_generate_domain_proof", {
+      deploymentId,
+      database,
+      position,
+    }),
+  auditGenerateDomainSuperProof: (deploymentId: string, database: string) =>
+    invoke<DomainSuperProofResult>("audit_generate_domain_super_proof", {
+      deploymentId,
+      database,
+    }),
+  auditSetLegalHold: (deploymentId: string, database: string, hold: boolean) =>
+    invoke<void>("audit_set_legal_hold", { deploymentId, database, hold }),
+  auditPruneDomain: (deploymentId: string, database: string) =>
+    invoke<DomainRetentionRoot | null>("audit_prune_domain", {
+      deploymentId,
+      database,
+    }),
 
   // --- ZK Audit: Phase 3 — Reader mode, IPFS, RPC, Attestation ---
   auditVerifyReaderMode: () =>

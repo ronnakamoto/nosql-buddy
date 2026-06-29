@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use audit_service::audit::attestation::AttestationManager;
-use audit_service::audit::change_stream::ChangeStreamRegistry;
+use audit_service::audit::change_stream::{fetch_deployment_id, ChangeStreamRegistry};
 use audit_service::audit::epoch::EpochManager;
 use audit_service::audit::ipfs::IpfsConfig;
 use audit_service::audit::sled_store::SledTreeStore;
@@ -223,13 +223,7 @@ async fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if deploy_choice == "deploy" {
         println!();
         println!("  Initializing contract (set admin = publisher)...");
-        initialize_contract(
-            &contract_id,
-            &publisher_kp,
-            &rpc_url,
-            &passphrase,
-        )
-        .await?;
+        initialize_contract(&contract_id, &publisher_kp, &rpc_url, &passphrase).await?;
         println!(
             "  Contract initialized. Admin: {}",
             publisher_kp.account_id()
@@ -852,8 +846,18 @@ async fn cmd_start(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let client = mongodb::Client::with_uri_str(mongo_uri).await?;
         let connection_id = "audit".to_string();
 
+        // Derive a stable per-deployment identity so audit events are
+        // segmented by the deployment they originate from.
+        let deployment_id = fetch_deployment_id(&client).await;
+        log::info!("resolved deployment identity: {deployment_id}");
+
         change_streams
-            .start_for(connection_id.clone(), client.clone(), audit_log.clone())
+            .start_for(
+                connection_id.clone(),
+                deployment_id,
+                client.clone(),
+                audit_log.clone(),
+            )
             .await;
         log::info!("change stream listener started for connection {connection_id}");
 

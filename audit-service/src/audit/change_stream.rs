@@ -46,10 +46,110 @@ use crate::audit::interceptor;
 use crate::audit::AuditLog;
 use crate::error::{AuditError, AuditResult};
 
+/// Derive a stable audit deployment identity from a `hello`/`isMaster`
+/// response document.
+///
+/// The deployment id is the durable boundary an audit domain is keyed on
+/// (`(deploymentId, database)`). It must be **stable across reconnects** —
+/// the per-session `connectionId` is deliberately NOT used.
+///
+/// - Replica set → `rs:{setName}` (the set name is stable for the life of
+///   the deployment and survives elections/reconnects).
+/// - Sharded cluster (`msg == "isdbgrid"`) → `sharded:{fingerprint}` where
+///   the fingerprint is a short hash of the sorted host list.
+/// - Standalone → `standalone:{fingerprint}`.
+///
+/// When no host information is available at all, the fingerprint is
+/// `unknown`, which keeps the function total (it never panics and always
+/// returns a non-empty id).
+pub fn derive_deployment_id(hello: &bson::Document) -> String {
+    if let Ok(set_name) = hello.get_str("setName") {
+        if !set_name.is_empty() {
+            return format!("rs:{set_name}");
+        }
+    }
+
+    let is_sharded = hello
+        .get_str("msg")
+        .map(|m| m == "isdbgrid")
+        .unwrap_or(false);
+
+    // Build a stable host fingerprint from the advertised member list,
+    // falling back to the `me` field for sharded/standalone topologies.
+    let mut hosts: Vec<String> = hello
+        .get_array("hosts")
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|b| b.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if hosts.is_empty() {
+        if let Ok(me) = hello.get_str("me") {
+            if !me.is_empty() {
+                hosts.push(me.to_string());
+            }
+        }
+    }
+    hosts.sort();
+    hosts.dedup();
+
+    let fingerprint = if hosts.is_empty() {
+        "unknown".to_string()
+    } else {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(hosts.join(",").as_bytes());
+        hex::encode(&hasher.finalize()[..8])
+    };
+
+    if is_sharded {
+        format!("sharded:{fingerprint}")
+    } else {
+        format!("standalone:{fingerprint}")
+    }
+}
+
+/// Run a `hello` command against the deployment and derive a stable
+/// [`derive_deployment_id`]. Returns an empty string only if the command
+/// fails (e.g. the server is unreachable) so callers can treat it as the
+/// backward-compatible "unattributed" domain.
+pub async fn fetch_deployment_id(client: &Client) -> String {
+    match client
+        .database("admin")
+        .run_command(bson::doc! { "hello": 1 })
+        .await
+    {
+        Ok(doc) => derive_deployment_id(&doc),
+        Err(e) => {
+            log::warn!("could not derive audit deployment id from hello: {e}");
+            String::new()
+        }
+    }
+}
+
 /// A handle to a running change stream listener. Dropping this
 /// does NOT stop the listener — use `stop()` to cancel it.
 pub struct ChangeStreamHandle {
     cancel: Arc<tokio::sync::Notify>,
+}
+
+/// Whether a deployment (identified by its stable audit deployment id)
+/// supports MongoDB change streams.
+///
+/// Change streams require a replica set or sharded cluster; a standalone
+/// `mongod` does not support them. This is the single source of truth for
+/// the capture strategy, so the two capture paths never both record the
+/// same write:
+///
+/// - change-stream-capable (`rs:*`, `sharded:*`) → the change-stream
+///   listener is the authoritative capture path; the per-IPC interceptor
+///   hooks are skipped to avoid double-recording app-originated writes.
+/// - otherwise (`standalone:*` or an empty/unattributed id) → no change
+///   stream is started (it would only error and retry forever); the IPC
+///   interceptor hooks are the capture path.
+pub fn supports_change_streams(deployment_id: &str) -> bool {
+    deployment_id.starts_with("rs:") || deployment_id.starts_with("sharded:")
 }
 
 impl ChangeStreamHandle {
@@ -71,6 +171,7 @@ impl ChangeStreamHandle {
 /// while the app was offline.
 pub fn start(
     connection_id: String,
+    deployment_id: String,
     client: Client,
     audit_log: Arc<AuditLog>,
 ) -> ChangeStreamHandle {
@@ -78,7 +179,14 @@ pub fn start(
     let cancel_clone = cancel.clone();
 
     tokio::spawn(async move {
-        run_listener(connection_id, client, audit_log, cancel_clone).await;
+        run_listener(
+            connection_id,
+            deployment_id,
+            client,
+            audit_log,
+            cancel_clone,
+        )
+        .await;
     });
 
     ChangeStreamHandle { cancel }
@@ -88,6 +196,7 @@ pub fn start(
 /// until cancelled or until an unrecoverable error occurs.
 async fn run_listener(
     connection_id: String,
+    deployment_id: String,
     client: Client,
     audit_log: Arc<AuditLog>,
     cancel: Arc<tokio::sync::Notify>,
@@ -118,7 +227,7 @@ async fn run_listener(
                 log::info!("audit change stream listener stopped");
                 return;
             }
-            result = watch_once(&client, &audit_log, &cancel, &connection_id, resume_token) => {
+            result = watch_once(&client, &deployment_id, &audit_log, &cancel, &connection_id, resume_token) => {
                 match result {
                     Ok(()) => {
                         // watch_once returned normally — this means the
@@ -147,6 +256,7 @@ async fn run_listener(
 /// or the cancel signal is received.
 async fn watch_once(
     client: &Client,
+    deployment_id: &str,
     audit_log: &Arc<AuditLog>,
     cancel: &Arc<tokio::sync::Notify>,
     connection_id: &str,
@@ -172,7 +282,7 @@ async fn watch_once(
             result = stream.next() => {
                 match result {
                     Some(Ok(event)) => {
-                        process_event(event, audit_log);
+                        process_event(event, deployment_id, audit_log);
 
                         // Persist the resume token after each event so
                         // we can resume gaplessly after a restart.
@@ -198,7 +308,11 @@ async fn watch_once(
 }
 
 /// Process a single change event and record it in the audit log.
-fn process_event(event: ChangeStreamEvent<bson::Document>, audit_log: &Arc<AuditLog>) {
+fn process_event(
+    event: ChangeStreamEvent<bson::Document>,
+    deployment_id: &str,
+    audit_log: &Arc<AuditLog>,
+) {
     let ns = match event.ns {
         Some(ns) => ns,
         None => return,
@@ -211,7 +325,7 @@ fn process_event(event: ChangeStreamEvent<bson::Document>, audit_log: &Arc<Audit
         OperationType::Insert => {
             if let Some(doc) = event.full_document {
                 if let Ok(json) = serde_json::to_string(&doc) {
-                    let _ = interceptor::record_insert(audit_log, db, coll, &json);
+                    let _ = interceptor::record_insert(audit_log, deployment_id, db, coll, &json);
                 }
             }
         }
@@ -224,30 +338,40 @@ fn process_event(event: ChangeStreamEvent<bson::Document>, audit_log: &Arc<Audit
             };
             let update_json = if let Some(ref ud) = event.update_description {
                 // Build a JSON object with updatedFields and removedFields.
-                let updated = serde_json::to_string(&ud.updated_fields)
-                    .unwrap_or_else(|_| "{}".to_string());
-                let removed = serde_json::to_string(&ud.removed_fields)
-                    .unwrap_or_else(|_| "[]".to_string());
-                format!(r#"{{"updatedFields":{},"removedFields":{}}}"#, updated, removed)
+                let updated =
+                    serde_json::to_string(&ud.updated_fields).unwrap_or_else(|_| "{}".to_string());
+                let removed =
+                    serde_json::to_string(&ud.removed_fields).unwrap_or_else(|_| "[]".to_string());
+                format!(
+                    r#"{{"updatedFields":{},"removedFields":{}}}"#,
+                    updated, removed
+                )
             } else if let Some(doc) = event.full_document {
                 serde_json::to_string(&doc).unwrap_or_else(|_| "{}".to_string())
             } else {
                 "{}".to_string()
             };
-            let _ = interceptor::record_update(audit_log, db, coll, &filter_json, &update_json);
+            let _ = interceptor::record_update(
+                audit_log,
+                deployment_id,
+                db,
+                coll,
+                &filter_json,
+                &update_json,
+            );
         }
         OperationType::Delete => {
             let filter_json = match &event.document_key {
                 Some(key) => serde_json::to_string(key).unwrap_or_default(),
                 None => "{}".to_string(),
             };
-            let _ = interceptor::record_delete(audit_log, db, coll, &filter_json);
+            let _ = interceptor::record_delete(audit_log, deployment_id, db, coll, &filter_json);
         }
         OperationType::Drop => {
-            let _ = interceptor::record_drop_collection(audit_log, db, coll);
+            let _ = interceptor::record_drop_collection(audit_log, deployment_id, db, coll);
         }
         OperationType::DropDatabase => {
-            let _ = interceptor::record_drop_database(audit_log, db);
+            let _ = interceptor::record_drop_database(audit_log, deployment_id, db);
         }
         OperationType::Rename => {
             // The `to` field contains the new namespace.
@@ -256,7 +380,8 @@ fn process_event(event: ChangeStreamEvent<bson::Document>, audit_log: &Arc<Audit
                 .as_ref()
                 .and_then(|t| t.coll.as_deref())
                 .unwrap_or("renamed");
-            let _ = interceptor::record_rename_collection(audit_log, db, coll, new_name);
+            let _ =
+                interceptor::record_rename_collection(audit_log, deployment_id, db, coll, new_name);
         }
         OperationType::Invalidate => {
             // The namespace was invalidated (e.g. collection dropped).
@@ -278,6 +403,7 @@ fn process_event(event: ChangeStreamEvent<bson::Document>, audit_log: &Arc<Audit
                     };
                     let _ = interceptor::record_create_index(
                         audit_log,
+                        deployment_id,
                         db,
                         coll,
                         &keys_json,
@@ -290,7 +416,8 @@ fn process_event(event: ChangeStreamEvent<bson::Document>, audit_log: &Arc<Audit
                         .as_ref()
                         .and_then(|d| d.get_str("name").ok())
                         .unwrap_or("unknown");
-                    let _ = interceptor::record_drop_index(audit_log, db, coll, name);
+                    let _ =
+                        interceptor::record_drop_index(audit_log, deployment_id, db, coll, name);
                 }
                 _ => {
                     // Unknown expanded event — log but don't audit.
@@ -325,6 +452,7 @@ impl ChangeStreamRegistry {
     pub async fn start_for(
         &self,
         connection_id: String,
+        deployment_id: String,
         client: Client,
         audit_log: Arc<AuditLog>,
     ) {
@@ -332,7 +460,7 @@ impl ChangeStreamRegistry {
         if let Some(old) = handles.remove(&connection_id) {
             old.stop();
         }
-        let handle = start(connection_id.clone(), client, audit_log);
+        let handle = start(connection_id.clone(), deployment_id, client, audit_log);
         handles.insert(connection_id, handle);
     }
 
@@ -378,5 +506,65 @@ mod tests {
         let cancel = Arc::new(tokio::sync::Notify::new());
         let handle = ChangeStreamHandle { cancel };
         handle.stop(); // should not panic
+    }
+
+    #[test]
+    fn derive_deployment_id_uses_replica_set_name() {
+        let hello = bson::doc! {
+            "setName": "rs0",
+            "hosts": ["a:27017", "b:27017"],
+            "me": "a:27017",
+        };
+        assert_eq!(derive_deployment_id(&hello), "rs:rs0");
+    }
+
+    #[test]
+    fn derive_deployment_id_is_stable_regardless_of_host_order() {
+        let a = bson::doc! { "setName": "rs0", "hosts": ["a:27017", "b:27017"] };
+        let b = bson::doc! { "setName": "rs0", "hosts": ["b:27017", "a:27017"] };
+        assert_eq!(derive_deployment_id(&a), derive_deployment_id(&b));
+    }
+
+    #[test]
+    fn derive_deployment_id_detects_sharded_cluster() {
+        let hello = bson::doc! { "msg": "isdbgrid", "me": "mongos:27017" };
+        let id = derive_deployment_id(&hello);
+        assert!(id.starts_with("sharded:"), "got {id}");
+    }
+
+    #[test]
+    fn derive_deployment_id_sharded_fingerprint_is_host_order_invariant() {
+        let a = bson::doc! { "msg": "isdbgrid", "hosts": ["m1:27017", "m2:27017"] };
+        let b = bson::doc! { "msg": "isdbgrid", "hosts": ["m2:27017", "m1:27017"] };
+        assert_eq!(derive_deployment_id(&a), derive_deployment_id(&b));
+    }
+
+    #[test]
+    fn derive_deployment_id_falls_back_to_standalone() {
+        let hello = bson::doc! { "me": "localhost:27017" };
+        let id = derive_deployment_id(&hello);
+        assert!(id.starts_with("standalone:"), "got {id}");
+    }
+
+    #[test]
+    fn derive_deployment_id_is_total_without_host_info() {
+        let hello = bson::doc! {};
+        assert_eq!(derive_deployment_id(&hello), "standalone:unknown");
+    }
+
+    #[test]
+    fn derive_deployment_id_ignores_empty_set_name() {
+        let hello = bson::doc! { "setName": "", "me": "localhost:27017" };
+        assert!(derive_deployment_id(&hello).starts_with("standalone:"));
+    }
+
+    #[test]
+    fn supports_change_streams_matches_topology() {
+        // Replica set and sharded deployments support change streams.
+        assert!(supports_change_streams("rs:rs0"));
+        assert!(supports_change_streams("sharded:abc123"));
+        // Standalone and the empty/unattributed id do not.
+        assert!(!supports_change_streams("standalone:abc123"));
+        assert!(!supports_change_streams(""));
     }
 }

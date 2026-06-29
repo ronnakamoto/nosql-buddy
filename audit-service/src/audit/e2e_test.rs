@@ -11,8 +11,8 @@
 
 use std::sync::Arc;
 
-use crate::audit::AuditLog;
 use crate::audit::interceptor;
+use crate::audit::AuditLog;
 
 #[test]
 fn test_e2e_audit_pipeline() {
@@ -25,7 +25,14 @@ fn test_e2e_audit_pipeline() {
     assert!(!root0.is_empty());
 
     // 1. Record an insert event.
-    let idx0 = interceptor::record_insert(&audit, "test_db", "users", r#"{"name":"Alice","age":30}"#).unwrap();
+    let idx0 = interceptor::record_insert(
+        &audit,
+        "rs:rs0",
+        "test_db",
+        "users",
+        r#"{"name":"Alice","age":30}"#,
+    )
+    .unwrap();
     assert_eq!(idx0, 0);
     assert_eq!(audit.event_count(), 1);
     assert_eq!(audit.leaf_count(), 1);
@@ -35,18 +42,22 @@ fn test_e2e_audit_pipeline() {
     // 2. Record an update event.
     let idx1 = interceptor::record_update(
         &audit,
+        "rs:rs0",
         "test_db",
         "users",
         r#"{"name":"Alice"}"#,
         r#"{"$set":{"age":31}}"#,
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(idx1, 1);
     assert_eq!(audit.event_count(), 2);
     let root2 = audit.root_hex().unwrap();
     assert_ne!(root1, root2, "root must change after update");
 
     // 3. Record a delete event.
-    let idx2 = interceptor::record_delete(&audit, "test_db", "users", r#"{"name":"Alice"}"#).unwrap();
+    let idx2 =
+        interceptor::record_delete(&audit, "rs:rs0", "test_db", "users", r#"{"name":"Alice"}"#)
+            .unwrap();
     assert_eq!(idx2, 2);
     assert_eq!(audit.event_count(), 3);
     let root3 = audit.root_hex().unwrap();
@@ -64,9 +75,17 @@ fn test_e2e_audit_pipeline() {
     // 5. Generate inclusion proof for each leaf.
     for i in 0..3 {
         let proof = audit.prove_inclusion(i).unwrap();
-        assert_eq!(proof.root, audit.root().unwrap(), "proof root must match current root");
+        assert_eq!(
+            proof.root,
+            audit.root().unwrap(),
+            "proof root must match current root"
+        );
         assert_eq!(proof.leaf_index, i as usize);
-        assert_eq!(proof.path_elements.len(), 20, "path must have 20 elements for height-20 tree");
+        assert_eq!(
+            proof.path_elements.len(),
+            20,
+            "path must have 20 elements for height-20 tree"
+        );
         assert_eq!(proof.path_indices.len(), 20);
     }
 
@@ -76,7 +95,11 @@ fn test_e2e_audit_pipeline() {
     let root_bigint = root.into_bigint();
     let root_bytes = root_bigint.to_bytes_be();
     let expected_hex = hex::encode(&root_bytes);
-    assert_eq!(audit.root_hex().unwrap(), expected_hex, "root_hex must match root field element");
+    assert_eq!(
+        audit.root_hex().unwrap(),
+        expected_hex,
+        "root_hex must match root field element"
+    );
 }
 
 #[test]
@@ -93,9 +116,9 @@ fn test_e2e_proof_verification_with_circuit() {
     let audit = Arc::new(AuditLog::new().unwrap());
 
     // Record a few events.
-    interceptor::record_insert(&audit, "db", "col", r#"{"a":1}"#).unwrap();
-    interceptor::record_insert(&audit, "db", "col", r#"{"a":2}"#).unwrap();
-    interceptor::record_insert(&audit, "db", "col", r#"{"a":3}"#).unwrap();
+    interceptor::record_insert(&audit, "rs:rs0", "db", "col", r#"{"a":1}"#).unwrap();
+    interceptor::record_insert(&audit, "rs:rs0", "db", "col", r#"{"a":2}"#).unwrap();
+    interceptor::record_insert(&audit, "rs:rs0", "db", "col", r#"{"a":3}"#).unwrap();
 
     // Generate a Groth16 proof for leaf at index 1.
     let inclusion = audit.prove_inclusion(1).unwrap();
@@ -110,11 +133,14 @@ fn test_e2e_proof_verification_with_circuit() {
     let soroban_args = zk_audit::AuditProver::serialize_for_soroban(&groth16_proof).unwrap();
 
     // Verify hex lengths.
-    assert_eq!(soroban_args.proof.a.len(), 128);   // G1: 64 bytes * 2 hex
-    assert_eq!(soroban_args.proof.b.len(), 256);   // G2: 128 bytes * 2 hex
-    assert_eq!(soroban_args.proof.c.len(), 128);   // G1: 64 bytes * 2 hex
+    assert_eq!(soroban_args.proof.a.len(), 128); // G1: 64 bytes * 2 hex
+    assert_eq!(soroban_args.proof.b.len(), 256); // G2: 128 bytes * 2 hex
+    assert_eq!(soroban_args.proof.c.len(), 128); // G1: 64 bytes * 2 hex
     assert_eq!(soroban_args.pub_signals.len(), 1);
-    assert_eq!(soroban_args.pub_signals[0], audit.root().unwrap().to_string());
+    assert_eq!(
+        soroban_args.pub_signals[0],
+        audit.root().unwrap().to_string()
+    );
 
     eprintln!("✓ End-to-end proof generation succeeded");
     eprintln!("  Root: {}", soroban_args.pub_signals[0]);
@@ -129,10 +155,10 @@ fn test_e2e_proof_verification_with_circuit() {
 fn test_e2e_proof_with_bundled_resources() {
     // The bundled artifacts live at src-tauri/resources/circuits/.
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let r1cs_path = std::path::Path::new(manifest_dir)
-        .join("resources/circuits/merkle_inclusion.r1cs");
-    let wasm_path = std::path::Path::new(manifest_dir)
-        .join("resources/circuits/merkle_inclusion.wasm");
+    let r1cs_path =
+        std::path::Path::new(manifest_dir).join("resources/circuits/merkle_inclusion.r1cs");
+    let wasm_path =
+        std::path::Path::new(manifest_dir).join("resources/circuits/merkle_inclusion.wasm");
 
     if !r1cs_path.exists() || !wasm_path.exists() {
         eprintln!("Skipping bundled-resource proof test: artifacts not found");
@@ -140,8 +166,8 @@ fn test_e2e_proof_with_bundled_resources() {
     }
 
     let audit = Arc::new(AuditLog::new().unwrap());
-    interceptor::record_insert(&audit, "db", "col", r#"{"a":1}"#).unwrap();
-    interceptor::record_insert(&audit, "db", "col", r#"{"a":2}"#).unwrap();
+    interceptor::record_insert(&audit, "rs:rs0", "db", "col", r#"{"a":1}"#).unwrap();
+    interceptor::record_insert(&audit, "rs:rs0", "db", "col", r#"{"a":2}"#).unwrap();
 
     let inclusion = audit.prove_inclusion(0).unwrap();
     let r1cs_str = r1cs_path.to_str().unwrap();

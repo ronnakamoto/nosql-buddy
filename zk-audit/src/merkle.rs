@@ -38,6 +38,44 @@ pub struct InclusionProof {
     pub root: Fr,
 }
 
+impl InclusionProof {
+    /// Recompute the Merkle root from the leaf and its authentication path and
+    /// check it equals the proof's stored `root`. Returns `Ok(true)` iff the
+    /// proof is internally consistent, i.e. the `leaf` provably hashes up to
+    /// `root` through `path_elements`/`path_indices`.
+    ///
+    /// This is the verifier side of [`AuditMerkleTree::prove_inclusion`]: a
+    /// caller can check a proof without access to the original tree.
+    pub fn verify(&self) -> ZkAuditResult<bool> {
+        if self.path_elements.len() != self.path_indices.len() {
+            return Err(ZkAuditError::MerkleTree(format!(
+                "malformed proof: {} path elements but {} path indices",
+                self.path_elements.len(),
+                self.path_indices.len()
+            )));
+        }
+        let mut poseidon = Poseidon::<Fr>::new_circom(2).map_err(|e| {
+            ZkAuditError::MerkleTree(format!("failed to create Poseidon hasher: {}", e))
+        })?;
+        let mut current = self.leaf;
+        for (sibling, dir) in self.path_elements.iter().zip(self.path_indices.iter()) {
+            let (left, right) = match dir {
+                0 => (current, *sibling),
+                1 => (*sibling, current),
+                other => {
+                    return Err(ZkAuditError::MerkleTree(format!(
+                        "malformed proof: path index must be 0 or 1, got {other}"
+                    )))
+                }
+            };
+            current = poseidon.hash(&[left, right]).map_err(|e| {
+                ZkAuditError::MerkleTree(format!("Poseidon hash failed: {}", e))
+            })?;
+        }
+        Ok(current == self.root)
+    }
+}
+
 impl AuditMerkleTree {
     /// Create a new Merkle tree with the default height (20).
     pub fn new() -> ZkAuditResult<Self> {
@@ -275,5 +313,51 @@ mod tests {
         let root = tree.root().unwrap();
         let expected = "4049438903814075631061804710736864908079133440291667789166416441530877358393";
         assert_eq!(root.to_string(), expected);
+    }
+
+    #[test]
+    fn test_inclusion_proof_verify_accepts_valid_and_rejects_tampered() {
+        let mut tree = AuditMerkleTree::with_height(8).unwrap();
+        for i in 1..=6u64 {
+            tree.insert(Fr::from(i));
+        }
+        // Every leaf's proof must verify against the real root.
+        for idx in 0..6 {
+            let proof = tree.prove_inclusion(idx).unwrap();
+            assert!(proof.verify().unwrap(), "valid proof must verify (idx {idx})");
+        }
+
+        // Tamper with the leaf → proof must fail.
+        let mut bad_leaf = tree.prove_inclusion(2).unwrap();
+        bad_leaf.leaf += Fr::from(1u64);
+        assert!(!bad_leaf.verify().unwrap(), "tampered leaf must not verify");
+
+        // Tamper with a sibling → proof must fail.
+        let mut bad_sibling = tree.prove_inclusion(2).unwrap();
+        bad_sibling.path_elements[0] += Fr::from(1u64);
+        assert!(!bad_sibling.verify().unwrap(), "tampered sibling must not verify");
+
+        // Tamper with a direction bit → proof must fail.
+        let mut bad_dir = tree.prove_inclusion(2).unwrap();
+        bad_dir.path_indices[0] ^= 1;
+        assert!(!bad_dir.verify().unwrap(), "flipped direction must not verify");
+
+        // Tamper with the claimed root → proof must fail.
+        let mut bad_root = tree.prove_inclusion(2).unwrap();
+        bad_root.root += Fr::from(1u64);
+        assert!(!bad_root.verify().unwrap(), "wrong root must not verify");
+    }
+
+    #[test]
+    fn test_inclusion_proof_verify_rejects_malformed() {
+        let mut tree = AuditMerkleTree::with_height(4).unwrap();
+        tree.insert(Fr::from(7u64));
+        let mut proof = tree.prove_inclusion(0).unwrap();
+        proof.path_indices.pop();
+        assert!(proof.verify().is_err(), "length mismatch must error");
+
+        let mut bad_index = tree.prove_inclusion(0).unwrap();
+        bad_index.path_indices[0] = 2;
+        assert!(bad_index.verify().is_err(), "out-of-range direction must error");
     }
 }

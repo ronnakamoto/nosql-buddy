@@ -544,6 +544,7 @@ mod tests {
         for i in 0..n {
             crate::audit::interceptor::record_insert(
                 &audit,
+                "rs:rs0",
                 "db",
                 "col",
                 &format!(r#"{{"a":{}}}"#, i),

@@ -44,6 +44,59 @@ pub struct AuditStatus {
     pub leaf_count: usize,
     pub event_count: usize,
     pub tree_height: u32,
+    /// Distinct audit domains `(deploymentId, database)` with their event
+    /// counts, so the UI can populate per-deployment / per-database filters
+    /// and grouping without scanning the full event list client-side.
+    pub domains: Vec<AuditDomain>,
+}
+
+/// A single audit domain: the unique pairing of a deployment identity and a
+/// database, plus how many events it holds.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditDomain {
+    pub deployment_id: String,
+    pub database: String,
+    pub event_count: usize,
+}
+
+/// Compute the distinct audit domains from an event list, sorted by
+/// deployment id then database for a stable UI ordering.
+fn summarize_domains(events: &[crate::audit::AuditEvent]) -> Vec<AuditDomain> {
+    use std::collections::BTreeMap;
+    let mut counts: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for ev in events {
+        *counts
+            .entry((ev.deployment_id.clone(), ev.database.clone()))
+            .or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .map(|((deployment_id, database), event_count)| AuditDomain {
+            deployment_id,
+            database,
+            event_count,
+        })
+        .collect()
+}
+
+/// Apply optional deployment_id / database filters to an event list.
+/// `None` (or an empty string) means "no filter on that dimension".
+fn filter_events(
+    events: Vec<crate::audit::AuditEvent>,
+    deployment_id: Option<&str>,
+    database: Option<&str>,
+) -> Vec<crate::audit::AuditEvent> {
+    let dep = deployment_id.filter(|s| !s.is_empty());
+    let db = database.filter(|s| !s.is_empty());
+    if dep.is_none() && db.is_none() {
+        return events;
+    }
+    events
+        .into_iter()
+        .filter(|ev| dep.map_or(true, |d| ev.deployment_id == d))
+        .filter(|ev| db.map_or(true, |d| ev.database == d))
+        .collect()
 }
 
 /// Get the current audit log status.
@@ -51,22 +104,38 @@ pub struct AuditStatus {
 /// Async because `root_hex()` computes the Merkle root via recursive Poseidon
 /// hashing, which is CPU-intensive and must not block the main thread.
 #[tauri::command]
-pub async fn audit_get_status(state: State<'_, AppState>) -> AppResult<AuditStatus> {
+pub async fn audit_get_status(
+    state: State<'_, AppState>,
+    deployment_id: Option<String>,
+    database: Option<String>,
+) -> AppResult<AuditStatus> {
     let audit = &state.audit_log;
+    let events = audit.list_events();
+    let domains = summarize_domains(&events);
+    let filtered_count = filter_events(events, deployment_id.as_deref(), database.as_deref()).len();
     Ok(AuditStatus {
         root_hex: audit.root_hex()?,
         leaf_count: audit.leaf_count(),
-        event_count: audit.event_count(),
+        event_count: filtered_count,
         tree_height: 20,
+        domains,
     })
 }
 
-/// List all recorded audit events.
+/// List recorded audit events, optionally filtered by deployment identity
+/// and/or database. Filtering is done server-side so the UI never has to pull
+/// the entire log just to show one domain.
 #[tauri::command]
 pub async fn audit_list_events(
     state: State<'_, AppState>,
+    deployment_id: Option<String>,
+    database: Option<String>,
 ) -> AppResult<Vec<crate::audit::AuditEvent>> {
-    Ok(state.audit_log.list_events())
+    Ok(filter_events(
+        state.audit_log.list_events(),
+        deployment_id.as_deref(),
+        database.as_deref(),
+    ))
 }
 
 /// Get the current Merkle root as a hex string.
@@ -286,15 +355,21 @@ pub async fn audit_record_event(
     operation: String,
     database: String,
     collection: String,
+    deployment_id: Option<String>,
     payload: String,
 ) -> AppResult<u64> {
     // The leaf is derived from the raw payload string. The same payload
     // is stored on disk so replay can recompute and verify the leaf.
     let leaf = crate::audit::leaf_from_payload(&operation, &database, &collection, &payload);
 
-    let index = state
-        .audit_log
-        .record(&operation, &database, &collection, &payload, leaf)?;
+    let index = state.audit_log.record(
+        deployment_id.as_deref().unwrap_or(""),
+        &operation,
+        &database,
+        &collection,
+        &payload,
+        leaf,
+    )?;
 
     // Advance the open batch (epoch) so the UI's "Batch · filling" counter
     // tracks recorded events and the on-disk epoch state stays in sync.
@@ -428,6 +503,256 @@ pub async fn audit_reset_data(state: State<'_, AppState>) -> AppResult<()> {
         .epoch_manager
         .sync_open_epoch_with_audit_log(&state.audit_log)?;
     Ok(())
+}
+
+// ─── Per-domain segmentation commands (Phase 2) ───────────────────────
+//
+// These expose per-`(deploymentId, database)` audit domains: their own
+// Merkle roots, selective-disclosure inclusion proofs, legal holds, and
+// logical retention (pruning). The shared global tree remains the anchored
+// source of truth; per-domain roots are secondary commitments derived from
+// the same leaves, so on-chain anchoring is untouched.
+//
+// `require_domain_access` is the RBAC hook point: today it only validates the
+// domain key shape, but it is where an authorization policy (per-deployment /
+// per-database roles) plugs in before any domain-scoped read or mutation.
+
+/// RBAC hook point + input validation for domain-scoped commands.
+///
+/// Returns the normalized `(deployment_id, database)` pair. Authorization
+/// enforcement is intentionally a single chokepoint so a future policy only
+/// has to be wired here.
+fn require_domain_access(deployment_id: &str, database: &str) -> AppResult<()> {
+    if database.trim().is_empty() {
+        return Err(AppError::Validation(
+            "a database is required to address an audit domain".to_string(),
+        ));
+    }
+    let _ = deployment_id; // deployment_id may be empty (the "unattributed" domain)
+    Ok(())
+}
+
+/// One audit domain plus its secondary Merkle root and legal-hold flag.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DomainRootInfo {
+    pub deployment_id: String,
+    pub database: String,
+    pub root_hex: String,
+    pub event_count: usize,
+    pub legal_hold: bool,
+    pub retained_roots: Vec<crate::audit::DomainRetentionRoot>,
+}
+
+/// Aggregation super-root over all per-domain roots.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DomainSuperRootResult {
+    pub super_root_hex: String,
+    pub domains: Vec<DomainRootInfo>,
+}
+
+/// Inclusion proof that one domain root is part of the aggregation super-root.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DomainSuperProofResult {
+    pub deployment_id: String,
+    pub database: String,
+    pub domain_root_hex: String,
+    pub super_root_hex: String,
+    pub position: usize,
+    pub leaf_hex: String,
+    pub path_elements: Vec<String>,
+    pub path_indices: Vec<u64>,
+}
+
+/// List the distinct audit domains with their per-domain roots and status.
+#[tauri::command]
+pub async fn audit_list_domains(state: State<'_, AppState>) -> AppResult<Vec<DomainRootInfo>> {
+    let audit = &state.audit_log;
+    let mut out = Vec::new();
+    for (deployment_id, database) in audit.list_domains() {
+        let (root_hex, event_count) = audit.domain_root(&deployment_id, &database)?;
+        let legal_hold = audit.is_legal_hold(&deployment_id, &database);
+        let retained_roots = audit.retained_domain_roots(&deployment_id, &database);
+        out.push(DomainRootInfo {
+            deployment_id,
+            database,
+            root_hex,
+            event_count,
+            legal_hold,
+            retained_roots,
+        });
+    }
+    Ok(out)
+}
+
+/// Get the aggregation super-root over all per-domain roots.
+#[tauri::command]
+pub async fn audit_get_domain_super_root(
+    state: State<'_, AppState>,
+) -> AppResult<DomainSuperRootResult> {
+    let audit = &state.audit_log;
+    let (super_root_hex, entries) = audit.domain_super_root()?;
+    let mut domains = Vec::with_capacity(entries.len());
+    for (deployment_id, database, root_hex) in entries {
+        let (_root_hex, event_count) = audit.domain_root(&deployment_id, &database)?;
+        domains.push(DomainRootInfo {
+            deployment_id: deployment_id.clone(),
+            database: database.clone(),
+            root_hex,
+            event_count,
+            legal_hold: audit.is_legal_hold(&deployment_id, &database),
+            retained_roots: audit.retained_domain_roots(&deployment_id, &database),
+        });
+    }
+    Ok(DomainSuperRootResult {
+        super_root_hex,
+        domains,
+    })
+}
+
+/// Get the secondary Merkle root (and status) for a single audit domain.
+#[tauri::command]
+pub async fn audit_get_domain_root(
+    state: State<'_, AppState>,
+    deployment_id: String,
+    database: String,
+) -> AppResult<DomainRootInfo> {
+    require_domain_access(&deployment_id, &database)?;
+    let audit = &state.audit_log;
+    let (root_hex, event_count) = audit.domain_root(&deployment_id, &database)?;
+    Ok(DomainRootInfo {
+        legal_hold: audit.is_legal_hold(&deployment_id, &database),
+        retained_roots: audit.retained_domain_roots(&deployment_id, &database),
+        deployment_id,
+        database,
+        root_hex,
+        event_count,
+    })
+}
+
+/// A selective-disclosure inclusion proof against a single domain's root.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DomainProofResult {
+    pub deployment_id: String,
+    pub database: String,
+    pub position: usize,
+    pub leaf_hex: String,
+    pub root_hex: String,
+    pub path_elements: Vec<String>,
+    pub path_indices: Vec<u64>,
+}
+
+/// Generate an inclusion proof for the leaf at the given 0-indexed position
+/// within a domain, against that domain's secondary Merkle tree. This proves
+/// one domain's record without revealing any other domain's leaves.
+#[tauri::command]
+pub async fn audit_generate_domain_proof(
+    state: State<'_, AppState>,
+    deployment_id: String,
+    database: String,
+    position: usize,
+) -> AppResult<DomainProofResult> {
+    use ark_ff::{BigInteger, PrimeField};
+
+    require_domain_access(&deployment_id, &database)?;
+    let (proof, root_hex) =
+        state
+            .audit_log
+            .prove_inclusion_in_domain(&deployment_id, &database, position)?;
+    Ok(DomainProofResult {
+        deployment_id,
+        database,
+        position,
+        leaf_hex: hex::encode(proof.leaf.into_bigint().to_bytes_be()),
+        root_hex,
+        path_elements: proof
+            .path_elements
+            .into_iter()
+            .map(|f| hex::encode(f.into_bigint().to_bytes_be()))
+            .collect(),
+        path_indices: proof.path_indices,
+    })
+}
+
+/// Convert a super-root inclusion proof into the wire result, hex-encoding the
+/// field elements (big-endian, modulus-reduced). Pure so it can be tested
+/// against a real proof without a Tauri runtime.
+fn super_proof_result_from(
+    deployment_id: String,
+    database: String,
+    domain_root_hex: String,
+    super_root_hex: String,
+    proof: zk_audit::merkle::InclusionProof,
+) -> DomainSuperProofResult {
+    use ark_ff::{BigInteger, PrimeField};
+    DomainSuperProofResult {
+        deployment_id,
+        database,
+        domain_root_hex,
+        super_root_hex,
+        position: proof.leaf_index,
+        leaf_hex: hex::encode(proof.leaf.into_bigint().to_bytes_be()),
+        path_elements: proof
+            .path_elements
+            .into_iter()
+            .map(|f| hex::encode(f.into_bigint().to_bytes_be()))
+            .collect(),
+        path_indices: proof.path_indices,
+    }
+}
+
+/// Generate an inclusion proof that a domain root is part of the aggregation
+/// super-root over all per-domain roots.
+#[tauri::command]
+pub async fn audit_generate_domain_super_proof(
+    state: State<'_, AppState>,
+    deployment_id: String,
+    database: String,
+) -> AppResult<DomainSuperProofResult> {
+    require_domain_access(&deployment_id, &database)?;
+    let (proof, super_root_hex, domain_root_hex) = state
+        .audit_log
+        .prove_domain_in_super(&deployment_id, &database)?;
+    Ok(super_proof_result_from(
+        deployment_id,
+        database,
+        domain_root_hex,
+        super_root_hex,
+        proof,
+    ))
+}
+
+/// Enable or disable a legal hold on a single audit domain. While held, the
+/// domain cannot be pruned/retained.
+#[tauri::command]
+pub async fn audit_set_legal_hold(
+    state: State<'_, AppState>,
+    deployment_id: String,
+    database: String,
+    hold: bool,
+) -> AppResult<()> {
+    require_domain_access(&deployment_id, &database)?;
+    state
+        .audit_log
+        .set_legal_hold(&deployment_id, &database, hold)?;
+    Ok(())
+}
+
+/// Logically prune (retain-and-drop) a single audit domain's active events,
+/// keeping a compact Merkle commitment to the pruned segment. Refused if the
+/// domain is under legal hold. The global tree and on-chain anchor are
+/// untouched. Returns the retained root, or `None` if the domain was empty.
+#[tauri::command]
+pub async fn audit_prune_domain(
+    state: State<'_, AppState>,
+    deployment_id: String,
+    database: String,
+) -> AppResult<Option<crate::audit::DomainRetentionRoot>> {
+    require_domain_access(&deployment_id, &database)?;
+    Ok(state.audit_log.prune_domain(&deployment_id, &database)?)
 }
 
 // ─── Reader mode commands ─────────────────────────────────────────────
@@ -689,6 +1014,23 @@ pub async fn audit_check_replica_set(
 /// `audit_verify_oplog_integrity` able to verify completeness — previously the
 /// app never wrote an oplog commitment, so verification always reported
 /// `no_oplog_commitment`.
+fn compose_commit_metadata(
+    metadata: Option<String>,
+    event_count: usize,
+    leaf_count: usize,
+    network: &str,
+    domain_super_root_hex: &str,
+) -> String {
+    let super_root_field = format!("domainSuperRoot={domain_super_root_hex}");
+    match metadata.map(|m| m.trim().to_string()).filter(|m| !m.is_empty()) {
+        Some(meta) if meta.contains("domainSuperRoot=") => meta,
+        Some(meta) => format!("{meta} {super_root_field}"),
+        None => format!(
+            "events={event_count} leaves={leaf_count} network={network} {super_root_field}"
+        ),
+    }
+}
+
 async fn commit_latest_epoch_root(
     state: &AppState,
     metadata: Option<String>,
@@ -732,14 +1074,14 @@ async fn commit_latest_epoch_root(
         }
     }
 
-    let meta = metadata.unwrap_or_else(|| {
-        format!(
-            "events={} leaves={} network={}",
-            audit.event_count(),
-            audit.leaf_count(),
-            chain.network
-        )
-    });
+    let (domain_super_root_hex, _domains) = audit.domain_super_root()?;
+    let meta = compose_commit_metadata(
+        metadata,
+        audit.event_count(),
+        audit.leaf_count(),
+        &chain.network,
+        &domain_super_root_hex,
+    );
 
     // If we have both a sealed epoch and a MongoDB connection, attach the
     // oplog completeness hash and commit it on-chain alongside the root.
@@ -1328,6 +1670,11 @@ mod tests {
             leaf_count: 1,
             event_count: 2,
             tree_height: 20,
+            domains: vec![AuditDomain {
+                deployment_id: "rs:rs0".to_string(),
+                database: "db".to_string(),
+                event_count: 2,
+            }],
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(
@@ -1346,6 +1693,67 @@ mod tests {
             json.contains("\"treeHeight\":20"),
             "treeHeight must be camelCase: {json}"
         );
+        assert!(
+            json.contains("\"deploymentId\":\"rs:rs0\""),
+            "domain deploymentId must be camelCase: {json}"
+        );
+    }
+
+    #[test]
+    fn audit_event_filters_are_server_side_domain_aware() {
+        let events = vec![
+            audit_event(0, "rs:rs0", "sales"),
+            audit_event(1, "rs:rs0", "billing"),
+            audit_event(2, "rs:rs1", "sales"),
+        ];
+
+        let filtered = filter_events(events.clone(), Some("rs:rs0"), Some("sales"));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].deployment_id, "rs:rs0");
+        assert_eq!(filtered[0].database, "sales");
+
+        let filtered = filter_events(events.clone(), None, Some("sales"));
+        assert_eq!(filtered.len(), 2);
+
+        let filtered = filter_events(events, Some("rs:rs0"), None);
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn audit_domain_summary_counts_each_deployment_database_pair() {
+        let domains = summarize_domains(&[
+            audit_event(0, "rs:rs0", "sales"),
+            audit_event(1, "rs:rs0", "sales"),
+            audit_event(2, "rs:rs1", "sales"),
+        ]);
+        assert_eq!(
+            domains,
+            vec![
+                AuditDomain {
+                    deployment_id: "rs:rs0".to_string(),
+                    database: "sales".to_string(),
+                    event_count: 2,
+                },
+                AuditDomain {
+                    deployment_id: "rs:rs1".to_string(),
+                    database: "sales".to_string(),
+                    event_count: 1,
+                },
+            ]
+        );
+    }
+
+    fn audit_event(index: u64, deployment_id: &str, database: &str) -> crate::audit::AuditEvent {
+        crate::audit::AuditEvent {
+            index,
+            leaf_hex: format!("leaf-{index}"),
+            operation: "insert".to_string(),
+            database: database.to_string(),
+            collection: "orders".to_string(),
+            deployment_id: deployment_id.to_string(),
+            sequence: index,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+        }
     }
 
     #[test]
@@ -1514,5 +1922,166 @@ mod tests {
         let batch = extract_epoch_batch(&jsonl, 0, 0);
         assert_eq!(batch.lines().count(), 1);
         assert!(batch.contains(r#""index":0"#));
+    }
+
+    #[test]
+    fn require_domain_access_rejects_empty_database() {
+        assert!(require_domain_access("rs:rs0", "db").is_ok());
+        assert!(require_domain_access("", "db").is_ok(), "unattributed domain allowed");
+        assert!(require_domain_access("rs:rs0", "").is_err(), "empty db refused");
+        assert!(require_domain_access("rs:rs0", "   ").is_err(), "blank db refused");
+    }
+
+    #[test]
+    fn domain_root_info_serializes_with_camel_case() {
+        let info = DomainRootInfo {
+            deployment_id: "rs:rs0".to_string(),
+            database: "sales".to_string(),
+            root_hex: "abc".to_string(),
+            event_count: 5,
+            legal_hold: true,
+            retained_roots: vec![],
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"deploymentId\":\"rs:rs0\""));
+        assert!(json.contains("\"rootHex\":\"abc\""));
+        assert!(json.contains("\"eventCount\":5"));
+        assert!(json.contains("\"legalHold\":true"));
+        assert!(json.contains("\"retainedRoots\":[]"));
+    }
+
+    #[test]
+    fn domain_proof_result_serializes_with_camel_case() {
+        let res = DomainProofResult {
+            deployment_id: "rs:rs0".to_string(),
+            database: "sales".to_string(),
+            position: 1,
+            leaf_hex: "leaf".to_string(),
+            root_hex: "root".to_string(),
+            path_elements: vec!["a".to_string()],
+            path_indices: vec![0],
+        };
+        let json = serde_json::to_string(&res).unwrap();
+        assert!(json.contains("\"deploymentId\":\"rs:rs0\""));
+        assert!(json.contains("\"leafHex\":\"leaf\""));
+        assert!(json.contains("\"rootHex\":\"root\""));
+        assert!(json.contains("\"pathElements\":[\"a\"]"));
+        assert!(json.contains("\"pathIndices\":[0]"));
+    }
+
+    #[test]
+    fn domain_super_results_serialize_with_camel_case() {
+        let domain = DomainRootInfo {
+            deployment_id: "rs:rs0".to_string(),
+            database: "sales".to_string(),
+            root_hex: "domain-root".to_string(),
+            event_count: 2,
+            legal_hold: false,
+            retained_roots: vec![],
+        };
+        let root = DomainSuperRootResult {
+            super_root_hex: "super-root".to_string(),
+            domains: vec![domain],
+        };
+        let root_json = serde_json::to_string(&root).unwrap();
+        assert!(root_json.contains("\"superRootHex\":\"super-root\""));
+        assert!(root_json.contains("\"deploymentId\":\"rs:rs0\""));
+        assert!(root_json.contains("\"rootHex\":\"domain-root\""));
+
+        let proof = DomainSuperProofResult {
+            deployment_id: "rs:rs0".to_string(),
+            database: "sales".to_string(),
+            domain_root_hex: "domain-root".to_string(),
+            super_root_hex: "super-root".to_string(),
+            position: 0,
+            leaf_hex: "leaf".to_string(),
+            path_elements: vec!["a".to_string()],
+            path_indices: vec![0],
+        };
+        let proof_json = serde_json::to_string(&proof).unwrap();
+        assert!(proof_json.contains("\"domainRootHex\":\"domain-root\""));
+        assert!(proof_json.contains("\"superRootHex\":\"super-root\""));
+        assert!(proof_json.contains("\"leafHex\":\"leaf\""));
+        assert!(proof_json.contains("\"pathElements\":[\"a\"]"));
+    }
+
+    #[test]
+    fn compose_commit_metadata_anchors_domain_super_root() {
+        let generated = compose_commit_metadata(None, 3, 4, "testnet", "abc123");
+        assert_eq!(
+            generated,
+            "events=3 leaves=4 network=testnet domainSuperRoot=abc123"
+        );
+
+        let custom = compose_commit_metadata(Some("manual commit".to_string()), 3, 4, "testnet", "abc123");
+        assert_eq!(custom, "manual commit domainSuperRoot=abc123");
+
+        let already_tagged = compose_commit_metadata(
+            Some("manual domainSuperRoot=existing".to_string()),
+            3,
+            4,
+            "testnet",
+            "abc123",
+        );
+        assert_eq!(already_tagged, "manual domainSuperRoot=existing");
+    }
+
+    /// The super-proof wire result must losslessly encode a real proof: the
+    /// hex-encoded leaf/path round-trip back to field elements and the
+    /// reconstructed proof verifies against the super-root the command reports.
+    #[test]
+    fn super_proof_result_round_trips_and_verifies() {
+        use ark_ff::PrimeField;
+        use std::sync::Arc;
+        use zk_audit::prover::Fr;
+
+        let audit = Arc::new(audit_service::audit::AuditLog::new().unwrap());
+        audit_service::audit::interceptor::record_insert(
+            &audit, "rs:rs0", "sales", "orders", r#"{"a":1}"#,
+        )
+        .unwrap();
+        audit_service::audit::interceptor::record_insert(
+            &audit, "rs:rs0", "billing", "invoices", r#"{"a":1}"#,
+        )
+        .unwrap();
+        audit_service::audit::interceptor::record_insert(
+            &audit, "rs:rs1", "ops", "logs", r#"{"a":1}"#,
+        )
+        .unwrap();
+
+        let (proof, super_root_hex, domain_root_hex) =
+            audit.prove_domain_in_super("rs:rs0", "billing").unwrap();
+        let expected_position = proof.leaf_index;
+
+        let result = super_proof_result_from(
+            "rs:rs0".to_string(),
+            "billing".to_string(),
+            domain_root_hex.clone(),
+            super_root_hex.clone(),
+            proof,
+        );
+
+        assert_eq!(result.deployment_id, "rs:rs0");
+        assert_eq!(result.database, "billing");
+        assert_eq!(result.domain_root_hex, domain_root_hex);
+        assert_eq!(result.super_root_hex, super_root_hex);
+        assert_eq!(result.position, expected_position);
+        assert_eq!(result.path_elements.len(), result.path_indices.len());
+
+        // Reconstruct the proof from the wire fields and verify it terminates
+        // at the reported super-root — proving the encoding is lossless and the
+        // proof is cryptographically sound through the command boundary.
+        let to_fr = |h: &str| Fr::from_be_bytes_mod_order(&hex::decode(h).unwrap());
+        let rebuilt = zk_audit::merkle::InclusionProof {
+            leaf: to_fr(&result.leaf_hex),
+            leaf_index: result.position,
+            path_elements: result.path_elements.iter().map(|h| to_fr(h)).collect(),
+            path_indices: result.path_indices.clone(),
+            root: to_fr(&result.super_root_hex),
+        };
+        assert!(
+            rebuilt.verify().unwrap(),
+            "reconstructed super-proof must verify against the super-root"
+        );
     }
 }

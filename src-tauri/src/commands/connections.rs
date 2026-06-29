@@ -186,24 +186,37 @@ pub async fn open_connection(
     .await
     .map_err(|_| AppError::Timeout("ping".into()))??;
     let connection_id = Uuid::new_v4().to_string();
+    // Derive a stable per-deployment identity so audit events are segmented
+    // by the deployment they originate from. Resolved once at connect time.
+    let deployment_id = crate::audit::change_stream::fetch_deployment_id(&client).await;
     let entry = ClientEntry {
         client: client.clone(),
         profile_id: profile.id.clone(),
         name: profile.name.clone(),
+        deployment_id: deployment_id.clone(),
         opened_at: chrono::Utc::now(),
     };
     state.clients.insert(connection_id.clone(), entry).await;
     emit_connection_opened(&app, &connection_id, &profile.id, &profile.name)?;
-    // Start a change stream listener for this connection so all writes
-    // (from shell, IPC, external clients) are captured in the audit log.
-    state
-        .change_streams
-        .start_for(
-            connection_id.clone(),
-            (*client).clone(),
-            state.audit_log.clone(),
-        )
-        .await;
+    // Start a change stream listener only for deployments that support change
+    // streams (replica sets / sharded clusters). There it is the authoritative
+    // capture path: it records all writes regardless of origin (shell, IPC,
+    // external clients), and the per-IPC interceptor hooks are skipped to avoid
+    // double-recording (see `commands::mongo`). On standalone deployments
+    // change streams are unsupported, so we do NOT start a listener (it would
+    // only error and retry forever) and rely on the IPC interceptor hooks
+    // instead.
+    if crate::audit::change_stream::supports_change_streams(&deployment_id) {
+        state
+            .change_streams
+            .start_for(
+                connection_id.clone(),
+                deployment_id,
+                (*client).clone(),
+                state.audit_log.clone(),
+            )
+            .await;
+    }
     let handle = describe_connection(&client, &connection_id, &profile.id, &profile.name).await?;
     // Drop the secret from local memory now that the client is up. The
     // driver keeps a pool internally; we don't need the string anymore.
