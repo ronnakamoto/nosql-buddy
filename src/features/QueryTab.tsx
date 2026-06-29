@@ -29,7 +29,37 @@ import { useToast } from "../context/ToastContext";
 import { Minus, Maximize2, X } from "lucide-react";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { SafeChangeModal } from "../components/SafeChangeModal";
-import type { SafeChangePreview, SafeChangeOperationKind } from "../ipc/commands";
+import type { SafeChangePreview, SafeChangeOperationKind, SafeChangeMeta } from "../ipc/commands";
+
+interface SafeChangeMetaDto {
+  riskScore: number;
+  riskReasons: string[];
+  rollbackScript: string;
+  rollbackLevel: SafeChangeMeta["rollbackLevel"];
+}
+
+function toRollbackLevel(level: SafeChangePreview["rollbackLevel"]): SafeChangeMeta["rollbackLevel"] {
+  switch (level) {
+    case "metadataOnly":
+      return "none";
+    case "sampleBased":
+      return "sample";
+    case "full":
+      return "full";
+    default:
+      return "none";
+  }
+}
+
+function previewToMeta(preview: SafeChangePreview | null): SafeChangeMetaDto | null {
+  if (!preview) return null;
+  return {
+    riskScore: preview.riskScore,
+    riskReasons: preview.riskReasons,
+    rollbackScript: preview.rollbackScript,
+    rollbackLevel: toRollbackLevel(preview.rollbackLevel),
+  };
+}
 
 /** Prism grammar name for each driver-code language. Mirrors the map
  *  in DriverCodePanel so the SQL tab's read-only code block shares the
@@ -407,8 +437,9 @@ export function QueryTab({
   const [scPreview, setScPreview] = useState<SafeChangePreview | null>(null);
   const [scLoading, setScLoading] = useState(false);
   const [scError, setScError] = useState<string | null>(null);
-  // Callback stored when a write is intercepted; called on modal confirm.
-  const scPendingRef = useRef<(() => Promise<void>) | null>(null);
+  // Callback stored when a write is intercepted; called on modal confirm with
+  // the Safe Change preview data so it can be persisted on the timeline entry.
+  const scPendingRef = useRef<((meta: SafeChangeMetaDto | null) => Promise<void>) | null>(null);
 
   const [viewMode, setViewMode] = useState<ResultsViewMode>("table");
   const [resultsPanelState, setResultsPanelState] = useState<ResultsPanelState>("expanded");
@@ -483,7 +514,7 @@ export function QueryTab({
     filterJson: string,
     updateJson: string | null,
     replacementJson: string | null,
-    execute: () => Promise<void>,
+    execute: (meta: SafeChangeMetaDto | null) => Promise<void>,
     collectionOverride?: string,
   ) {
     // Fetch settings to check if Safe Change is enabled.
@@ -496,7 +527,7 @@ export function QueryTab({
     }
 
     if (!scEnabled) {
-      await execute();
+      await execute(null);
       return;
     }
 
@@ -527,12 +558,13 @@ export function QueryTab({
 
   async function scConfirm() {
     const execute = scPendingRef.current;
+    const meta = previewToMeta(scPreview);
     setScOpen(false);
     setScPreview(null);
     scPendingRef.current = null;
     if (execute) {
       try {
-        await execute();
+        await execute(meta);
       } catch (e) {
         toast.push(describeError(e), "error");
       }
@@ -590,7 +622,7 @@ export function QueryTab({
           capturedFilter,
           capturedUpdate,
           null,
-          async () => {
+          async (meta) => {
             const result = await commands.updateDocuments({
               connectionId,
               database,
@@ -599,6 +631,7 @@ export function QueryTab({
               updateJson: capturedUpdate,
               multi: capturedMulti,
               upsert: capturedUpsert,
+              safeChangeMeta: meta ?? undefined,
             });
             toast.push(
               `Updated ${result.modifiedCount} document(s) (matched ${result.matchedCount})`,
@@ -674,7 +707,7 @@ export function QueryTab({
           opFilter,
           opUpdate,
           null,
-          async () => {
+          async (meta) => {
             const result = await commands.updateDocuments({
               connectionId,
               database,
@@ -683,6 +716,7 @@ export function QueryTab({
               updateJson: opUpdate,
               multi: opMulti,
               upsert: opUpsert,
+              safeChangeMeta: meta ?? undefined,
             });
             toast.push(
               `Updated ${result.modifiedCount} document(s) (matched ${result.matchedCount})`,
@@ -710,12 +744,13 @@ export function QueryTab({
           opFilter,
           null,
           null,
-          async () => {
+          async (meta) => {
             const count = await commands.deleteDocuments(
               connectionId,
               database,
               sqlCollection,
               opFilter,
+              meta ?? undefined,
             );
             toast.push(`Deleted ${count} document(s).`, "success");
           },
@@ -732,7 +767,7 @@ export function QueryTab({
           opFilter,
           null,
           opReplacement,
-          async () => {
+          async (meta) => {
             const result = await commands.replaceDocument({
               connectionId,
               database,
@@ -740,6 +775,7 @@ export function QueryTab({
               filterJson: opFilter,
               replacementJson: opReplacement,
               upsert: opUpsert,
+              safeChangeMeta: meta ?? undefined,
             });
             toast.push(
               `Replaced ${result.modifiedCount} document(s) (matched ${result.matchedCount})`,
@@ -1175,12 +1211,13 @@ export function QueryTab({
       filterJson,
       null,
       null,
-      async () => {
+      async (meta) => {
         const count = await commands.deleteDocuments(
           connectionId,
           database,
           collection,
           filterJson,
+          meta ?? undefined,
         );
         if (count === 0) {
           toast.push(
@@ -1270,12 +1307,13 @@ export function QueryTab({
       filterJson,
       null,
       null,
-      async () => {
+      async (meta) => {
         const count = await commands.deleteDocuments(
           connectionId,
           database,
           collection,
           filterJson,
+          meta ?? undefined,
         );
         toast.push(`Deleted ${count} document(s).`, "success");
         setSelectedRowIds(new Set());
@@ -1332,7 +1370,7 @@ export function QueryTab({
       filterJson,
       updateDoc,
       null,
-      async () => {
+      async (meta) => {
         const result = await commands.updateDocuments({
           connectionId,
           database,
@@ -1341,6 +1379,7 @@ export function QueryTab({
           updateJson: updateDoc,
           multi: true,
           upsert: false,
+          safeChangeMeta: meta ?? undefined,
         });
         toast.push(
           `Updated ${result.modifiedCount} document(s) (matched ${result.matchedCount}).`,

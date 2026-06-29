@@ -102,6 +102,22 @@ export async function deleteTimelineEntry(id: string): Promise<boolean> {
   return invoke<boolean>("delete_timeline_entry", { id });
 }
 
+export interface ExecuteRollbackRequest {
+  timelineEntryId: string;
+  connectionId: string;
+}
+
+export interface ExecuteRollbackResult {
+  script: string;
+  output: string;
+  errored: boolean;
+  errorMessage: string | null;
+}
+
+export async function executeRollback(request: ExecuteRollbackRequest): Promise<ExecuteRollbackResult> {
+  return invoke<ExecuteRollbackResult>("execute_rollback", { request });
+}
+
 export function operationKindLabel(kind: OperationKind): string {
   switch (kind) {
     case "find": return "Find";

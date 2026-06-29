@@ -116,6 +116,7 @@ pub async fn eval_shell(
                         op.execution_ms.unwrap_or(0),
                         op.errored,
                         op.error_message.clone(),
+                        crate::mongo::operation_recorder::SafeChangeMetadata::default(),
                     )
                     .await;
                 }
@@ -130,6 +131,7 @@ pub async fn eval_shell(
                         op.execution_ms.unwrap_or(0),
                         op.errored,
                         op.error_message.clone(),
+                        crate::mongo::operation_recorder::SafeChangeMetadata::default(),
                     )
                     .await;
                 }

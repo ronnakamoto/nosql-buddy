@@ -763,6 +763,15 @@ export interface SafeChangePreview {
   indexInfo: SafeChangeIndexInfo;
 }
 
+/** Rollback metadata carried on write IPC calls so the timeline entry can
+ *  store the Safe Change preview data atomically with the operation. */
+export interface SafeChangeMeta {
+  riskScore: number;
+  riskReasons: string[];
+  rollbackScript: string;
+  rollbackLevel: "none" | "sample" | "changedFields" | "full";
+}
+
 export type VqbCombinator = "and" | "or" | "nor";
 
 export interface VqbGroup {
@@ -889,6 +898,7 @@ export interface UpdateRequest {
   updateJson: string;
   multi: boolean;
   upsert: boolean;
+  safeChangeMeta?: SafeChangeMeta;
 }
 
 /** Result of an update operation. `matchedCount` distinguishes a true
@@ -906,6 +916,7 @@ export interface ReplaceRequest {
   filterJson: string;
   replacementJson: string;
   upsert: boolean;
+  safeChangeMeta?: SafeChangeMeta;
 }
 
 export interface ReplaceResult {
@@ -1447,12 +1458,14 @@ const commands = {
     database: string,
     collection: string,
     filterJson: string,
+    safeChangeMeta?: SafeChangeMeta,
   ) =>
     invoke<number>("delete_documents", {
       connectionId,
       database,
       collection,
       filterJson,
+      safeChangeMeta: safeChangeMeta ?? null,
     }),
   previewDelete: (request: PreviewRequest) =>
     invoke<number>("preview_delete", { request }),

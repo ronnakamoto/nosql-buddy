@@ -1098,6 +1098,28 @@ pub async fn insert_document(
     Ok(id)
 }
 
+/// Optional Safe Change preview metadata carried alongside a write command.
+/// All fields are optional so non-Safe-Change callers can omit the payload.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SafeChangeMeta {
+    pub risk_score: Option<u8>,
+    pub risk_reasons: Option<Vec<String>>,
+    pub rollback_script: Option<String>,
+    pub rollback_level: crate::mongo::timeline_store::RollbackLevel,
+}
+
+impl SafeChangeMeta {
+    fn into_recorder_metadata(self) -> crate::mongo::operation_recorder::SafeChangeMetadata {
+        crate::mongo::operation_recorder::SafeChangeMetadata {
+            risk_score: self.risk_score,
+            risk_reasons: self.risk_reasons,
+            rollback_script: self.rollback_script,
+            rollback_level: self.rollback_level,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateRequest {
@@ -1108,6 +1130,8 @@ pub struct UpdateRequest {
     pub update_json: String,
     pub multi: bool,
     pub upsert: bool,
+    #[serde(default)]
+    pub safe_change_meta: SafeChangeMeta,
 }
 
 #[tauri::command]
@@ -1165,6 +1189,7 @@ pub async fn update_documents(
         elapsed,
         false,
         None,
+        request.safe_change_meta.into_recorder_metadata(),
     )
     .await;
 
@@ -1183,6 +1208,8 @@ pub struct ReplaceRequest {
     pub filter_json: String,
     pub replacement_json: String,
     pub upsert: bool,
+    #[serde(default)]
+    pub safe_change_meta: SafeChangeMeta,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1236,6 +1263,7 @@ pub async fn replace_document(
         elapsed,
         false,
         None,
+        request.safe_change_meta.into_recorder_metadata(),
     )
     .await;
 
@@ -1342,6 +1370,7 @@ pub async fn delete_documents(
     database: String,
     collection: String,
     filter_json: String,
+    safe_change_meta: Option<SafeChangeMeta>,
     state: State<'_, AppState>,
 ) -> AppResult<u64> {
     let entry = state.clients.get(&connection_id).await?;
@@ -1379,6 +1408,7 @@ pub async fn delete_documents(
         elapsed,
         false,
         None,
+        safe_change_meta.unwrap_or_default().into_recorder_metadata(),
     )
     .await;
 
@@ -1538,6 +1568,7 @@ mod tests {
             update_json: "{ \"$set\": { \"x\": 1 } }".into(),
             multi: true,
             upsert: true,
+            safe_change_meta: SafeChangeMeta::default(),
         };
         let json = serde_json::to_string(&req).expect("serialize");
         assert!(json.contains("\"upsert\":true"), "upsert must serialize as camelCase");
@@ -1553,6 +1584,7 @@ mod tests {
             filter_json: "{ \"_id\": \"abc\" }".into(),
             replacement_json: "{ \"name\": \"new\" }".into(),
             upsert: false,
+            safe_change_meta: SafeChangeMeta::default(),
         };
         let json = serde_json::to_string(&req).expect("serialize");
         let back: ReplaceRequest = serde_json::from_str(&json).expect("deserialize");

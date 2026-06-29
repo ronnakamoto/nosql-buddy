@@ -14,6 +14,8 @@ import {
   FileText,
   Database,
   Table,
+  Copy,
+  RotateCcw,
 } from "lucide-react";
 import type { TimelineEntry, OperationKind } from "../../ipc/timeline";
 import {
@@ -21,6 +23,8 @@ import {
   deleteTimelineEntry,
   addTimelineNote,
   operationKindLabel,
+  executeRollback,
+  rollbackLevelLabel,
 } from "../../ipc/timeline";
 import { Alert } from "../../components/Alert";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
@@ -99,6 +103,8 @@ export function TimelinePanel({ profileId, database, collection }: TimelinePanel
   const [noteDraft, setNoteDraft] = useState<Record<string, string>>({});
   const [savingNote, setSavingNote] = useState<string | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+  const [executingRollbackId, setExecutingRollbackId] = useState<string | null>(null);
+  const [rollbackResult, setRollbackResult] = useState<{ id: string; ok: boolean; message: string } | null>(null);
 
   const load = useCallback(async () => {
     if (!profileId) {
@@ -141,6 +147,25 @@ export function TimelinePanel({ profileId, database, collection }: TimelinePanel
 
   const handleDelete = (id: string) => {
     setPendingDeleteId(id);
+  };
+
+  const handleExecuteRollback = async (entryId: string, connectionId: string) => {
+    setExecutingRollbackId(entryId);
+    setRollbackResult(null);
+    try {
+      const result = await executeRollback({ timelineEntryId: entryId, connectionId });
+      setRollbackResult({
+        id: entryId,
+        ok: !result.errored,
+        message: result.errored
+          ? (result.errorMessage ?? "Rollback failed")
+          : `Rollback executed successfully: ${result.output}`,
+      });
+    } catch (e) {
+      setRollbackResult({ id: entryId, ok: false, message: String(e) });
+    } finally {
+      setExecutingRollbackId(null);
+    }
   };
 
   const confirmDelete = async () => {
@@ -330,6 +355,19 @@ export function TimelinePanel({ profileId, database, collection }: TimelinePanel
 
                 {entry.errored && <XCircle size={14} className="timeline-entry__error-icon" />}
                 {hasNote && <StickyNote size={14} className="timeline-entry__note-icon" />}
+                {entry.riskScore != null && (
+                  <span
+                    className={[
+                      "timeline-entry__risk-badge",
+                      entry.riskScore >= 70 ? "timeline-entry__risk-badge--high"
+                        : entry.riskScore >= 40 ? "timeline-entry__risk-badge--medium"
+                        : "timeline-entry__risk-badge--low"
+                    ].join(" ")}
+                    title={`Risk score: ${entry.riskScore}/100`}
+                  >
+                    {entry.riskScore >= 70 ? "⚠ High" : entry.riskScore >= 40 ? "~ Med" : "✓ Low"}
+                  </span>
+                )}
               </button>
 
               {isExpanded && (
@@ -399,11 +437,45 @@ export function TimelinePanel({ profileId, database, collection }: TimelinePanel
                     </div>
                   )}
 
-                  {entry.rollbackLevel !== "none" && (
-                    <div className="timeline-entry__rollback">
-                      <CheckCircle size={14} />
-                      <span>Rollback: {entry.rollbackLevel}</span>
+                  {entry.rollbackScript && (
+                    <div className="timeline-entry__rollback-section">
+                      <div className="timeline-entry__rollback-header">
+                        <CheckCircle size={14} className="timeline-entry__rollback-icon" />
+                        <span className="timeline-entry__rollback-title">
+                          Rollback script
+                        </span>
+                        <span className="timeline-entry__rollback-level">
+                          {rollbackLevelLabel(entry.rollbackLevel)}
+                        </span>
+                        <button
+                          className="timeline-entry__copy-btn"
+                          onClick={() => void navigator.clipboard.writeText(entry.rollbackScript!)}
+                          title="Copy rollback script"
+                        >
+                          <Copy size={12} />
+                          Copy
+                        </button>
+                      </div>
+                      <pre className="timeline-entry__code timeline-entry__code--rollback">
+                        {(() => {
+                          try {
+                            return JSON.stringify(JSON.parse(entry.rollbackScript), null, 2);
+                          } catch {
+                            return entry.rollbackScript;
+                          }
+                        })()}
+                      </pre>
                     </div>
+                  )}
+
+                  {rollbackResult?.id === entry.id && (
+                    <Alert
+                      tone={rollbackResult.ok ? "success" : "danger"}
+                      compact
+                      onDismiss={() => setRollbackResult(null)}
+                    >
+                      {rollbackResult.message}
+                    </Alert>
                   )}
 
                   <div className="timeline-entry__notes">
@@ -437,6 +509,17 @@ export function TimelinePanel({ profileId, database, collection }: TimelinePanel
                   </div>
 
                   <div className="timeline-entry__actions">
+                    {entry.rollbackScript && (
+                      <button
+                        className="timeline-entry__action timeline-entry__action--rollback"
+                        onClick={() => void handleExecuteRollback(entry.id, entry.connectionId)}
+                        disabled={executingRollbackId === entry.id}
+                        title="Execute rollback script"
+                      >
+                        <RotateCcw size={14} />
+                        {executingRollbackId === entry.id ? "Rolling back…" : "Execute Rollback"}
+                      </button>
+                    )}
                     <button
                       className="timeline-entry__action timeline-entry__action--danger"
                       onClick={() => handleDelete(entry.id)}

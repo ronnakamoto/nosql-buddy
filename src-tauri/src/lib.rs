@@ -232,6 +232,7 @@ pub fn run() {
             commands::mongo::preview_delete,
             commands::mongo::preview_update,
             commands::mongo::safe_change_preview,
+
             commands::mongo::translate_vqb,
             commands::sql::translate_sql,
             commands::driver_code::generate_pipeline_code,
@@ -255,6 +256,7 @@ pub fn run() {
             commands::timeline::get_timeline_entry,
             commands::timeline::add_timeline_note,
             commands::timeline::delete_timeline_entry,
+            commands::rollback::execute_rollback,
             audit::commands::audit_get_status,
             audit::commands::audit_list_events,
             audit::commands::audit_get_root,

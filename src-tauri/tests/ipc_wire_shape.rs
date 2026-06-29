@@ -347,6 +347,33 @@ fn safe_change_preview_index_info_fields_are_camel_case() {
     assert_absent!(ii, "index_used");
 }
 
+// ─── SafeChangeMeta ──────────────────────────────────────────────────────────
+
+use app_lib::commands::mongo::SafeChangeMeta;
+
+#[test]
+fn safe_change_meta_is_camel_case_and_optional_fields_work() {
+    use app_lib::mongo::timeline_store::RollbackLevel;
+
+    let m = SafeChangeMeta {
+        risk_score: Some(75),
+        risk_reasons: Some(vec!["production".into()]),
+        rollback_script: Some("db.c.insertMany([])".into()),
+        rollback_level: RollbackLevel::Full,
+    };
+    let j = serde_json::to_value(&m).unwrap();
+    assert_eq!(j["riskScore"], json!(75));
+    assert_eq!(j["rollbackLevel"], json!("full"));
+    assert!(j.get("risk_score").is_none());
+    assert!(j.get("rollback_level").is_none());
+
+    // Default (no safe-change data) serializes with nulls / "none"
+    let d = SafeChangeMeta::default();
+    let jd = serde_json::to_value(&d).unwrap();
+    assert!(jd["riskScore"].is_null());
+    assert_eq!(jd["rollbackLevel"], json!("none"));
+}
+
 // ─── ShellOutput ─────────────────────────────────────────────────────────────
 
 use app_lib::mongo::shell::{ShellOutput, ShellTable};

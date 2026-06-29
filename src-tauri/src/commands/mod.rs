@@ -12,6 +12,7 @@ pub mod import;
 pub mod jobs;
 pub mod mongo;
 pub mod restore;
+pub mod rollback;
 pub mod settings;
 pub mod shell;
 pub mod sql;

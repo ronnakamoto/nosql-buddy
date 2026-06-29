@@ -46,6 +46,17 @@ impl RecordContext {
     }
 }
 
+/// Optional Safe Change preview data to attach to a timeline entry.
+/// All fields are optional so callers that don't have preview data
+/// (e.g. non-Safe-Change paths) can pass `SafeChangeMetadata::default()`.
+#[derive(Debug, Default)]
+pub struct SafeChangeMetadata {
+    pub risk_score: Option<u8>,
+    pub risk_reasons: Option<Vec<String>>,
+    pub rollback_script: Option<String>,
+    pub rollback_level: crate::mongo::timeline_store::RollbackLevel,
+}
+
 /// Record a find operation to the timeline (for query history migration).
 pub async fn record_find(
     store: &TimelineStore,
@@ -155,8 +166,9 @@ pub async fn record_update(
     execution_ms: u64,
     errored: bool,
     error_message: Option<String>,
+    safe_change: SafeChangeMetadata,
 ) {
-    let entry = TimelineEntry::builder(
+    let mut builder = TimelineEntry::builder(
         uuid::Uuid::new_v4().to_string(),
         ctx.profile_id.clone(),
         kind,
@@ -173,8 +185,15 @@ pub async fn record_update(
     .execution_ms(execution_ms)
     .errored(errored)
     .error_message(error_message)
-    .executed_at(chrono_now())
-    .build();
+    .rollback_level(safe_change.rollback_level)
+    .rollback_script(safe_change.rollback_script);
+    if let Some(score) = safe_change.risk_score {
+        builder = builder.risk_score(score);
+    }
+    if let Some(reasons) = safe_change.risk_reasons {
+        builder = builder.risk_reasons(reasons);
+    }
+    let entry = builder.executed_at(chrono_now()).build();
 
     store.append(entry).await;
 }
@@ -191,8 +210,9 @@ pub async fn record_delete(
     execution_ms: u64,
     errored: bool,
     error_message: Option<String>,
+    safe_change: SafeChangeMetadata,
 ) {
-    let entry = TimelineEntry::builder(
+    let mut builder = TimelineEntry::builder(
         uuid::Uuid::new_v4().to_string(),
         ctx.profile_id.clone(),
         kind,
@@ -207,8 +227,15 @@ pub async fn record_delete(
     .execution_ms(execution_ms)
     .errored(errored)
     .error_message(error_message)
-    .executed_at(chrono_now())
-    .build();
+    .rollback_level(safe_change.rollback_level)
+    .rollback_script(safe_change.rollback_script);
+    if let Some(score) = safe_change.risk_score {
+        builder = builder.risk_score(score);
+    }
+    if let Some(reasons) = safe_change.risk_reasons {
+        builder = builder.risk_reasons(reasons);
+    }
+    let entry = builder.executed_at(chrono_now()).build();
 
     store.append(entry).await;
 }
@@ -224,6 +251,7 @@ pub async fn record_replace_one(
     execution_ms: u64,
     errored: bool,
     error_message: Option<String>,
+    safe_change: SafeChangeMetadata,
 ) {
     record_update(
         store,
@@ -236,6 +264,7 @@ pub async fn record_replace_one(
         execution_ms,
         errored,
         error_message,
+        safe_change,
     )
     .await;
 }
@@ -637,6 +666,7 @@ mod tests {
             30,
             false,
             None,
+            SafeChangeMetadata::default(),
         )
         .await;
         record_update(
@@ -650,6 +680,7 @@ mod tests {
             60,
             false,
             None,
+            SafeChangeMetadata::default(),
         )
         .await;
         record_replace_one(
@@ -662,6 +693,7 @@ mod tests {
             25,
             false,
             None,
+            SafeChangeMetadata::default(),
         )
         .await;
 
@@ -692,6 +724,7 @@ mod tests {
             10,
             false,
             None,
+            SafeChangeMetadata::default(),
         )
         .await;
 
@@ -713,6 +746,7 @@ mod tests {
             20,
             false,
             None,
+            SafeChangeMetadata::default(),
         )
         .await;
         record_delete(
@@ -724,6 +758,7 @@ mod tests {
             100,
             false,
             None,
+            SafeChangeMetadata::default(),
         )
         .await;
 
@@ -859,5 +894,124 @@ mod tests {
         }).await;
         assert_eq!(b_entries.len(), 1);
         assert_eq!(b_entries[0].returned_count, Some(20));
+    }
+
+    #[tokio::test]
+    async fn record_update_with_safe_change_metadata_stores_risk_and_rollback() {
+        let store = TimelineStore::new();
+        let ctx = test_ctx("p1");
+
+        record_update(
+            &store,
+            &ctx,
+            OperationKind::UpdateMany,
+            r#"{"status":"trial"}"#,
+            r#"{"$set":{"status":"expired"}}"#,
+            100,
+            100,
+            50,
+            false,
+            None,
+            SafeChangeMetadata {
+                risk_score: Some(75),
+                risk_reasons: Some(vec!["production environment".into(), "updateMany".into()]),
+                rollback_script: Some(r#"{"op":"bulkWrite","ops":[{"updateOne":{"filter":{"_id":1},"update":{"$set":{"status":"trial"}}}}]}"#.into()),
+                rollback_level: crate::mongo::timeline_store::RollbackLevel::Full,
+            },
+        ).await;
+
+        let entries = store.list(TimelineFilter::default()).await;
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e.risk_score, Some(75));
+        assert_eq!(e.risk_reasons, Some(vec!["production environment".into(), "updateMany".into()]));
+        assert!(e.rollback_script.is_some());
+        assert!(e.rollback_script.as_ref().unwrap().contains("bulkWrite"));
+        assert_eq!(e.rollback_level, crate::mongo::timeline_store::RollbackLevel::Full);
+    }
+
+    #[tokio::test]
+    async fn record_delete_with_safe_change_metadata_stores_risk_and_rollback() {
+        let store = TimelineStore::new();
+        let ctx = test_ctx("p1");
+
+        record_delete(
+            &store,
+            &ctx,
+            OperationKind::DeleteMany,
+            r#"{"status":"failed"}"#,
+            42,
+            30,
+            false,
+            None,
+            SafeChangeMetadata {
+                risk_score: Some(85),
+                risk_reasons: Some(vec!["deleteMany".into(), "broad filter".into()]),
+                rollback_script: Some(r#"{"op":"insertMany","docs":[{"_id":1}]}"#.into()),
+                rollback_level: crate::mongo::timeline_store::RollbackLevel::Full,
+            },
+        ).await;
+
+        let entries = store.list(TimelineFilter::default()).await;
+        let e = &entries[0];
+        assert_eq!(e.risk_score, Some(85));
+        assert_eq!(e.rollback_level, crate::mongo::timeline_store::RollbackLevel::Full);
+        assert!(e.rollback_script.is_some());
+    }
+
+    #[tokio::test]
+    async fn record_update_without_safe_change_metadata_stores_none() {
+        let store = TimelineStore::new();
+        let ctx = test_ctx("p1");
+
+        record_update(
+            &store,
+            &ctx,
+            OperationKind::UpdateOne,
+            r#"{"_id":1}"#,
+            r#"{"$set":{"x":1}}"#,
+            1,
+            1,
+            10,
+            false,
+            None,
+            SafeChangeMetadata::default(),
+        ).await;
+
+        let entries = store.list(TimelineFilter::default()).await;
+        let e = &entries[0];
+        assert_eq!(e.risk_score, None);
+        assert_eq!(e.risk_reasons, None);
+        assert_eq!(e.rollback_script, None);
+        assert_eq!(e.rollback_level, crate::mongo::timeline_store::RollbackLevel::None);
+    }
+
+    #[tokio::test]
+    async fn record_replace_one_with_safe_change_metadata() {
+        let store = TimelineStore::new();
+        let ctx = test_ctx("p1");
+
+        record_replace_one(
+            &store,
+            &ctx,
+            r#"{"_id":1}"#,
+            r#"{"name":"NewName"}"#,
+            1,
+            1,
+            15,
+            false,
+            None,
+            SafeChangeMetadata {
+                risk_score: Some(30),
+                risk_reasons: Some(vec!["replaceOne".into()]),
+                rollback_script: Some(r#"{"op":"replaceOne","doc":{"name":"OldName"}}"#.into()),
+                rollback_level: crate::mongo::timeline_store::RollbackLevel::Full,
+            },
+        ).await;
+
+        let entries = store.list(TimelineFilter::default()).await;
+        let e = &entries[0];
+        assert_eq!(e.risk_score, Some(30));
+        assert!(e.rollback_script.is_some());
     }
 }
