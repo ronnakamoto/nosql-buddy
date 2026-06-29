@@ -15,7 +15,7 @@ use crate::mongo::bson_json::{date_to_extjson, resolve_date_tag};
 use crate::mongo::query_code::{self, Language};
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase")]
 pub enum SqlOperation {
     Find,
     Aggregate,

@@ -195,6 +195,10 @@ pub async fn preview_operation(
     let index_info =
         check_index_used(&entry.client, &req.database, &req.collection, &filter).await?;
 
+    // Fetch total collection size so risk scoring can use proportion, not just
+    // absolute count. This is a best-effort estimate; ignore failures.
+    let collection_size = coll.estimated_document_count().await.unwrap_or(0);
+
     let update_or_replacement = update_doc.or(replacement_doc);
     let rollback_script =
         generate_rollback_script(req, &filter, &captured_docs, &update_or_replacement);
@@ -202,6 +206,7 @@ pub async fn preview_operation(
     let risk = score_risk(
         req.kind,
         matched_count,
+        collection_size,
         is_production,
         &req.filter_json,
         index_info.index_used,
@@ -813,6 +818,7 @@ struct RiskResult {
 fn score_risk(
     kind: OperationKind,
     matched_count: u64,
+    collection_size: u64,
     is_production: bool,
     filter_json: &str,
     index_used: bool,
@@ -864,12 +870,40 @@ fn score_risk(
         reasons.push("Query does not use an index (collection scan likely)".into());
     }
 
-    if matched_count > 1000 {
-        score += 20;
-        reasons.push(format!("High matched count: {}", matched_count));
-    } else if matched_count > 100 {
-        score += 10;
-        reasons.push(format!("Moderate matched count: {}", matched_count));
+    // Score based on how large a fraction of the collection is affected.
+    // Uses proportion when the collection size is known, otherwise falls
+    // back to absolute thresholds so small demo DBs aren't under-scored.
+    if matched_count > 1 {
+        let pct = if collection_size > 0 {
+            (matched_count * 100) / collection_size
+        } else {
+            0
+        };
+        if pct >= 50 || matched_count > 1000 {
+            score += 20;
+            if pct >= 50 {
+                reasons.push(format!(
+                    "{}% of the collection will be affected ({} docs)",
+                    pct, matched_count
+                ));
+            } else {
+                reasons.push(format!("High matched count: {}", matched_count));
+            }
+        } else if pct >= 25 || matched_count > 100 {
+            score += 10;
+            if pct >= 25 {
+                reasons.push(format!(
+                    "{}% of the collection will be affected ({} docs)",
+                    pct, matched_count
+                ));
+            } else {
+                reasons.push(format!("Moderate matched count: {}", matched_count));
+            }
+        } else if matched_count >= 5 {
+            // Small absolute count but still multiple docs — add a small bump.
+            score += 5;
+            reasons.push(format!("{} documents will be affected", matched_count));
+        }
     }
 
     if matches!(rollback_level, PreviewRollbackLevel::MetadataOnly) {
@@ -988,6 +1022,7 @@ mod tests {
         let risk = score_risk(
             OperationKind::DeleteMany,
             5000,
+            10000,
             true,
             "{}",
             false,
@@ -1005,6 +1040,7 @@ mod tests {
         let risk = score_risk(
             OperationKind::UpdateOne,
             1,
+            1000,
             false,
             r#"{"_id":1}"#,
             true,

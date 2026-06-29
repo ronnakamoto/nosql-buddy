@@ -90,23 +90,62 @@ fn sql_translate_rejects_non_select() {
     assert!(res.is_err());
 }
 
+// ─── Serialized JSON shape tests ─────────────────────────────────────────────
+//
+// These tests serialize SqlTranslation to JSON (as the Tauri IPC layer does)
+// and assert the *wire shape* the TypeScript frontend will see — particularly
+// that `operation.kind` is an inline string field, not an externally-tagged
+// wrapper object. A regression here means `switch (op.kind)` in QueryTab.tsx
+// silently falls through every case.
+
 #[test]
-fn sql_translate_update_basic() {
+fn sql_translate_update_serializes_kind_field() {
     let t = translate("shop", "UPDATE products SET price = 10 WHERE status = \"active\"").expect("translate");
     assert_eq!(t.collection, "products");
-    assert_eq!(t.pipeline.as_array().unwrap().len(), 0);
+    let json: serde_json::Value = serde_json::to_value(&t).expect("serialize");
+    assert_eq!(json["operation"]["kind"], "update", "operation.kind must be an inline 'kind' field, not an external wrapper");
+    assert!(json["operation"]["filter"].is_object());
+    assert!(json["operation"]["update"].is_object());
+    assert_eq!(json["operation"]["multi"], true);
 }
 
 #[test]
-fn sql_translate_insert_basic() {
+fn sql_translate_insert_serializes_kind_field() {
     let t = translate("shop", "INSERT INTO products VALUES {\"name\":\"A\"}").expect("translate");
     assert_eq!(t.collection, "products");
+    let json: serde_json::Value = serde_json::to_value(&t).expect("serialize");
+    assert_eq!(json["operation"]["kind"], "insert", "operation.kind must be an inline 'kind' field");
+    assert!(json["operation"]["documents"].is_array());
 }
 
 #[test]
-fn sql_translate_delete_basic() {
+fn sql_translate_delete_serializes_kind_field() {
     let t = translate("shop", "DELETE FROM products WHERE status = \"archived\"").expect("translate");
     assert_eq!(t.collection, "products");
+    let json: serde_json::Value = serde_json::to_value(&t).expect("serialize");
+    assert_eq!(json["operation"]["kind"], "delete", "operation.kind must be an inline 'kind' field, not an external wrapper");
+    assert!(json["operation"]["filter"].is_object());
+    assert_eq!(json["operation"]["multi"], true);
+}
+
+#[test]
+fn sql_translate_select_serializes_kind_field() {
+    let t = translate("shop", "SELECT * FROM products WHERE status = \"active\"").expect("translate");
+    assert_eq!(t.collection, "products");
+    let json: serde_json::Value = serde_json::to_value(&t).expect("serialize");
+    let kind = json["operation"]["kind"].as_str().expect("kind must be a string");
+    assert!(kind == "find" || kind == "aggregate", "expected find or aggregate, got {kind}");
+}
+
+#[test]
+fn sql_translate_delete_with_lt_operator_serializes_filter() {
+    let t = translate("shop", "DELETE FROM inventory_log WHERE qty_change < 0").expect("translate");
+    assert_eq!(t.collection, "inventory_log");
+    let json: serde_json::Value = serde_json::to_value(&t).expect("serialize");
+    assert_eq!(json["operation"]["kind"], "delete");
+    // Filter must contain { qty_change: { $lt: 0 } } — not an empty object.
+    let filter = &json["operation"]["filter"];
+    assert!(filter["qty_change"]["$lt"].is_number(), "filter must carry the $lt condition");
 }
 
 #[test]

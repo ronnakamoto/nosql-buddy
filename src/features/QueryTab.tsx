@@ -484,6 +484,7 @@ export function QueryTab({
     updateJson: string | null,
     replacementJson: string | null,
     execute: () => Promise<void>,
+    collectionOverride?: string,
   ) {
     // Fetch settings to check if Safe Change is enabled.
     let scEnabled = true;
@@ -510,7 +511,7 @@ export function QueryTab({
       const preview = await commands.safeChangePreview({
         connectionId,
         database,
-        collection,
+        collection: collectionOverride ?? collection,
         kind,
         filterJson,
         updateJson: updateJson ?? undefined,
@@ -644,13 +645,17 @@ export function QueryTab({
   async function runSqlTranslation(translated: import("../ipc/commands").SqlTranslation) {
     if (!translated.operation) return;
     const op = translated.operation;
+    // Use the collection named in the SQL statement — it may differ from the
+    // tab's collection prop (e.g. DELETE FROM inventory_log opened from the
+    // products tab).
+    const sqlCollection = translated.collection || collection;
     switch (op.kind) {
       case "find":
       case "aggregate": {
         const result = await commands.aggregatePage({
           connectionId,
           database,
-          collection,
+          collection: sqlCollection,
           pipelineJson: JSON.stringify(translated.pipeline),
           pageSize: pageSizeRef.current,
           countMode: "none",
@@ -673,7 +678,7 @@ export function QueryTab({
             const result = await commands.updateDocuments({
               connectionId,
               database,
-              collection,
+              collection: sqlCollection,
               filterJson: opFilter,
               updateJson: opUpdate,
               multi: opMulti,
@@ -684,6 +689,7 @@ export function QueryTab({
               result.modifiedCount > 0 ? "success" : "warning",
             );
           },
+          sqlCollection,
         );
         break;
       }
@@ -691,7 +697,7 @@ export function QueryTab({
         const result = await commands.insertManyDocuments({
           connectionId,
           database,
-          collection,
+          collection: sqlCollection,
           documentsJson: JSON.stringify(op.documents),
         });
         toast.push(`Inserted ${result.insertedCount} document(s).`, "success");
@@ -708,11 +714,12 @@ export function QueryTab({
             const count = await commands.deleteDocuments(
               connectionId,
               database,
-              collection,
+              sqlCollection,
               opFilter,
             );
             toast.push(`Deleted ${count} document(s).`, "success");
           },
+          sqlCollection,
         );
         break;
       }
@@ -729,7 +736,7 @@ export function QueryTab({
             const result = await commands.replaceDocument({
               connectionId,
               database,
-              collection,
+              collection: sqlCollection,
               filterJson: opFilter,
               replacementJson: opReplacement,
               upsert: opUpsert,
@@ -739,6 +746,7 @@ export function QueryTab({
               result.modifiedCount > 0 ? "success" : "warning",
             );
           },
+          sqlCollection,
         );
         break;
       }
