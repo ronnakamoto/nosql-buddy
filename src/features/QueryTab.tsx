@@ -4,6 +4,7 @@ import { ResultsTable, type ResultsViewMode } from "../components/ResultsTable";
 import { toFilterId } from "../components/resultsDisplay";
 import { InsertDocumentModal } from "../components/InsertDocumentModal";
 import { QueryHistoryPanel } from "../components/QueryHistoryPanel";
+import { ShortcutButton } from "../components/ShortcutButton";
 import { AggregationEditor } from "./AggregationEditor";
 import { VisualQueryBuilder } from "./VisualQueryBuilder";
 import { pushHistory, type QueryMode, fileExtension, fileFilter } from "./queryHistory";
@@ -1105,6 +1106,22 @@ export function QueryTab({
     return () => window.removeEventListener("nosqlbuddy:export-results", fn);
   }, []);
 
+  // Keyboard shortcut for running queries
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.key === "Enter") {
+        e.preventDefault();
+        if (valid && !running) {
+          run();
+        }
+      }
+    };
+    
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [valid, running, run]);
+
   async function handleSaveToFile() {
     const ext = fileExtension(mode as QueryMode);
     try {
@@ -1523,13 +1540,16 @@ export function QueryTab({
             ]}
           />
           {mode !== "aggregate" && (
-            <button
-              className="btn btn--primary btn--sm"
+            <ShortcutButton
+              variant="primary"
+              size="sm"
+              shortcut="CmdOrCtrl+Enter"
               onClick={run}
               disabled={!valid || running}
+              className="btn btn--primary btn--sm"
             >
               {running ? "Running…" : "Run"}
-            </button>
+            </ShortcutButton>
           )}
         </div>
       </div>

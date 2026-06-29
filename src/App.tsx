@@ -29,6 +29,8 @@ import { DumpWizard } from "./features/backupRestore/DumpWizard";
 import { RestoreWizard } from "./features/backupRestore/RestoreWizard";
 import type { CollectionItem } from "./features/backupRestore/CollectionCheckList";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { ShortcutsMap } from "./components/ShortcutsMap";
+import { ShortcutButton } from "./components/ShortcutButton";
 import {
   Search,
   Terminal,
@@ -143,7 +145,7 @@ function NewTabMenu({
         }}
         aria-label="New tab"
         aria-expanded={open}
-        title="New tab"
+        title="New tab (CmdOrCtrl+T)"
       >
         <Plus size={16} />
       </button>
@@ -166,6 +168,7 @@ function NewTabMenu({
             <span className="new-tab-menu__icon" aria-hidden="true"><Search size={14} /></span>
             <span className="new-tab-menu__label">Query</span>
             <span className="new-tab-menu__hint">Find documents</span>
+            <span className="kbd">CmdOrCtrl+T</span>
           </button>
           <button
             className="new-tab-menu__item"
@@ -588,6 +591,7 @@ export default function App() {
   const [connFormKey, setConnFormKey] = useState(0);
   const [connSwitcherOpen, setConnSwitcherOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [shortcutsMapOpen, setShortcutsMapOpen] = useState(false);
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -672,6 +676,9 @@ export default function App() {
         e.preventDefault();
         const el = document.querySelector(".app__sidebar");
         if (el) (el as HTMLElement).style.display = "";
+      } else if (mod && e.key === "?") {
+        e.preventDefault();
+        setShortcutsMapOpen(true);
       }
     };
     window.addEventListener("keydown", handler);
@@ -912,6 +919,13 @@ export default function App() {
         hint: "Quick navigation and commands",
         shortcut: "CmdOrCtrl+K",
         run: () => setPaletteOpen(true),
+      },
+      {
+        id: "shortcuts-map",
+        label: "Keyboard shortcuts",
+        hint: "View all available keyboard shortcuts",
+        shortcut: "CmdOrCtrl+?",
+        run: () => setShortcutsMapOpen(true),
       },
     ];
     if (active) {
@@ -1340,9 +1354,14 @@ export default function App() {
               NoSQLBuddy supports clusters, replica sets, and sharded topologies.
             </p>
             <div className="row row--end">
-              <button className="btn btn--primary" onClick={() => setConnectionFormOpen(true)}>
+              <ShortcutButton
+                variant="primary"
+                shortcut="CmdOrCtrl+N"
+                onClick={() => setConnectionFormOpen(true)}
+                className="btn btn--primary"
+              >
                 New connection
-              </button>
+              </ShortcutButton>
             </div>
           </div>
         )}
@@ -1395,6 +1414,10 @@ export default function App() {
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
         items={paletteItems}
+      />
+      <ShortcutsMap
+        open={shortcutsMapOpen}
+        onClose={() => setShortcutsMapOpen(false)}
       />
       <ToastStack toasts={toasts.toasts} onDismiss={toasts.dismiss} />
       {dumpTarget && (

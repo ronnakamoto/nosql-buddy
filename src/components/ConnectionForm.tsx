@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import commands, { type SaveProfileRequest, type TestResult } from "../ipc/commands";
 import { Modal } from "./Modal";
 import { InfoPopover } from "./InfoPopover";
+import { ShortcutButton } from "./ShortcutButton";
 import { useToast } from "../context/ToastContext";
 
 export interface ConnectionFormProps {
@@ -26,6 +27,29 @@ export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFo
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
   const [saving, setSaving] = useState(false);
+
+  // Keyboard shortcuts for the connection form
+  useEffect(() => {
+    if (!open) return;
+    
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.key === "s") {
+        e.preventDefault();
+        if (!saving) {
+          handleSave();
+        }
+      } else if (mod && e.key === "t") {
+        e.preventDefault();
+        if (!testing && !saving) {
+          handleTest();
+        }
+      }
+    };
+    
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open, saving, testing]);
 
   async function handleTest() {
     setTestResult(null);
@@ -83,15 +107,26 @@ export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFo
       width={560}
       footer={
         <>
-          <button className="btn" onClick={handleTest} disabled={testing || saving}>
+          <ShortcutButton
+            shortcut="CmdOrCtrl+T"
+            onClick={handleTest}
+            disabled={testing || saving}
+            className="btn"
+          >
             {testing ? "Testing…" : "Test connection"}
-          </button>
+          </ShortcutButton>
           <button className="btn" onClick={onClose} disabled={saving}>
             Cancel
           </button>
-          <button className="btn btn--primary" onClick={handleSave} disabled={saving}>
+          <ShortcutButton
+            variant="primary"
+            shortcut="CmdOrCtrl+S"
+            onClick={handleSave}
+            disabled={saving}
+            className="btn btn--primary"
+          >
             {saving ? "Saving…" : "Save"}
-          </button>
+          </ShortcutButton>
         </>
       }
     >

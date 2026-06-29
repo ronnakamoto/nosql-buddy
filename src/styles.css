@@ -5242,3 +5242,398 @@ input[type="checkbox"]:disabled {
 .info-popover__body li {
   margin-bottom: 2px;
 }
+
+/* Shortcut Button Component */
+.shortcut-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  position: relative;
+  font-family: var(--font-sans);
+  font-weight: 500;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 150ms ease-out;
+  text-decoration: none;
+  background: transparent;
+  color: var(--ink);
+}
+
+.shortcut-btn:focus-visible {
+  outline: 2px solid var(--accent-700);
+  outline-offset: 1px;
+}
+
+.shortcut-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Variants */
+.shortcut-btn--primary {
+  background: var(--accent-500);
+  color: var(--accent-fg);
+  border-color: var(--accent-500);
+}
+
+.shortcut-btn--primary:hover:not(:disabled) {
+  background: var(--accent-600);
+  border-color: var(--accent-600);
+}
+
+.shortcut-btn--primary:focus-visible {
+  outline-color: var(--accent-700);
+}
+
+.shortcut-btn--ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--ink-muted);
+}
+
+.shortcut-btn--ghost:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.shortcut-btn--danger {
+  background: var(--danger-500);
+  color: white;
+  border-color: var(--danger-500);
+}
+
+.shortcut-btn--danger:hover:not(:disabled) {
+  background: color-mix(in oklch, var(--danger-500) 85%, black);
+  border-color: color-mix(in oklch, var(--danger-500) 85%, black);
+}
+
+.shortcut-btn--default {
+  background: var(--surface);
+  color: var(--ink);
+  border-color: var(--border);
+}
+
+.shortcut-btn--default:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+}
+
+/* Sizes */
+.shortcut-btn--sm {
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--font-size-xs);
+  gap: var(--space-1);
+}
+
+.shortcut-btn--md {
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--font-size-sm);
+}
+
+.shortcut-btn--lg {
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--font-size-md);
+}
+
+.shortcut-btn__content {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.shortcut-btn__kbd {
+  display: inline-block;
+  min-width: 16px;
+  padding: 2px 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.2;
+  text-align: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--ink-faint);
+  letter-spacing: var(--letter-mono);
+  box-shadow: inset 0 1px 0 0 var(--highlight);
+  margin-left: var(--space-1);
+}
+
+/* Special kbd styling for primary buttons */
+.shortcut-btn--primary .shortcut-btn__kbd {
+  background: color-mix(in oklch, var(--accent-fg) 20%, transparent);
+  border-color: color-mix(in oklch, var(--accent-fg) 30%, transparent);
+  color: var(--accent-fg);
+}
+
+/* Special kbd styling for danger buttons */
+.shortcut-btn--danger .shortcut-btn__kbd {
+  background: color-mix(in oklch, white 20%, transparent);
+  border-color: color-mix(in oklch, white 30%, transparent);
+  color: white;
+}
+
+/* Special kbd styling for ghost buttons */
+.shortcut-btn--ghost .shortcut-btn__kbd {
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+
+/* Shortcuts Map */
+.shortcuts-map {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: var(--z-modal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-6);
+}
+
+.shortcuts-map__backdrop {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(4px);
+}
+
+.shortcuts-map__content {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  width: 100%;
+  max-width: 800px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.shortcuts-map__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.shortcuts-map__title {
+  margin: 0;
+  font-size: var(--font-size-xl);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.shortcuts-map__close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  color: var(--ink-muted);
+  cursor: pointer;
+  transition: all 150ms ease-out;
+}
+
+.shortcuts-map__close:hover {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+
+.shortcuts-map__search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border);
+}
+
+.shortcuts-map__search-icon {
+  color: var(--ink-faint);
+  flex-shrink: 0;
+}
+
+.shortcuts-map__search-input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  font-size: var(--font-size-md);
+  color: var(--ink);
+  outline: none;
+}
+
+.shortcuts-map__search-input::placeholder {
+  color: var(--ink-faint);
+}
+
+.shortcuts-map__categories {
+  display: flex;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.shortcuts-map__categories::-webkit-scrollbar {
+  display: none;
+}
+
+.shortcuts-map__category {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--ink-muted);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 150ms ease-out;
+  white-space: nowrap;
+}
+
+.shortcuts-map__category:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.shortcuts-map__category.is-active {
+  background: var(--accent-500);
+  color: var(--accent-fg);
+  border-color: var(--accent-500);
+}
+
+.shortcuts-map__list {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-4) var(--space-5);
+}
+
+.shortcuts-map__empty {
+  text-align: center;
+  color: var(--ink-muted);
+  font-size: var(--font-size-md);
+  padding: var(--space-8) var(--space-4);
+}
+
+.shortcuts-map__section {
+  margin-bottom: var(--space-6);
+}
+
+.shortcuts-map__section:last-child {
+  margin-bottom: 0;
+}
+
+.shortcuts-map__section-header {
+  margin-bottom: var(--space-3);
+}
+
+.shortcuts-map__section-title {
+  margin: 0 0 var(--space-1) 0;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.shortcuts-map__section-description {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--ink-muted);
+  line-height: 1.4;
+}
+
+.shortcuts-map__items {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.shortcuts-map__item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  transition: background 150ms ease-out;
+}
+
+.shortcuts-map__item:hover {
+  background: var(--surface-2);
+}
+
+.shortcuts-map__item-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.shortcuts-map__item-description {
+  font-size: var(--font-size-md);
+  color: var(--ink);
+  line-height: 1.4;
+}
+
+.shortcuts-map__item-context {
+  font-size: var(--font-size-sm);
+  color: var(--ink-faint);
+  margin-top: 2px;
+}
+
+.shortcuts-map__item-keys {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-1);
+  flex-shrink: 0;
+}
+
+.shortcuts-map__key-or {
+  color: var(--ink-faint);
+  font-size: 10px;
+  margin: 0 2px;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .shortcuts-map {
+    padding: var(--space-4);
+  }
+  
+  .shortcuts-map__content {
+    max-height: 90vh;
+  }
+  
+  .shortcuts-map__categories {
+    padding: var(--space-2) var(--space-4);
+  }
+  
+  .shortcuts-map__list {
+    padding: var(--space-3) var(--space-4);
+  }
+  
+  .shortcuts-map__item {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-2);
+  }
+  
+  .shortcuts-map__item-keys {
+    align-items: flex-start;
+  }
+}
