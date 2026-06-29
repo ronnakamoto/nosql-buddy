@@ -20,6 +20,7 @@ pub mod shape;
 pub mod shell;
 pub mod shell_autocomplete;
 pub mod sql_to_mongo;
+pub mod safe_change;
 pub mod timeline_store;
 pub mod types;
 pub mod vqb;

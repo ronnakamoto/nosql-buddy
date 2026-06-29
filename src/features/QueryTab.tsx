@@ -28,6 +28,8 @@ import { Alert } from "../components/Alert";
 import { useToast } from "../context/ToastContext";
 import { Minus, Maximize2, X } from "lucide-react";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { SafeChangeModal } from "../components/SafeChangeModal";
+import type { SafeChangePreview, SafeChangeOperationKind } from "../ipc/commands";
 
 /** Prism grammar name for each driver-code language. Mirrors the map
  *  in DriverCodePanel so the SQL tab's read-only code block shares the
@@ -399,6 +401,15 @@ export function QueryTab({
   const [exportSource, setExportSource] = useState<ExportSourceDto | null>(null);
   const [pendingDelete, setPendingDelete] = useState<{ idx: number; docId: unknown } | null>(null);
   const [pendingBulkDelete, setPendingBulkDelete] = useState<{ ids: unknown[]; count: number } | null>(null);
+
+  // ─── Safe Change Mode state ─────────────────────────────────────────
+  const [scOpen, setScOpen] = useState(false);
+  const [scPreview, setScPreview] = useState<SafeChangePreview | null>(null);
+  const [scLoading, setScLoading] = useState(false);
+  const [scError, setScError] = useState<string | null>(null);
+  // Callback stored when a write is intercepted; called on modal confirm.
+  const scPendingRef = useRef<(() => Promise<void>) | null>(null);
+
   const [viewMode, setViewMode] = useState<ResultsViewMode>("table");
   const [resultsPanelState, setResultsPanelState] = useState<ResultsPanelState>("expanded");
   const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(() => new Set());
@@ -460,6 +471,80 @@ export function QueryTab({
     return highlightCode(code, PRISM_LANG[sqlLanguage]);
   }, [sqlResult, sqlLanguage]);
 
+  // ─── Safe Change Mode helper ────────────────────────────────────────
+  /**
+   * Intercept a write operation with Safe Change Mode when enabled.
+   * Fetches a preview from the backend and opens the modal. The modal's
+   * Confirm button calls `execute()`. If Safe Change Mode is disabled, or
+   * the kind is not supported, `execute()` is called directly.
+   */
+  async function withSafeChange(
+    kind: SafeChangeOperationKind,
+    filterJson: string,
+    updateJson: string | null,
+    replacementJson: string | null,
+    execute: () => Promise<void>,
+  ) {
+    // Fetch settings to check if Safe Change is enabled.
+    let scEnabled = true;
+    try {
+      const settings = await commands.getSettings();
+      scEnabled = settings.safeChange?.enabled ?? true;
+    } catch {
+      // If settings fail to load, default to enabled.
+    }
+
+    if (!scEnabled) {
+      await execute();
+      return;
+    }
+
+    // Open modal immediately (loading state), then fetch preview.
+    scPendingRef.current = execute;
+    setScOpen(true);
+    setScPreview(null);
+    setScError(null);
+    setScLoading(true);
+
+    try {
+      const preview = await commands.safeChangePreview({
+        connectionId,
+        database,
+        collection,
+        kind,
+        filterJson,
+        updateJson: updateJson ?? undefined,
+        replacementJson: replacementJson ?? undefined,
+      });
+      setScPreview(preview);
+    } catch (e) {
+      setScError(describeError(e));
+    } finally {
+      setScLoading(false);
+    }
+  }
+
+  async function scConfirm() {
+    const execute = scPendingRef.current;
+    setScOpen(false);
+    setScPreview(null);
+    scPendingRef.current = null;
+    if (execute) {
+      try {
+        await execute();
+      } catch (e) {
+        toast.push(describeError(e), "error");
+      }
+    }
+  }
+
+  function scCancel() {
+    setScOpen(false);
+    setScPreview(null);
+    setScError(null);
+    scPendingRef.current = null;
+  }
+
   async function run() {
     if (!valid) {
       toast.push("Fix the JSON syntax first.", "error");
@@ -495,18 +580,30 @@ export function QueryTab({
         setPage(result);
         setResultsPanelState("expanded");
       } else if (mode === "update") {
-        const result = await commands.updateDocuments({
-          connectionId,
-          database,
-          collection,
-          filterJson: updateFilterText,
-          updateJson: updateText,
-          multi: updateMulti,
-          upsert: updateUpsert,
-        });
-        toast.push(
-          `Updated ${result.modifiedCount} document(s) (matched ${result.matchedCount})`,
-          result.modifiedCount > 0 ? "success" : "warning",
+        const capturedFilter = updateFilterText;
+        const capturedUpdate = updateText;
+        const capturedMulti = updateMulti;
+        const capturedUpsert = updateUpsert;
+        await withSafeChange(
+          capturedMulti ? "updateMany" : "updateOne",
+          capturedFilter,
+          capturedUpdate,
+          null,
+          async () => {
+            const result = await commands.updateDocuments({
+              connectionId,
+              database,
+              collection,
+              filterJson: capturedFilter,
+              updateJson: capturedUpdate,
+              multi: capturedMulti,
+              upsert: capturedUpsert,
+            });
+            toast.push(
+              `Updated ${result.modifiedCount} document(s) (matched ${result.matchedCount})`,
+              result.modifiedCount > 0 ? "success" : "warning",
+            );
+          },
         );
       } else if (mode === "insert") {
         if (insertMany) {
@@ -563,18 +660,30 @@ export function QueryTab({
         break;
       }
       case "update": {
-        const result = await commands.updateDocuments({
-          connectionId,
-          database,
-          collection,
-          filterJson: JSON.stringify(op.filter),
-          updateJson: JSON.stringify(op.update),
-          multi: op.multi,
-          upsert: op.upsert,
-        });
-        toast.push(
-          `Updated ${result.modifiedCount} document(s) (matched ${result.matchedCount})`,
-          result.modifiedCount > 0 ? "success" : "warning",
+        const opFilter = JSON.stringify(op.filter);
+        const opUpdate = JSON.stringify(op.update);
+        const opMulti = op.multi;
+        const opUpsert = op.upsert;
+        await withSafeChange(
+          opMulti ? "updateMany" : "updateOne",
+          opFilter,
+          opUpdate,
+          null,
+          async () => {
+            const result = await commands.updateDocuments({
+              connectionId,
+              database,
+              collection,
+              filterJson: opFilter,
+              updateJson: opUpdate,
+              multi: opMulti,
+              upsert: opUpsert,
+            });
+            toast.push(
+              `Updated ${result.modifiedCount} document(s) (matched ${result.matchedCount})`,
+              result.modifiedCount > 0 ? "success" : "warning",
+            );
+          },
         );
         break;
       }
@@ -589,27 +698,47 @@ export function QueryTab({
         break;
       }
       case "delete": {
-        const count = await commands.deleteDocuments(
-          connectionId,
-          database,
-          collection,
-          JSON.stringify(op.filter),
+        const opFilter = JSON.stringify(op.filter);
+        await withSafeChange(
+          op.multi !== false ? "deleteMany" : "deleteOne",
+          opFilter,
+          null,
+          null,
+          async () => {
+            const count = await commands.deleteDocuments(
+              connectionId,
+              database,
+              collection,
+              opFilter,
+            );
+            toast.push(`Deleted ${count} document(s).`, "success");
+          },
         );
-        toast.push(`Deleted ${count} document(s).`, "success");
         break;
       }
       case "replace": {
-        const result = await commands.replaceDocument({
-          connectionId,
-          database,
-          collection,
-          filterJson: JSON.stringify(op.filter),
-          replacementJson: JSON.stringify(op.replacement),
-          upsert: op.upsert,
-        });
-        toast.push(
-          `Replaced ${result.modifiedCount} document(s) (matched ${result.matchedCount})`,
-          result.modifiedCount > 0 ? "success" : "warning",
+        const opFilter = JSON.stringify(op.filter);
+        const opReplacement = JSON.stringify(op.replacement);
+        const opUpsert = op.upsert;
+        await withSafeChange(
+          "replaceOne",
+          opFilter,
+          null,
+          opReplacement,
+          async () => {
+            const result = await commands.replaceDocument({
+              connectionId,
+              database,
+              collection,
+              filterJson: opFilter,
+              replacementJson: opReplacement,
+              upsert: opUpsert,
+            });
+            toast.push(
+              `Replaced ${result.modifiedCount} document(s) (matched ${result.matchedCount})`,
+              result.modifiedCount > 0 ? "success" : "warning",
+            );
+          },
         );
         break;
       }
@@ -1031,9 +1160,42 @@ export function QueryTab({
       toast.push("Cannot delete a document without an `_id`.", "error");
       return;
     }
-    setPendingDelete({ idx: rowIdx, docId });
+    // Use Safe Change Mode: show preview before deleting.
+    const filterJson = JSON.stringify({ _id: docId });
+    void withSafeChange(
+      "deleteOne",
+      filterJson,
+      null,
+      null,
+      async () => {
+        const count = await commands.deleteDocuments(
+          connectionId,
+          database,
+          collection,
+          filterJson,
+        );
+        if (count === 0) {
+          toast.push(
+            "Delete matched 0 documents — the `_id` did not round-trip. Nothing was removed.",
+            "error",
+          );
+          return;
+        }
+        setPage((prev) => {
+          if (!prev) return prev;
+          const docs = prev.documents.slice();
+          if (rowIdx >= 0 && rowIdx < docs.length) {
+            docs.splice(rowIdx, 1);
+          }
+          return { ...prev, documents: docs, totalCount: Math.max(0, (prev.totalCount ?? 0) - count) };
+        });
+        toast.push(`Deleted ${count} document(s).`, "success");
+      },
+    );
   }
 
+  // Legacy pendingDelete / confirmDelete kept for the existing ConfirmDialog;
+  // now only reached when Safe Change Mode is disabled (withSafeChange bypasses it).
   async function confirmDelete() {
     if (!pendingDelete) return;
     const { idx, docId } = pendingDelete;
@@ -1093,9 +1255,28 @@ export function QueryTab({
       toast.push("Selected rows lack `_id` fields.", "error");
       return;
     }
-    setPendingBulkDelete({ ids, count: ids.length });
+    const filter = ids.length === 1 ? { _id: ids[0] } : { _id: { $in: ids } };
+    const filterJson = JSON.stringify(filter);
+    void withSafeChange(
+      ids.length === 1 ? "deleteOne" : "deleteMany",
+      filterJson,
+      null,
+      null,
+      async () => {
+        const count = await commands.deleteDocuments(
+          connectionId,
+          database,
+          collection,
+          filterJson,
+        );
+        toast.push(`Deleted ${count} document(s).`, "success");
+        setSelectedRowIds(new Set());
+        await run();
+      },
+    );
   }
 
+  // Legacy confirmBulkDelete kept for when Safe Change Mode is disabled.
   async function confirmBulkDelete() {
     if (!pendingBulkDelete) return;
     const { ids } = pendingBulkDelete;
@@ -1136,26 +1317,31 @@ export function QueryTab({
       toast.push("Invalid update JSON.", "error");
       return;
     }
-    try {
-      const filter = ids.length === 1 ? { _id: ids[0] } : { _id: { $in: ids } };
-      const result = await commands.updateDocuments({
-        connectionId,
-        database,
-        collection,
-        filterJson: JSON.stringify(filter),
-        updateJson: updateDoc,
-        multi: true,
-        upsert: false,
-      });
-      toast.push(
-        `Updated ${result.modifiedCount} document(s) (matched ${result.matchedCount}).`,
-        result.modifiedCount > 0 ? "success" : "warning",
-      );
-      setSelectedRowIds(new Set());
-      await run();
-    } catch (e) {
-      toast.push(`Bulk update failed: ${describeError(e)}`, "error");
-    }
+    const filter = ids.length === 1 ? { _id: ids[0] } : { _id: { $in: ids } };
+    const filterJson = JSON.stringify(filter);
+    await withSafeChange(
+      "updateMany",
+      filterJson,
+      updateDoc,
+      null,
+      async () => {
+        const result = await commands.updateDocuments({
+          connectionId,
+          database,
+          collection,
+          filterJson,
+          updateJson: updateDoc,
+          multi: true,
+          upsert: false,
+        });
+        toast.push(
+          `Updated ${result.modifiedCount} document(s) (matched ${result.matchedCount}).`,
+          result.modifiedCount > 0 ? "success" : "warning",
+        );
+        setSelectedRowIds(new Set());
+        await run();
+      },
+    );
   }
 
   const resultsSummary = page ? formatResultSummary(page, loadingMore) : "No results yet";
@@ -1537,6 +1723,7 @@ export function QueryTab({
                       toast.push("Fix the JSON syntax first.", "error");
                       return;
                     }
+                    setUpdatePreviewCount(null);
                     setUpdatePreviewLoading(true);
                     try {
                       const count = await commands.previewUpdate({
@@ -1555,7 +1742,7 @@ export function QueryTab({
                   }}
                   disabled={running || updatePreviewLoading}
                 >
-                  {updatePreviewLoading ? "Previewing…" : "Preview"}
+                  {updatePreviewLoading ? "Counting…" : "Count matches"}
                 </button>
                 {updatePreviewCount !== null && (
                   <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>
@@ -1774,6 +1961,14 @@ export function QueryTab({
         confirmLabel={`Delete ${pendingBulkDelete?.count ?? 0} document${(pendingBulkDelete?.count ?? 0) === 1 ? "" : "s"}`}
         onConfirm={() => void confirmBulkDelete()}
         onCancel={() => setPendingBulkDelete(null)}
+      />
+      <SafeChangeModal
+        open={scOpen}
+        preview={scPreview}
+        loading={scLoading}
+        error={scError}
+        onConfirm={() => void scConfirm()}
+        onCancel={scCancel}
       />
     </div>
   );

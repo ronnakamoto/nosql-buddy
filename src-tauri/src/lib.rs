@@ -231,6 +231,7 @@ pub fn run() {
             commands::mongo::delete_documents,
             commands::mongo::preview_delete,
             commands::mongo::preview_update,
+            commands::mongo::safe_change_preview,
             commands::mongo::translate_vqb,
             commands::sql::translate_sql,
             commands::driver_code::generate_pipeline_code,

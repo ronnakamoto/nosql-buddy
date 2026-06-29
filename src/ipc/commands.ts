@@ -687,9 +687,80 @@ export interface AppInfo {
   appVersion: string;
 }
 
+// ─── Safe Change Mode ────────────────────────────────────────────────
+
+/** Configuration for Safe Change Mode (stored in app settings). */
+export interface SafeChangeSettings {
+  enabled: boolean;
+  requireTypedConfirmationThreshold: number;
+  alwaysPreviewOnProduction: boolean;
+}
+
 export interface AppSettings {
   theme: "system" | "light" | "dark";
   lastConnectionId: string | null;
+  safeChange?: SafeChangeSettings;
+}
+
+export const DEFAULT_SAFE_CHANGE_SETTINGS: SafeChangeSettings = {
+  enabled: true,
+  requireTypedConfirmationThreshold: 60,
+  alwaysPreviewOnProduction: true,
+};
+
+export type SafeChangeOperationKind =
+  | "updateOne"
+  | "updateMany"
+  | "deleteOne"
+  | "deleteMany"
+  | "replaceOne";
+
+export interface SafeChangePreviewRequest {
+  connectionId: string;
+  database: string;
+  collection: string;
+  kind: SafeChangeOperationKind;
+  filterJson: string;
+  updateJson?: string | null;
+  replacementJson?: string | null;
+  sampleLimit?: number | null;
+}
+
+export type SafeChangeRollbackLevel = "metadataOnly" | "sampleBased" | "full";
+export type SafeChangeType = "added" | "modified" | "removed";
+
+export interface SafeChangeFieldChange {
+  field: string;
+  oldValue: unknown;
+  newValue: unknown;
+  changeType: SafeChangeType;
+}
+
+export interface SafeChangeDocumentDiff {
+  documentIndex: number;
+  fieldChanges: SafeChangeFieldChange[];
+}
+
+export interface SafeChangeIndexInfo {
+  indexUsed: boolean;
+  stage: string;
+}
+
+export interface SafeChangePreview {
+  kind: SafeChangeOperationKind;
+  matchedCount: number;
+  sampleBefore: string[];
+  sampleAfter: string[];
+  diffs: SafeChangeDocumentDiff[];
+  riskScore: number;
+  riskReasons: string[];
+  warnings: string[];
+  rollbackScript: string;
+  rollbackLevel: SafeChangeRollbackLevel;
+  requiresTypedConfirmation: boolean;
+  confirmationText: string;
+  isProduction: boolean;
+  indexInfo: SafeChangeIndexInfo;
 }
 
 export type VqbCombinator = "and" | "or" | "nor";
@@ -1387,6 +1458,8 @@ const commands = {
     invoke<number>("preview_delete", { request }),
   previewUpdate: (request: PreviewUpdateRequest) =>
     invoke<number>("preview_update", { request }),
+  safeChangePreview: (request: SafeChangePreviewRequest) =>
+    invoke<SafeChangePreview>("safe_change_preview", { request }),
   translateVqb: (request: VqbTranslateRequest) =>
     invoke<Record<string, unknown>>("translate_vqb", { request }),
   translateSql: (database: string, sql: string) =>

@@ -13,6 +13,7 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::mongo::bson_json::{doc_to_display_json, doc_to_extjson, parse_optional_doc};
 use crate::mongo::client_registry::list_collections as registry_list_collections;
+use crate::mongo::safe_change::{SafeChangePreview, SafeChangePreviewRequest};
 use crate::mongo::types::{
     CollationDto, CollectionKind, CollectionStats, CollectionSummary, DatabaseSummary,
     DocumentPage, ExplainResult, IndexInfo, IndexStats,
@@ -1440,6 +1441,18 @@ pub struct VqbTranslateRequest {
 #[tauri::command]
 pub async fn translate_vqb(request: VqbTranslateRequest) -> AppResult<serde_json::Value> {
     crate::mongo::vqb::to_filter(&request.node)
+}
+
+/// Safe Change Mode: preview a write operation before it is executed.
+/// Returns matched count, before/after samples, field-level diffs, risk score,
+/// rollback plan, and whether typed confirmation is required.
+#[tauri::command]
+pub async fn safe_change_preview(
+    request: SafeChangePreviewRequest,
+    state: State<'_, AppState>,
+) -> AppResult<SafeChangePreview> {
+    let entry = state.clients.get(&request.connection_id).await?;
+    crate::mongo::safe_change::preview_operation(&entry, &request).await
 }
 
 #[allow(dead_code)]
