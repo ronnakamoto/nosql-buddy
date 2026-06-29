@@ -136,19 +136,42 @@ impl ProfileRepository {
         } else if profiles.iter().any(|p| p.name == profile.name) {
             return Err(AppError::ProfileExists(profile.name));
         }
-        // Persist secret to keychain, then strip from the profile before storing
-        if let Some(secret) = profile.secret.take() {
-            if secret.is_empty() {
-                let _ = self.secrets.delete(&profile.id);
-            } else {
-                self.secrets.put(&profile.id, &secret)?;
-            }
-        }
-        let stored = StoredProfile::from(&profile);
+        // Persist secret to keychain, then strip from the profile before
+        // storing. `persist_secret` returns whether a secret exists for this
+        // profile *after* the operation, which is the value we must persist as
+        // `has_secret` — computing it from `profile.secret` after `take()`
+        // would always be `false`.
+        let has_secret = self.persist_secret(&mut profile)?;
+        let mut stored = StoredProfile::from(&profile);
+        stored.has_secret = has_secret;
         profiles.retain(|p| p.id != stored.id);
         profiles.push(stored);
         self.save_all(app, &profiles)?;
         Ok(profile)
+    }
+
+    /// Persist (or clear) the profile's secret in the secret store and report
+    /// whether a secret exists for this profile afterwards. The secret is
+    /// taken out of `profile` so it never reaches on-disk metadata.
+    ///
+    /// Rules:
+    /// - `Some(non-empty)` → store it, `has_secret = true`.
+    /// - `Some(empty)`     → clear it, `has_secret = false`.
+    /// - `None`            → leave the store untouched and preserve the current
+    ///   state (an existing keychain entry must keep `has_secret = true` across
+    ///   metadata-only edits).
+    fn persist_secret(&self, profile: &mut ConnectionProfile) -> AppResult<bool> {
+        match profile.secret.take() {
+            Some(secret) if secret.is_empty() => {
+                let _ = self.secrets.delete(&profile.id);
+                Ok(false)
+            }
+            Some(secret) => {
+                self.secrets.put(&profile.id, &secret)?;
+                Ok(true)
+            }
+            None => Ok(self.secrets.get(&profile.id)?.is_some()),
+        }
     }
 
     pub fn get(&self, app: &tauri::AppHandle, id: &str) -> AppResult<ConnectionProfile> {
@@ -182,5 +205,113 @@ impl ProfileRepository {
         self.save_all(app, &profiles)?;
         let _ = self.secrets.delete(id);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mongo::credentials::InMemorySecretStore;
+    use crate::mongo::types::AuthMechanism;
+
+    fn repo() -> (ProfileRepository, Arc<InMemorySecretStore>) {
+        let secrets = Arc::new(InMemorySecretStore::new());
+        let repo = ProfileRepository::new(PathBuf::from("/tmp/test.json"), secrets.clone());
+        (repo, secrets)
+    }
+
+    fn profile(id: &str, secret: Option<&str>) -> ConnectionProfile {
+        ConnectionProfile {
+            id: id.to_string(),
+            name: "p".to_string(),
+            uri: "mongodb://127.0.0.1:27017".to_string(),
+            auth_mechanism: AuthMechanism::None,
+            secret: secret.map(|s| s.to_string()),
+            group: None,
+            color: None,
+            notes: None,
+            ssh_tunnel: None,
+            socks5: None,
+        }
+    }
+
+    // ── persist_secret: the has_secret invariant (regression for the bug where
+    //    has_secret was always persisted as false) ───────────────────────────
+
+    #[test]
+    fn persist_secret_stores_and_reports_true() {
+        let (repo, secrets) = repo();
+        let mut p = profile("id-1", Some("hunter2"));
+        let has_secret = repo.persist_secret(&mut p).expect("persist");
+        assert!(has_secret, "a non-empty secret must yield has_secret = true");
+        assert!(p.secret.is_none(), "secret must be stripped from the profile");
+        assert_eq!(secrets.get("id-1").expect("get"), Some("hunter2".to_string()));
+    }
+
+    #[test]
+    fn persist_secret_empty_clears_and_reports_false() {
+        let (repo, secrets) = repo();
+        secrets.put("id-1", "old").expect("seed");
+        let mut p = profile("id-1", Some(""));
+        let has_secret = repo.persist_secret(&mut p).expect("persist");
+        assert!(!has_secret, "an empty secret must yield has_secret = false");
+        assert_eq!(secrets.get("id-1").expect("get"), None, "secret must be cleared");
+    }
+
+    #[test]
+    fn persist_secret_none_preserves_existing_secret() {
+        let (repo, secrets) = repo();
+        secrets.put("id-1", "kept").expect("seed");
+        let mut p = profile("id-1", None);
+        let has_secret = repo.persist_secret(&mut p).expect("persist");
+        assert!(
+            has_secret,
+            "a metadata-only edit must preserve has_secret for an existing secret"
+        );
+        assert_eq!(secrets.get("id-1").expect("get"), Some("kept".to_string()));
+    }
+
+    #[test]
+    fn persist_secret_none_without_existing_reports_false() {
+        let (repo, _secrets) = repo();
+        let mut p = profile("id-1", None);
+        let has_secret = repo.persist_secret(&mut p).expect("persist");
+        assert!(!has_secret, "no secret provided and none stored => has_secret = false");
+    }
+
+    // ── StoredProfile::from must never carry the secret, and the upsert path
+    //    overrides has_secret with the real value ─────────────────────────────
+
+    #[test]
+    fn stored_profile_from_strips_secret_state_to_metadata_only() {
+        // StoredProfile derives has_secret from the in-memory option; once the
+        // secret has been taken this is false, which is exactly why upsert must
+        // override it with the persist_secret result.
+        let p = profile("id-1", None);
+        let stored = StoredProfile::from(&p);
+        assert!(!stored.has_secret);
+        assert_eq!(stored.id, "id-1");
+        assert_eq!(stored.uri, "mongodb://127.0.0.1:27017");
+    }
+
+    #[test]
+    fn summary_from_stored_masks_uri_and_carries_has_secret() {
+        let stored = StoredProfile {
+            id: "id-1".to_string(),
+            name: "prod".to_string(),
+            uri: "mongodb://alice:pw@db:27017/app".to_string(),
+            auth_mechanism: AuthMechanism::ScramSha256,
+            has_secret: true,
+            group: None,
+            color: None,
+            notes: None,
+            ssh_tunnel: None,
+            socks5: None,
+        };
+        let summary = ProfileSummary::from(stored);
+        assert!(summary.has_secret);
+        assert!(!summary.masked_uri.contains("alice"), "user must be masked");
+        assert!(!summary.masked_uri.contains("pw"), "password must be masked");
+        assert!(summary.masked_uri.contains("***:***@"));
     }
 }

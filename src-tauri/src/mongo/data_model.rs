@@ -14,6 +14,7 @@ use tauri::{AppHandle, Manager};
 use crate::error::{AppError, AppResult};
 use crate::events::{emit_data_model_progress, emit_data_model_updated, DataModelProgressPayload};
 use crate::mongo::client_registry::classify_collection_name;
+use crate::mongo::redaction::Redactor;
 use crate::mongo::relationship::{
     detect_relationships, AppSchemaSignal, LookupSignal, ObjectIdMatchSignal, RelationshipConfig,
     RelationshipEdge,
@@ -73,6 +74,10 @@ pub async fn scan_database_model(
     let total = config.collections.len() as u32;
     let mut nodes: Vec<CollectionShape> = Vec::with_capacity(config.collections.len());
     let mut warnings: Vec<String> = Vec::new();
+    // Driver error messages can embed the connection URI (`user:pass@host`),
+    // so every error surfaced into `warnings` or progress events must be
+    // redacted before it reaches the UI.
+    let redactor = Redactor::new();
 
     for (i, name) in config.collections.iter().enumerate() {
         let kind: CollectionKind = classify_collection_name(client, &config.database, name).await;
@@ -84,8 +89,16 @@ pub async fn scan_database_model(
         {
             Ok(cursor) => cursor.try_collect().await.unwrap_or_default(),
             Err(e) => {
-                warnings.push(format!("{}: sample failed: {}", name, e));
-                emit_progress(app_handle, &config.database, name, (i + 1) as u32, total, Some(e.to_string()));
+                let safe = redactor.redact(&e.to_string());
+                warnings.push(format!("{name}: sample failed: {safe}"));
+                emit_progress(
+                    app_handle,
+                    &config.database,
+                    name,
+                    (i + 1) as u32,
+                    total,
+                    Some(safe),
+                );
                 continue;
             }
         };
@@ -102,7 +115,10 @@ pub async fn scan_database_model(
         let indexes = match list_indexes_for_collection(client, &config.database, name).await {
             Ok(idx) => idx,
             Err(e) => {
-                warnings.push(format!("{}: list indexes failed: {}", name, e));
+                warnings.push(format!(
+                    "{name}: list indexes failed: {}",
+                    redactor.redact(&e.to_string())
+                ));
                 Vec::new()
             }
         };
@@ -299,7 +315,7 @@ fn collect_object_id_fields_inner(
     node: &crate::mongo::shape::ShapeNode,
     out: &mut Vec<(String, bool)>,
 ) {
-    let dominant = node.types.iter().max_by(|a, b| a.1.partial_cmp(b.1).unwrap());
+    let dominant = node.types.iter().max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal));
     let is_object_id = dominant.map(|(t, _)| t == "objectId").unwrap_or(false);
     let is_array = node.types.contains_key("array");
     let is_array_of_object_ids = is_array
@@ -309,7 +325,7 @@ fn collect_object_id_fields_inner(
             .map(|item| {
                 item.types
                     .iter()
-                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                     .map(|(t, _)| t == "objectId")
                     .unwrap_or(false)
             })
@@ -344,7 +360,7 @@ fn id_is_object_id(shape: &CollectionShape) -> bool {
         .map(|c| {
             c.types
                 .iter()
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(t, _)| t == "objectId")
                 .unwrap_or(false)
         })

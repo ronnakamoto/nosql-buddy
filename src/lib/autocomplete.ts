@@ -428,7 +428,13 @@ function inferJsonContext(
 
 // ─── Public API ──────────────────────────────────────────────────────
 
-export type EditorContext = "filter" | "update" | "aggregate" | "insert" | "sql";
+export type EditorContext =
+  | "filter"
+  | "update"
+  | "aggregate"
+  | "insert"
+  | "sql"
+  | "shell";
 
 export function getSuggestions(
   text: string,
@@ -440,6 +446,12 @@ export function getSuggestions(
   const lowerPrefix = prefix.toLowerCase();
 
   const suggestions: Suggestion[] = [];
+
+  // The Shell editor sources completions from the backend (see
+  // `makeShellCompletionSource`); the static JSON/SQL engine never runs for it.
+  if (context === "shell") {
+    return { suggestions: [], replaceStart: offset, replaceEnd: offset };
+  }
 
   if (context === "sql") {
     // Word-based SQL completion that also handles multi-word keywords

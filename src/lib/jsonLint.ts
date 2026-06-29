@@ -27,28 +27,80 @@ const SINGLE_QUOTED = /(?<=[:{,[\s])(\s*)'((?:[^'\\]|\\.)*)'/g;
 /** Trailing comma before a closing `}` or `]`. */
 const TRAILING_COMMA = /,(\s*[}\]])/g;
 
+/** Replace the *contents* of every double-quoted string with spaces, keeping
+ *  the surrounding quotes and the overall length (and therefore every index)
+ *  intact. Scanning this masked copy means structural regexes never see commas,
+ *  colons, or apostrophes that live *inside* string values, which would
+ *  otherwise produce false "unquoted key" / "single-quoted string" hits on
+ *  perfectly valid JSON like `{ "note": "hello, world: foo" }`. */
+function maskStringContents(text: string): string {
+  const chars = text.split("");
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < chars.length; i++) {
+    const c = chars[i];
+    if (inString) {
+      if (escaped) {
+        chars[i] = " ";
+        escaped = false;
+      } else if (c === "\\") {
+        chars[i] = " ";
+        escaped = true;
+      } else if (c === '"') {
+        inString = false; // keep the closing quote
+      } else {
+        chars[i] = " ";
+      }
+    } else if (c === '"') {
+      inString = true; // keep the opening quote
+    }
+  }
+  return chars.join("");
+}
+
 /** Auto-fix known JSON syntax issues (unquoted keys, single quotes,
  *  trailing commas). Returns `null` if nothing was fixable. */
 export function autoFixJson(text: string): string | null {
   if (!text.trim()) return null;
-  let fixed = text;
+  // Locate every fix on a string-masked copy so we never rewrite content that
+  // lives inside a double-quoted string, then apply the edits to the original.
+  const masked = maskStringContents(text);
+  const edits: { from: number; to: number; insert: string }[] = [];
+  let m: RegExpExecArray | null;
 
   // 1. Quote bare keys.
-  fixed = fixed.replace(UNQUOTED_KEY, (match, key, spacing) => {
-    // Preserve the leading whitespace that was part of the match.
-    const leading = match.slice(0, match.indexOf(key));
-    return `${leading}"${key}"${spacing}:`;
-  });
+  UNQUOTED_KEY.lastIndex = 0;
+  while ((m = UNQUOTED_KEY.exec(masked)) !== null) {
+    const keyStart = m.index + m[0].indexOf(m[1]);
+    edits.push({ from: keyStart, to: keyStart + m[1].length, insert: `"${m[1]}"` });
+  }
 
   // 2. Replace single-quoted strings with double-quoted.
-  fixed = fixed.replace(SINGLE_QUOTED, (_match, spacing, content) => {
-    return `${spacing ?? ""}"${content}"`;
-  });
+  SINGLE_QUOTED.lastIndex = 0;
+  while ((m = SINGLE_QUOTED.exec(masked)) !== null) {
+    const quoteStart = m.index + (m[1]?.length ?? 0);
+    const quoteEnd = quoteStart + m[2].length + 2;
+    const content = text.slice(quoteStart + 1, quoteEnd - 1);
+    edits.push({ from: quoteStart, to: quoteEnd, insert: `"${content}"` });
+  }
 
   // 3. Remove trailing commas.
-  fixed = fixed.replace(TRAILING_COMMA, "$1");
+  TRAILING_COMMA.lastIndex = 0;
+  while ((m = TRAILING_COMMA.exec(masked)) !== null) {
+    edits.push({ from: m.index, to: m.index + 1, insert: "" });
+  }
 
-  return fixed !== text ? fixed : null;
+  if (edits.length === 0) return null;
+  edits.sort((a, b) => a.from - b.from);
+  let out = "";
+  let cursor = 0;
+  for (const e of edits) {
+    if (e.from < cursor) continue; // skip any overlapping edit defensively
+    out += text.slice(cursor, e.from) + e.insert;
+    cursor = e.to;
+  }
+  out += text.slice(cursor);
+  return out !== text ? out : null;
 }
 
 /** Lint a JSON text and return diagnostics with user-friendly messages.
@@ -57,11 +109,14 @@ export function lintJsonText(text: string): LintDiagnostic[] {
   if (!text.trim()) return [];
 
   const diagnostics: LintDiagnostic[] = [];
+  // Scan a string-masked copy so commas/colons/quotes inside string *values*
+  // can't masquerade as structural errors. Indices line up with the original.
+  const masked = maskStringContents(text);
 
   // Pass 1: unquoted keys — the most common MongoDB shell → JSON mistake.
   let m: RegExpExecArray | null;
   UNQUOTED_KEY.lastIndex = 0;
-  while ((m = UNQUOTED_KEY.exec(text)) !== null) {
+  while ((m = UNQUOTED_KEY.exec(masked)) !== null) {
     const keyStart = m.index + m[0].indexOf(m[1]);
     const keyEnd = keyStart + m[1].length;
     diagnostics.push({
@@ -74,7 +129,7 @@ export function lintJsonText(text: string): LintDiagnostic[] {
 
   // Pass 2: single-quoted strings.
   SINGLE_QUOTED.lastIndex = 0;
-  while ((m = SINGLE_QUOTED.exec(text)) !== null) {
+  while ((m = SINGLE_QUOTED.exec(masked)) !== null) {
     const quoteStart = m.index + (m[1]?.length ?? 0);
     const quoteEnd = quoteStart + m[2].length + 2; // include both quotes
     diagnostics.push({
@@ -87,7 +142,7 @@ export function lintJsonText(text: string): LintDiagnostic[] {
 
   // Pass 3: trailing commas.
   TRAILING_COMMA.lastIndex = 0;
-  while ((m = TRAILING_COMMA.exec(text)) !== null) {
+  while ((m = TRAILING_COMMA.exec(masked)) !== null) {
     diagnostics.push({
       from: m.index,
       to: m.index + 1,

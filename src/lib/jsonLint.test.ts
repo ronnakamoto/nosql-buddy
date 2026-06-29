@@ -208,6 +208,14 @@ describe("edge cases", () => {
     expect(lintJsonText('{ "url": "http://example.com" }')).toEqual([]);
   });
 
+  it("comma inside a quoted string value does not trigger false positive", () => {
+    expect(lintJsonText('{ "note": "hello, world" }')).toEqual([]);
+  });
+
+  it("single-quote inside a double-quoted string does not trigger false positive", () => {
+    expect(lintJsonText('{ "greeting": "it\'s a test" }')).toEqual([]);
+  });
+
   it("empty array", () => {
     expect(lintJsonText("[]")).toEqual([]);
   });
@@ -272,6 +280,12 @@ describe("autoFixJson", () => {
     const input = '{ $inc: { stock: -5 }, $set: { "specs.battery": 32 } }';
     const fixed = autoFixJson(input);
     expect(fixed).toBe('{ "$inc": { "stock": -5 }, "$set": { "specs.battery": 32 } }');
+  });
+
+  it("does not corrupt contents of double-quoted strings", () => {
+    const input = '{ note: "hello, world: it\'s fine" }';
+    const fixed = autoFixJson(input);
+    expect(fixed).toBe('{ "note": "hello, world: it\'s fine" }');
   });
 
   it("fixes single-quoted strings", () => {

@@ -12,7 +12,6 @@ import commands, {
 } from "./ipc/commands";
 import { onMenuAction } from "./ipc/events";
 import { ConnectionForm } from "./components/ConnectionForm";
-import { InfoPopover } from "./components/InfoPopover";
 import { CommandPalette, type CommandPaletteItem } from "./components/CommandPalette";
 import { QueryTab } from "./features/QueryTab";
 import { IndexTab } from "./features/IndexTab";
@@ -888,6 +887,59 @@ export default function App() {
     setActiveTabId(id);
   }, []);
 
+  const openAuditTab = useCallback(() => {
+    const id = `audit-${Date.now()}`;
+    setTabs((current) => [...current, { id, kind: "audit", auditMode: "dev", auditView: "chooser" }]);
+    setActiveTabId(id);
+  }, []);
+
+  const openJobsTab = useCallback(() => {
+    const id = `jobs-${Date.now()}`;
+    setTabs((current) => [
+      ...current,
+      {
+        id,
+        kind: "jobs",
+        connectionId: active?.handle.connectionId ?? null,
+        profileId: active?.handle.profileId ?? null,
+      },
+    ]);
+    setActiveTabId(id);
+  }, [active]);
+
+  const openTimelineTab = useCallback(() => {
+    const id = `timeline-${Date.now()}`;
+    setTabs((current) => [
+      ...current,
+      {
+        id,
+        kind: "timeline",
+        connectionId: active?.handle.connectionId ?? null,
+        profileId: active?.handle.profileId ?? null,
+        database: null,
+        collection: null,
+      },
+    ]);
+    setActiveTabId(id);
+  }, [active]);
+
+  // Connection-dependent launchers shared by the feature toolbar and the
+  // tab-bar "+" menu. They no-op without an active connection.
+  const handleNewQuery = useCallback(() => {
+    if (!active) return;
+    openQueryTab(active.handle.connectionId, active.databases[0]?.name ?? "admin", "new");
+  }, [active, openQueryTab]);
+
+  const handleNewShell = useCallback(() => {
+    if (!active) return;
+    openShellTab(active.handle.connectionId, active.databases[0]?.name ?? "admin");
+  }, [active, openShellTab]);
+
+  const handleNewDiagram = useCallback(() => {
+    if (!active) return;
+    openDiagramTab(active.handle.connectionId, active.databases[0]?.name ?? "admin");
+  }, [active, openDiagramTab]);
+
   const closeTab = useCallback((id: string) => {
     setTabs((current) => {
       const next = current.filter((t) => t.id !== id);
@@ -1090,40 +1142,68 @@ export default function App() {
       <header className="app__titlebar">
         <span className="app__titlebar-brand">NoSQLBuddy</span>
         <span className="kbd">v{info?.appVersion ?? "0.1.0"}</span>
-        <div
-          className={`app__titlebar-conn ${active ? "is-connected" : error ? "is-error" : ""}`}
-        >
-          <span className="dot" aria-hidden="true" />
-          {active ? (
-            <>
-              <span className="app__titlebar-conn-name">{active.handle.name}</span>
-              <span
-                className="app__titlebar-conn-topo"
-                title={`Connected to a ${active.handle.serverInfo?.topology ?? "unknown"} topology${
-                  active.handle.serverInfo?.topology === "replicaSet"
-                    ? " — a cluster with automatic failover and change streams"
-                    : active.handle.serverInfo?.topology === "sharded"
-                      ? " — a horizontally scaled cluster with multiple shards"
-                      : active.handle.serverInfo?.topology === "single"
-                        ? " — a standalone MongoDB instance"
-                        : ""
-                }`}
-              >
-                {active.handle.serverInfo?.topology ?? "unknown"}
-                <InfoPopover label="What is topology?" title="MongoDB topology">
-              <p><strong>Replica set</strong>: high availability with automatic failover.</p>
-              <p><strong>Sharded</strong>: distributes data across multiple servers for horizontal scaling.</p>
-              <p><strong>Single</strong>: a standalone MongoDB instance.</p>
-            </InfoPopover>
-              </span>
-            </>
-          ) : error ? (
-            <span className="app__titlebar-conn-error" title={error}>Connection error</span>
-          ) : (
-            <span className="app__titlebar-conn-idle">No connection</span>
-          )}
-        </div>
       </header>
+      <nav className="app__toolbar" aria-label="Open feature">
+        <div className="app__toolbar-group">
+          <button
+            className="toolbar-btn"
+            onClick={handleNewQuery}
+            disabled={!active}
+            title={active ? "Open a Query tab (CmdOrCtrl+T)" : "Connect to open a Query tab"}
+          >
+            <Search size={15} aria-hidden="true" />
+            <span>Query</span>
+          </button>
+          <button
+            className="toolbar-btn"
+            onClick={handleNewShell}
+            disabled={!active}
+            title={active ? "Open a Shell tab" : "Connect to open a Shell tab"}
+          >
+            <Terminal size={15} aria-hidden="true" />
+            <span>Shell</span>
+          </button>
+          <button
+            className="toolbar-btn"
+            onClick={handleNewDiagram}
+            disabled={!active}
+            title={active ? "Open a Data Model tab" : "Connect to open a Data Model tab"}
+          >
+            <Network size={15} aria-hidden="true" />
+            <span>Data Model</span>
+          </button>
+        </div>
+        <div className="app__toolbar-sep" role="separator" aria-hidden="true" />
+        <div className="app__toolbar-group">
+          <button
+            className="toolbar-btn"
+            onClick={openTimelineTab}
+            disabled={!active}
+            title={active ? "Open the Timeline" : "Connect to open the Timeline"}
+          >
+            <History size={15} aria-hidden="true" />
+            <span>Timeline</span>
+          </button>
+          <button
+            className="toolbar-btn"
+            onClick={openJobsTab}
+            disabled={!active}
+            title={active ? "Open Jobs (dump, restore, export, import)" : "Connect to open Jobs"}
+          >
+            <HardDrive size={15} aria-hidden="true" />
+            <span>Jobs</span>
+          </button>
+          <button
+            className="toolbar-btn"
+            onClick={openAuditTab}
+            disabled={!active}
+            title={active ? "Open the Audit Log" : "Connect to open the Audit Log"}
+          >
+            <ShieldCheck size={15} aria-hidden="true" />
+            <span>Audit</span>
+          </button>
+        </div>
+      </nav>
       <aside className="app__sidebar" aria-label="Connections">
         <ConnectionSwitcher
           active={active}
@@ -1289,47 +1369,12 @@ export default function App() {
           ))}
           {active && (
             <NewTabMenu
-              onNewQuery={() => openQueryTab(active.handle.connectionId, active.databases[0]?.name ?? "admin", "new")}
-              onNewShell={() => openShellTab(active.handle.connectionId, active.databases[0]?.name ?? "admin")}
-              onOpenAudit={() => {
-                const id = `audit-${Date.now()}`;
-                setTabs((prev) => [...prev, { id, kind: "audit", auditMode: "dev", auditView: "chooser" }]);
-                setActiveTabId(id);
-              }}
-              onOpenJobs={() => {
-                const id = `jobs-${Date.now()}`;
-                setTabs((prev) => [
-                  ...prev,
-                  {
-                    id,
-                    kind: "jobs",
-                    connectionId: active?.handle.connectionId ?? null,
-                    profileId: active?.handle.profileId ?? null,
-                  },
-                ]);
-                setActiveTabId(id);
-              }}
-              onOpenDiagram={() =>
-                openDiagramTab(
-                  active.handle.connectionId,
-                  active.databases[0]?.name ?? "admin",
-                )
-              }
-              onOpenTimeline={() => {
-                const id = `timeline-${Date.now()}`;
-                setTabs((prev) => [
-                  ...prev,
-                  {
-                    id,
-                    kind: "timeline",
-                    connectionId: active?.handle.connectionId ?? null,
-                    profileId: active?.handle.profileId ?? null,
-                    database: null,
-                    collection: null,
-                  },
-                ]);
-                setActiveTabId(id);
-              }}
+              onNewQuery={handleNewQuery}
+              onNewShell={handleNewShell}
+              onOpenAudit={openAuditTab}
+              onOpenJobs={openJobsTab}
+              onOpenDiagram={handleNewDiagram}
+              onOpenTimeline={openTimelineTab}
             />
           )}
         </div>

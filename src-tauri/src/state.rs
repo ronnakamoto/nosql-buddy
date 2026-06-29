@@ -60,11 +60,33 @@ impl AppState {
             shell_registry: ShellRegistry::new(),
             jobs: JobStore::with_path(jobs_path),
             timeline: Arc::new(TimelineStore::with_path(timeline_path)),
-            audit_log: Arc::new(AuditLog::new().expect("failed to create audit log")),
+            audit_log: Arc::new(build_audit_log()),
             change_streams: ChangeStreamRegistry::new(),
             epoch_manager: EpochManager::default(),
             attestation_manager: AttestationManager::default(),
             verification_store: VerificationStore::default(),
+        }
+    }
+}
+
+/// Construct the audit log, failing fast with an actionable, logged message.
+///
+/// `AuditLog::new()` only fails if the underlying Poseidon hasher cannot be
+/// initialized, which is a deterministic, environment-level fault (not a
+/// transient one), so retrying or shrinking the Merkle tree cannot recover it.
+/// The whole audit subsystem (and every command that records an audit event)
+/// depends on this handle, so we treat a failure as fatal — but we log the
+/// real cause first instead of surfacing a bare `expect` panic with no context.
+fn build_audit_log() -> AuditLog {
+    match AuditLog::new() {
+        Ok(log) => log,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "fatal: could not initialize the audit log (Poseidon/Merkle init failed); \
+                 the audit subsystem cannot start"
+            );
+            panic!("audit log initialization failed: {e}");
         }
     }
 }

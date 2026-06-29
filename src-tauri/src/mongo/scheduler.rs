@@ -106,15 +106,43 @@ async fn tick(
         // don't borrow original_id after moving it into the async block.
         if let Some(ref sched) = schedule {
             if sched.enabled {
-                let next = next_run_from_cron(&sched.cron);
-                state.jobs.update_next_run(&original_id, next.clone()).await;
-                state
-                    .jobs
-                    .log_info(&original_id, &format!("Next run scheduled at {next:?}"))
-                    .await;
+                match next_run_from_cron(&sched.cron) {
+                    Some(next) => {
+                        state
+                            .jobs
+                            .update_next_run(&original_id, Some(next.clone()))
+                            .await;
+                        state
+                            .jobs
+                            .log_info(&original_id, format!("Next run scheduled at {next}"))
+                            .await;
 
-                if let Some(retention) = sched.retention_count {
-                    retention_queue.push((original_id.clone(), retention));
+                        if let Some(retention) = sched.retention_count {
+                            retention_queue.push((original_id.clone(), retention));
+                        }
+                    }
+                    None => {
+                        // An invalid cron expression cannot yield a next
+                        // occurrence. Make this loud (warn log + job warning)
+                        // instead of silently clearing next_run_at and leaving
+                        // the user with a schedule that never fires again.
+                        tracing::warn!(
+                            job_id = %original_id,
+                            cron = %sched.cron,
+                            "invalid cron expression; schedule cannot advance and is paused"
+                        );
+                        state.jobs.update_next_run(&original_id, None).await;
+                        state
+                            .jobs
+                            .log_warn(
+                                &original_id,
+                                format!(
+                                    "Invalid cron expression {:?}; schedule paused until corrected",
+                                    sched.cron
+                                ),
+                            )
+                            .await;
+                    }
                 }
             }
         }

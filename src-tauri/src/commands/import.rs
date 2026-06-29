@@ -415,6 +415,28 @@ mod tests {
         assert_eq!(b.samples, vec!["x"]);
     }
 
+    #[test]
+    fn resolve_delimiter_defaults_and_validates() {
+        assert_eq!(resolve_delimiter(None).unwrap(), b',');
+        assert_eq!(resolve_delimiter(Some("\t")).unwrap(), b'\t');
+        assert!(matches!(resolve_delimiter(Some(",,")), Err(AppError::Validation(_))));
+        assert!(matches!(resolve_delimiter(Some("")), Err(AppError::Validation(_))));
+    }
+
+    #[test]
+    fn infer_fields_empty_slice_is_empty() {
+        assert!(infer_fields(&[]).is_empty());
+    }
+
+    #[test]
+    fn infer_fields_all_null_field_typed_null_not_nullable() {
+        // Present in every doc (so not "nullable") but always Bson::Null.
+        let fields = infer_fields(&[doc! { "a": null }, doc! { "a": null }]);
+        let a = fields.iter().find(|f| f.name == "a").unwrap();
+        assert_eq!(a.bson_type, "null");
+        assert!(!a.nullable, "present in all docs => not nullable");
+    }
+
     /// A test-only sink that collects written documents, mirroring how
     /// `CollectionSink` consumes the pipeline output.
     struct CollectSink {

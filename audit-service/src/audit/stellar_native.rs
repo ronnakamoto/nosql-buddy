@@ -12,7 +12,7 @@
 //!
 //! ## Transaction flow
 //!
-//! 1. Get account sequence number from Horizon API
+//! 1. Get account sequence number from the Soroban RPC ledger
 //! 2. Build a `Transaction` with an `InvokeHostFunction` operation
 //! 3. Simulate the transaction via Soroban RPC `simulateTransaction`
 //! 4. Attach the simulation's `SorobanTransactionData` to the transaction
@@ -25,7 +25,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use stellar_xdr::curr::{
     AccountId, ContractId, DecoratedSignature, Hash, HostFunction, InvokeContractArgs,
-    InvokeHostFunctionOp, Limits, Memo, MuxedAccount, Operation, OperationBody, Preconditions,
+    InvokeHostFunctionOp, LedgerEntryData, LedgerKey, LedgerKeyAccount, Limits, Memo, MuxedAccount,
+    Operation, OperationBody, Preconditions,
     PublicKey, ReadXdr, ScAddress, ScBytes, ScMap, ScMapEntry, ScString, ScSymbol, ScVal, ScVec,
     SequenceNumber, Signature, SignatureHint, SorobanAuthorizationEntry, SorobanTransactionData,
     Transaction, TransactionEnvelope, TransactionExt, TransactionSignaturePayload,
@@ -135,47 +136,99 @@ pub async fn fund_account(public_key_str: &str) -> AuditResult<()> {
 
 // ─── Account sequence lookup ──────────────────────────────────────────
 
-/// Get the account sequence number from the Horizon API.
-async fn get_account_sequence(horizon_url: &str, account_id: &str) -> AuditResult<i64> {
-    let url = format!("{}/accounts/{}", horizon_url, account_id);
+/// Get the account sequence number from the Soroban RPC ledger.
+///
+/// The sequence is read from the same RPC node that the transaction is
+/// submitted to (via `getLedgerEntries`), rather than from Horizon. Horizon is
+/// a separate service whose ledger ingestion lags behind the RPC's live state;
+/// reading the sequence from Horizon while submitting to the RPC causes
+/// `txBAD_SEQ` rejections whenever the account already has a transaction the
+/// RPC has applied but Horizon has not yet ingested.
+async fn get_account_sequence_from_rpc(
+    rpc_url: &str,
+    public_key: &[u8; 32],
+) -> AuditResult<i64> {
+    let ledger_key = LedgerKey::Account(LedgerKeyAccount {
+        account_id: AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(*public_key))),
+    });
+    let key_xdr = ledger_key
+        .to_xdr(Limits::none())
+        .map_err(|e| AuditError::Validation(format!("account ledger key XDR encoding failed: {e}")))?;
+    let key_b64 = base64::engine::general_purpose::STANDARD.encode(key_xdr);
+
     let client = reqwest::Client::new();
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getLedgerEntries",
+        "params": {
+            "keys": [key_b64]
+        }
+    });
+
     let resp = client
-        .get(&url)
+        .post(rpc_url)
+        .json(&request)
         .send()
         .await
-        .map_err(|e| AuditError::Validation(format!("Horizon request failed: {e}")))?;
+        .map_err(|e| AuditError::Validation(format!("RPC request failed: {e}")))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         return Err(AuditError::Validation(format!(
-            "Horizon returned error: {status} {text}"
+            "RPC returned error: {status} {text}"
         )));
     }
 
-    let account: HorizonAccount = resp
-        .json()
+    let body = resp
+        .text()
         .await
-        .map_err(|e| AuditError::Validation(format!("failed to parse Horizon response: {e}")))?;
+        .map_err(|e| AuditError::Validation(format!("failed to read RPC response body: {e}")))?;
 
-    Ok(account.sequence)
+    let result: JsonRpcResponse<GetLedgerEntriesResult> =
+        serde_json::from_str(&body).map_err(|e| {
+            AuditError::Validation(format!(
+                "failed to parse RPC response: {e}\nResponse body: {}",
+                &body[..body.len().min(2000)]
+            ))
+        })?;
+
+    if let Some(err) = result.error {
+        return Err(AuditError::Validation(format!(
+            "getLedgerEntries error: code {} message {}",
+            err.code, err.message
+        )));
+    }
+
+    let ledger_result = result
+        .result
+        .ok_or_else(|| AuditError::Validation("getLedgerEntries returned no result".to_string()))?;
+    let entry = ledger_result.entries.into_iter().next().ok_or_else(|| {
+        AuditError::Validation("signing account not found on Soroban RPC ledger".to_string())
+    })?;
+    let entry_xdr = base64::engine::general_purpose::STANDARD
+        .decode(&entry.xdr)
+        .map_err(|e| AuditError::Validation(format!("base64 decode account ledger entry: {e}")))?;
+    let ledger_entry = LedgerEntryData::from_xdr(&entry_xdr, Limits::none())
+        .map_err(|e| AuditError::Validation(format!("decode account ledger entry: {e}")))?;
+
+    match ledger_entry {
+        LedgerEntryData::Account(account_entry) => Ok(account_entry.seq_num.0),
+        _ => Err(AuditError::Validation(
+            "RPC account ledger entry returned non-account data".to_string(),
+        )),
+    }
 }
 
 #[derive(Deserialize)]
-struct HorizonAccount {
-    /// Horizon returns sequence as a JSON string (e.g. "14035291698364416"),
-    /// not a number. Use a custom deserializer to parse it.
-    #[serde(deserialize_with = "deserialize_sequence_string")]
-    sequence: i64,
+struct GetLedgerEntriesResult {
+    entries: Vec<GetLedgerEntry>,
 }
 
-fn deserialize_sequence_string<'de, D>(deserializer: D) -> Result<i64, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de;
-    let s: std::borrow::Cow<'de, str> = serde::Deserialize::deserialize(deserializer)?;
-    s.parse::<i64>().map_err(de::Error::custom)
+#[derive(Deserialize)]
+struct GetLedgerEntry {
+    xdr: String,
 }
 
 /// Deserialize an optional integer that may be encoded as a JSON string.
@@ -554,7 +607,6 @@ fn sign_transaction(
 /// * `metadata` - arbitrary string stored on-chain with the commitment
 /// * `keypair` - the Stellar keypair to sign with
 /// * `rpc_url` - Soroban RPC endpoint (e.g. `TESTNET_RPC_URL`)
-/// * `horizon_url` - Horizon API endpoint for account lookups
 /// * `contract_id` - hex contract ID (32 bytes = 64 hex chars)
 /// * `network_passphrase` - network passphrase (e.g. `TESTNET_PASSPHRASE`)
 pub async fn commit_root_native(
@@ -562,13 +614,11 @@ pub async fn commit_root_native(
     metadata: &str,
     keypair: &StellarKeypair,
     rpc_url: &str,
-    horizon_url: &str,
     contract_id: &str,
     network_passphrase: &str,
 ) -> AuditResult<CommitResult> {
-    // 1. Get account sequence number from Horizon.
-    let account_id = keypair.account_id();
-    let sequence = get_account_sequence(horizon_url, &account_id).await?;
+    // 1. Get account sequence number from the Soroban RPC ledger.
+    let sequence = get_account_sequence_from_rpc(rpc_url, &keypair.public_bytes()).await?;
 
     // 2. Build ScVal args: root (Bytes), metadata (String).
     let root_bytes = hex::decode(root_hex)
@@ -702,12 +752,10 @@ pub async fn commit_root_with_oplog_native(
     metadata: &str,
     keypair: &StellarKeypair,
     rpc_url: &str,
-    horizon_url: &str,
     contract_id: &str,
     network_passphrase: &str,
 ) -> AuditResult<CommitResult> {
-    let account_id = keypair.account_id();
-    let sequence = get_account_sequence(horizon_url, &account_id).await?;
+    let sequence = get_account_sequence_from_rpc(rpc_url, &keypair.public_bytes()).await?;
 
     let root_bytes = hex::decode(root_hex)
         .map_err(|e| AuditError::Validation(format!("invalid root hex: {e}")))?;
@@ -840,12 +888,11 @@ pub async fn attest_oplog_native(
     sequence: u64,
     signature_hex: &str,
     rpc_url: &str,
-    horizon_url: &str,
     contract_id: &str,
     network_passphrase: &str,
 ) -> AuditResult<()> {
-    let account_id = attester_keypair.account_id();
-    let acct_sequence = get_account_sequence(horizon_url, &account_id).await?;
+    let acct_sequence =
+        get_account_sequence_from_rpc(rpc_url, &attester_keypair.public_bytes()).await?;
 
     // Build the attester Address ScVal from the keypair's public key.
     let attester_address_scval = ScVal::Address(ScAddress::Account(AccountId(
@@ -958,13 +1005,11 @@ pub async fn verify_inclusion_native(
     vk_ic_hex: &[String],
     keypair: &StellarKeypair,
     rpc_url: &str,
-    horizon_url: &str,
     contract_id: &str,
     network_passphrase: &str,
 ) -> AuditResult<VerifyInclusionResult> {
-    // 1. Get account sequence number from Horizon.
-    let account_id = keypair.account_id();
-    let sequence = get_account_sequence(horizon_url, &account_id).await?;
+    // 1. Get account sequence number from the Soroban RPC ledger.
+    let sequence = get_account_sequence_from_rpc(rpc_url, &keypair.public_bytes()).await?;
 
     // 2. Build ScVal args: root (Bytes), proof (Map), vk (Map).
     let root_bytes = hex::decode(root_hex)
@@ -1552,12 +1597,10 @@ pub async fn get_oplog_attestations_native(
                     // The easiest way is to re-encode it as Strkey.
                     if let ScVal::Address(ScAddress::Account(account_id)) = &kv.val {
                         // AccountId wraps PublicKey::PublicKeyTypeEd25519(Uint256).
-                        if let stellar_xdr::curr::PublicKey::PublicKeyTypeEd25519(key) =
-                            &account_id.0
-                        {
-                            // Stellar G-address strkey version byte is 0x30 (48).
-                            attesters.push(encode_strkey(0x30, &key.0));
-                        }
+                        let stellar_xdr::curr::PublicKey::PublicKeyTypeEd25519(key) =
+                            &account_id.0;
+                        // Stellar G-address strkey version byte is 0x30 (48).
+                        attesters.push(encode_strkey(0x30, &key.0));
                     }
                 }
             }
@@ -1662,11 +1705,9 @@ pub async fn initialize_contract_native(
     contract_id: &str,
     admin_keypair: &StellarKeypair,
     rpc_url: &str,
-    horizon_url: &str,
     network_passphrase: &str,
 ) -> AuditResult<()> {
-    let account_id = admin_keypair.account_id();
-    let sequence = get_account_sequence(horizon_url, &account_id).await?;
+    let sequence = get_account_sequence_from_rpc(rpc_url, &admin_keypair.public_bytes()).await?;
 
     let admin_scval = ScVal::Address(ScAddress::Account(AccountId(
         PublicKey::PublicKeyTypeEd25519(Uint256(admin_keypair.public_bytes())),
@@ -1709,11 +1750,9 @@ pub async fn authorize_attester_native(
     attester_address: &str,
     attester_ed25519_pubkey_hex: &str,
     rpc_url: &str,
-    horizon_url: &str,
     network_passphrase: &str,
 ) -> AuditResult<()> {
-    let account_id = admin_keypair.account_id();
-    let sequence = get_account_sequence(horizon_url, &account_id).await?;
+    let sequence = get_account_sequence_from_rpc(rpc_url, &admin_keypair.public_bytes()).await?;
 
     // Decode the attester's G... address to public key bytes.
     let attester_pubkey_bytes = decode_account_id_strkey(attester_address).ok_or_else(|| {

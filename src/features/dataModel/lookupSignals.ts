@@ -51,10 +51,12 @@ export function extractLookupSignals(
     if (!k.endsWith("::aggregate")) continue;
 
     // Key shape: query-history::<conn>::<db>.<coll>::aggregate
-    const middle = k.slice(prefix.length, -"::aggregate".length);
-    const dot = middle.lastIndexOf(".");
-    if (dot < 0) continue;
-    const fromCollection = middle.slice(0, dot);
+    // `prefix` already consumes the "<db>." segment, so what remains between
+    // it and the "::aggregate" suffix is exactly the collection name (which
+    // may itself contain dots, e.g. "system.views"). The previous code ran a
+    // `lastIndexOf(".")` guard here that dropped every normal (dotless)
+    // collection and truncated dotted ones, making this signal dead.
+    const fromCollection = k.slice(prefix.length, -"::aggregate".length);
     if (!fromCollection) continue;
 
     const raw = window.localStorage.getItem(k);

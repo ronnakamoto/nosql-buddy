@@ -260,7 +260,6 @@ async fn attest_epoch(
             sequence,
             &signature_hex,
             &chain.rpc_url,
-            &chain.horizon_url,
             &chain.contract_id,
             &chain.passphrase,
         )

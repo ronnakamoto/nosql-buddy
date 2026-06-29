@@ -117,7 +117,7 @@ pub async fn preview_operation(
     let matched_count = coll
         .count_documents(filter.clone())
         .await
-        .map_err(|e| AppError::Mongo(e.to_string()))?;
+        .map_err(AppError::mongo)?;
 
     // Capture enough documents for both display and rollback generation.
     let capture_limit = matched_count.min(ROLLBACK_CAPTURE_LIMIT).max(display_limit) as i64;
@@ -125,9 +125,9 @@ pub async fn preview_operation(
         .find(filter.clone())
         .limit(capture_limit)
         .await
-        .map_err(|e| AppError::Mongo(e.to_string()))?;
+        .map_err(AppError::mongo)?;
     let mut captured_docs: Vec<Document> = Vec::new();
-    while let Some(d) = cursor.try_next().await.map_err(|e| AppError::Mongo(e.to_string()))? {
+    while let Some(d) = cursor.try_next().await.map_err(AppError::mongo)? {
         captured_docs.push(d);
     }
 
@@ -401,7 +401,7 @@ fn unset_nested(doc: &mut Document, path: &str) -> AppResult<()> {
 
 fn inc_nested(doc: &mut Document, path: &str, delta: &Bson) -> AppResult<()> {
     let current = get_nested_value(doc, path).unwrap_or(Bson::Null);
-    let new_value = numeric_add(&current, delta).ok_or_else(|| {
+    let new_value = numeric_add(&current, delta)?.ok_or_else(|| {
         AppError::Validation(format!("cannot $inc non-numeric field '{}'", path))
     })?;
     set_nested(doc, path, new_value)
@@ -409,7 +409,7 @@ fn inc_nested(doc: &mut Document, path: &str, delta: &Bson) -> AppResult<()> {
 
 fn mul_nested(doc: &mut Document, path: &str, factor: &Bson) -> AppResult<()> {
     let current = get_nested_value(doc, path).unwrap_or(Bson::Null);
-    let new_value = numeric_mul(&current, factor).ok_or_else(|| {
+    let new_value = numeric_mul(&current, factor)?.ok_or_else(|| {
         AppError::Validation(format!("cannot $mul non-numeric field '{}'", path))
     })?;
     set_nested(doc, path, new_value)
@@ -469,12 +469,13 @@ fn pull_from_array(doc: &mut Document, path: &str, value: Bson) -> AppResult<()>
     Ok(())
 }
 
-fn numeric_add(a: &Bson, b: &Bson) -> Option<Bson> {
-    match (a, b) {
-        (Bson::Int32(x), Bson::Int32(y)) => Some(Bson::Int32(x + y)),
-        (Bson::Int32(x), Bson::Int64(y)) => Some(Bson::Int64(i64::from(*x) + y)),
-        (Bson::Int64(x), Bson::Int32(y)) => Some(Bson::Int64(x + i64::from(*y))),
-        (Bson::Int64(x), Bson::Int64(y)) => Some(Bson::Int64(x + y)),
+fn numeric_add(a: &Bson, b: &Bson) -> AppResult<Option<Bson>> {
+    let err = || AppError::Validation("integer overflow during update simulation".into());
+    let res = match (a, b) {
+        (Bson::Int32(x), Bson::Int32(y)) => Some(Bson::Int32(x.checked_add(*y).ok_or_else(err)?)),
+        (Bson::Int32(x), Bson::Int64(y)) => Some(Bson::Int64(i64::from(*x).checked_add(*y).ok_or_else(err)?)),
+        (Bson::Int64(x), Bson::Int32(y)) => Some(Bson::Int64(x.checked_add(i64::from(*y)).ok_or_else(err)?)),
+        (Bson::Int64(x), Bson::Int64(y)) => Some(Bson::Int64(x.checked_add(*y).ok_or_else(err)?)),
         (Bson::Double(x), Bson::Double(y)) => Some(Bson::Double(x + y)),
         (Bson::Double(x), Bson::Int32(y)) => Some(Bson::Double(x + f64::from(*y))),
         (Bson::Double(x), Bson::Int64(y)) => Some(Bson::Double(x + *y as f64)),
@@ -482,15 +483,17 @@ fn numeric_add(a: &Bson, b: &Bson) -> Option<Bson> {
         (Bson::Null, Bson::Int64(y)) => Some(Bson::Int64(*y)),
         (Bson::Null, Bson::Double(y)) => Some(Bson::Double(*y)),
         _ => None,
-    }
+    };
+    Ok(res)
 }
 
-fn numeric_mul(a: &Bson, b: &Bson) -> Option<Bson> {
-    match (a, b) {
-        (Bson::Int32(x), Bson::Int32(y)) => Some(Bson::Int32(x * y)),
-        (Bson::Int32(x), Bson::Int64(y)) => Some(Bson::Int64(i64::from(*x) * y)),
-        (Bson::Int64(x), Bson::Int32(y)) => Some(Bson::Int64(x * i64::from(*y))),
-        (Bson::Int64(x), Bson::Int64(y)) => Some(Bson::Int64(x * y)),
+fn numeric_mul(a: &Bson, b: &Bson) -> AppResult<Option<Bson>> {
+    let err = || AppError::Validation("integer overflow during update simulation".into());
+    let res = match (a, b) {
+        (Bson::Int32(x), Bson::Int32(y)) => Some(Bson::Int32(x.checked_mul(*y).ok_or_else(err)?)),
+        (Bson::Int32(x), Bson::Int64(y)) => Some(Bson::Int64(i64::from(*x).checked_mul(*y).ok_or_else(err)?)),
+        (Bson::Int64(x), Bson::Int32(y)) => Some(Bson::Int64(x.checked_mul(i64::from(*y)).ok_or_else(err)?)),
+        (Bson::Int64(x), Bson::Int64(y)) => Some(Bson::Int64(x.checked_mul(*y).ok_or_else(err)?)),
         (Bson::Double(x), Bson::Double(y)) => Some(Bson::Double(x * y)),
         (Bson::Double(x), Bson::Int32(y)) => Some(Bson::Double(x * f64::from(*y))),
         (Bson::Double(x), Bson::Int64(y)) => Some(Bson::Double(x * *y as f64)),
@@ -498,7 +501,8 @@ fn numeric_mul(a: &Bson, b: &Bson) -> Option<Bson> {
         (Bson::Null, Bson::Int64(_)) => Some(Bson::Int64(0)),
         (Bson::Null, Bson::Double(_)) => Some(Bson::Double(0.0)),
         _ => None,
-    }
+    };
+    Ok(res)
 }
 
 // ─── Field diff ───────────────────────────────────────────────────────────────
@@ -992,6 +996,27 @@ mod tests {
         // $push adds "b"; $addToSet does not re-add "a"
         assert_eq!(tags.len(), 2);
     }
+
+    #[test]
+    fn simulate_update_inc_overflow_is_validation_error_not_panic() {
+        // Regression: unchecked `x + y` panicked in debug / wrapped in release,
+        // producing a wrong "after" preview the user might approve.
+        let doc = doc! { "c": i32::MAX };
+        let update = doc! { "$inc": { "c": 1i32 } };
+        let mut warnings = Vec::new();
+        let err = simulate_update(&doc, &update, &mut warnings).unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn simulate_update_mul_overflow_is_validation_error_not_panic() {
+        let doc = doc! { "c": i64::MAX };
+        let update = doc! { "$mul": { "c": 2i64 } };
+        let mut warnings = Vec::new();
+        let err = simulate_update(&doc, &update, &mut warnings).unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)), "got {err:?}");
+    }
+
 
     #[test]
     fn simulate_update_unknown_operator_adds_warning() {

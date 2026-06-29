@@ -204,11 +204,11 @@ pub async fn run_export(request: &ExportRequest, state: &AppState, app: &tauri::
     // Resolve path placeholders against the connection context before
     // validation, so an invalid expanded path is still rejected by
     // `validate_target_path`. Clipboard exports have no path to resolve.
-    let profile_name = state
-        .profiles
-        .get(app, &request.connection_id)
-        .map(|p| p.name)
-        .unwrap_or_default();
+    // The connection entry already carries the profile's display name. Looking
+    // it up via `profiles.get(connection_id)` was wrong: `profiles.get` matches
+    // on the *profile id*, not the runtime connection UUID, so it always failed
+    // and the `${profile}` placeholder silently expanded to an empty string.
+    let profile_name = entry.name.clone();
     let resolved_destination = resolve_destination_placeholders(
         &request.destination,
         &PlaceholderContext {
@@ -596,6 +596,43 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::AtomicBool;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn parse_documents_accepts_object_array() {
+        let docs = parse_documents(Some(r#"[{"a":1},{"b":2}]"#)).expect("ok");
+        assert_eq!(docs.len(), 2);
+        assert!(docs[0].contains_key("a"));
+        assert!(docs[1].contains_key("b"));
+    }
+
+    #[test]
+    fn parse_documents_empty_array_is_empty_vec() {
+        assert!(parse_documents(Some("[]")).expect("ok").is_empty());
+    }
+
+    #[test]
+    fn parse_documents_rejects_none() {
+        assert!(matches!(parse_documents(None), Err(AppError::Validation(_))));
+    }
+
+    #[test]
+    fn parse_documents_rejects_non_array() {
+        let err = parse_documents(Some("{}")).unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)), "{err:?}");
+    }
+
+    #[test]
+    fn parse_documents_rejects_malformed_json() {
+        assert!(parse_documents(Some("[")).is_err());
+    }
+
+    #[test]
+    fn resolve_delimiter_defaults_and_validates() {
+        assert_eq!(resolve_delimiter(None).unwrap(), b',');
+        assert_eq!(resolve_delimiter(Some("|")).unwrap(), b'|');
+        assert!(matches!(resolve_delimiter(Some(";;")), Err(AppError::Validation(_))));
+        assert!(matches!(resolve_delimiter(Some("")), Err(AppError::Validation(_))));
+    }
 
     fn test_job_context(job_id: &str) -> JobContext {
         JobContext {

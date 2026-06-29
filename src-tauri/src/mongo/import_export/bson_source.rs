@@ -11,6 +11,11 @@ use std::path::Path;
 use crate::error::{AppError, AppResult};
 use super::core::{DocumentSource, RowResult};
 
+/// Upper bound on a single BSON document's declared length. MongoDB caps
+/// documents at 16 MiB; we allow 64 MiB of headroom but reject anything larger
+/// so a corrupt/hostile length prefix can't request a giant allocation.
+const MAX_BSON_DOC_LEN: usize = 64 * 1024 * 1024;
+
 enum BsonReader {
     Plain(BufReader<File>),
     Gzip(flate2::read::GzDecoder<BufReader<File>>),
@@ -65,9 +70,21 @@ impl DocumentSource for BsonSource {
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
             Err(e) => return Err(AppError::Io(e.to_string())),
         }
-        let len = i32::from_le_bytes(len_bytes) as usize;
-        if len < 5 {
-            return Err(AppError::Validation("invalid BSON document length".into()));
+        // The length prefix is a *signed* i32 in BSON. Validate it on the signed
+        // value first: a negative length (high bit set) would otherwise cast to a
+        // huge `usize`, slip past a `< 5` check, and trigger a multi-gigabyte
+        // `vec![0u8; len]` allocation (OOM / abort) on a malformed or hostile file.
+        let len_i32 = i32::from_le_bytes(len_bytes);
+        if len_i32 < 5 {
+            return Err(AppError::Validation(format!(
+                "invalid BSON document length: {len_i32}"
+            )));
+        }
+        let len = len_i32 as usize;
+        if len > MAX_BSON_DOC_LEN {
+            return Err(AppError::Validation(format!(
+                "BSON document length {len} exceeds maximum supported size of {MAX_BSON_DOC_LEN} bytes"
+            )));
         }
         let mut buf = vec![0u8; len];
         buf[0..4].copy_from_slice(&len_bytes);
@@ -180,6 +197,57 @@ mod tests {
         let mut source = BsonSource::from_path(&path).unwrap();
         assert_source_reads_docs(&mut source, &docs).await;
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn write_raw(path: &Path, bytes: &[u8]) {
+        use std::io::Write;
+        let mut file = std::fs::File::create(path).unwrap();
+        file.write_all(bytes).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_negative_length_prefix_without_oom() {
+        // 0xFFFFFFFF is -1 as i32; the old `as usize` cast made this ~18 EiB.
+        let path = std::env::temp_dir().join(format!("bad-neg-{}.bson", uuid::Uuid::new_v4()));
+        write_raw(&path, &[0xFF, 0xFF, 0xFF, 0xFF]);
+        let mut source = BsonSource::from_path(&path).unwrap();
+        let err = source.next_doc().await.unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)), "got {err:?}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn rejects_length_below_minimum() {
+        // A 5-byte minimum BSON doc is `\x05\x00\x00\x00\x00`; len=4 is invalid.
+        let path = std::env::temp_dir().join(format!("bad-small-{}.bson", uuid::Uuid::new_v4()));
+        write_raw(&path, &4i32.to_le_bytes());
+        let mut source = BsonSource::from_path(&path).unwrap();
+        let err = source.next_doc().await.unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)), "got {err:?}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn rejects_absurdly_large_length() {
+        let path = std::env::temp_dir().join(format!("bad-huge-{}.bson", uuid::Uuid::new_v4()));
+        // Just over the 64 MiB cap. Must error, not allocate.
+        let huge = (MAX_BSON_DOC_LEN as i32).wrapping_add(1);
+        write_raw(&path, &huge.to_le_bytes());
+        let mut source = BsonSource::from_path(&path).unwrap();
+        let err = source.next_doc().await.unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)), "got {err:?}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn truncated_document_body_errors() {
+        // Valid length prefix (20) but no body bytes follow → read_exact fails.
+        let path = std::env::temp_dir().join(format!("bad-trunc-{}.bson", uuid::Uuid::new_v4()));
+        write_raw(&path, &20i32.to_le_bytes());
+        let mut source = BsonSource::from_path(&path).unwrap();
+        let err = source.next_doc().await.unwrap_err();
+        assert!(matches!(err, AppError::Io(_)), "got {err:?}");
         let _ = std::fs::remove_file(&path);
     }
 }

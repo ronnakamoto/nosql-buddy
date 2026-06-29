@@ -236,7 +236,7 @@ pub async fn shell_autocomplete(
                 .client
                 .list_database_names()
                 .await
-                .map_err(|e| AppError::Mongo(e.to_string()))?;
+                .map_err(AppError::mongo)?;
             filter_by_prefix(names.iter().map(|s| s.as_str()), &prefix)
                 .into_iter()
                 .map(|mut item| {
@@ -251,7 +251,7 @@ pub async fn shell_autocomplete(
                 .database(&active_db)
                 .list_collection_names()
                 .await
-                .map_err(|e| AppError::Mongo(e.to_string()))?;
+                .map_err(AppError::mongo)?;
             filter_by_prefix(names.iter().map(|s| s.as_str()), &prefix)
                 .into_iter()
                 .map(|mut item| {
@@ -281,11 +281,11 @@ pub async fn shell_autocomplete(
             let cursor = coll
                 .aggregate(vec![bson::doc! { "$sample": { "size": 100_i64 } }])
                 .await
-                .map_err(|e| AppError::Mongo(e.to_string()))?;
+                .map_err(AppError::mongo)?;
             let docs: Vec<bson::Document> = cursor
                 .try_collect()
                 .await
-                .map_err(|e| AppError::Mongo(e.to_string()))?;
+                .map_err(AppError::mongo)?;
             let report = compute_schema_report(&docs);
             let field_names: Vec<String> = report.fields.iter().map(|f| f.name.clone()).collect();
             filter_by_prefix(field_names.iter().map(|s| s.as_str()), &prefix)

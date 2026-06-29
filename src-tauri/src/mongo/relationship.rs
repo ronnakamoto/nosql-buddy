@@ -248,7 +248,11 @@ pub fn detect_relationships(
     let join_edges = detect_many_to_many(&edges, shapes);
     edges.extend(join_edges);
 
-    edges.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+    edges.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     edges
 }
 
@@ -319,7 +323,7 @@ fn examine_field(
     collection: &str,
     out: &mut BTreeMap<(String, String), Candidate>,
 ) {
-    let dominant = node.types.iter().max_by(|a, b| a.1.partial_cmp(b.1).unwrap());
+    let dominant = node.types.iter().max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal));
     let is_object_id = dominant.map(|(t, _)| t == "objectId").unwrap_or(false);
     let is_array = node.types.contains_key("array");
     let is_array_of_object_ids = is_array
@@ -329,7 +333,7 @@ fn examine_field(
             .map(|item| {
                 item.types
                     .iter()
-                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                     .map(|(t, _)| t == "objectId")
                     .unwrap_or(false)
             })
@@ -480,7 +484,7 @@ fn build_edge(
     if let Some(best_match) = cand.object_id_matches.iter().max_by(|a, b| {
         a.match_ratio
             .partial_cmp(&b.match_ratio)
-            .unwrap()
+            .unwrap_or(std::cmp::Ordering::Equal)
     }) {
         signals.push(RelationshipSignal {
             kind: SignalKind::ObjectIdMatch,

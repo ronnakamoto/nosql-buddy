@@ -27,5 +27,7 @@ export function languageLabel(lang: Language): string {
       return "Ruby";
     case "shell":
       return "mongo shell";
+    default:
+      return lang;
   }
 }

@@ -177,7 +177,9 @@ pub async fn restore_database(
                 let _ = collection.drop().await;
             }
             ConflictStrategy::Skip => {
-                let count = collection.estimated_document_count().await.unwrap_or(1);
+                // Propagate count errors instead of defaulting to `1`, which would
+                // silently skip restoring a collection when the count actually failed.
+                let count = collection.estimated_document_count().await?;
                 if count > 0 {
                     let msg = format!("Skipping {}: already exists", mapping.target);
                     state.jobs.log_info(&request.job_id, &msg).await;

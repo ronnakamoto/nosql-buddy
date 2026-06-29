@@ -100,9 +100,9 @@ function EpochRow({
           {status === "filling" && onSeal && (
             <Button
               variant="ghost"
+              size="sm"
               loading={sealLoading}
               onClick={onSeal}
-              style={{ padding: "2px 8px", fontSize: "var(--font-size-xs)" }}
             >
               Seal Now
             </Button>
@@ -110,9 +110,9 @@ function EpochRow({
           {status === "sealed" && onCommit && (
             <Button
               variant="secondary"
+              size="sm"
               loading={commitLoading}
               onClick={onCommit}
-              style={{ padding: "2px 8px", fontSize: "var(--font-size-xs)" }}
             >
               Commit
             </Button>
@@ -120,9 +120,9 @@ function EpochRow({
           {status === "committed" && onVerify && (
             <Button
               variant="ghost"
+              size="sm"
               loading={verifyLoading}
               onClick={onVerify}
-              style={{ padding: "2px 8px", fontSize: "var(--font-size-xs)" }}
             >
               Verify
             </Button>

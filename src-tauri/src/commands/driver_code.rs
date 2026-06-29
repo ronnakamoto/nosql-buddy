@@ -68,3 +68,67 @@ fn parse_language(s: &str) -> AppResult<Language> {
         other => Err(AppError::Validation(format!("unknown language: {other}"))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_language_accepts_all_six_kebab_names() {
+        for name in ["node-js", "python", "java", "c-sharp", "ruby", "shell"] {
+            assert!(parse_language(name).is_ok(), "should accept {name}");
+        }
+    }
+
+    #[test]
+    fn parse_language_rejects_unknown_and_wrong_case() {
+        for bad in ["", "NodeJs", "javascript", "Python", "rust", "node_js"] {
+            let err = parse_language(bad).unwrap_err();
+            assert!(matches!(err, AppError::Validation(_)), "{bad} -> {err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn generate_pipeline_code_embeds_uri_and_falls_back_to_placeholder() {
+        // Non-empty URI is embedded in the snippet.
+        let req = GeneratePipelineCodeRequest {
+            database: "shop".into(),
+            collection: "orders".into(),
+            pipeline: vec![serde_json::json!({ "$match": { "active": true } })],
+            language: "node-js".into(),
+            profile_name: Some("Prod".into()),
+            auth_mechanism: None,
+            uri: "mongodb://example.host:27017".into(),
+        };
+        let code = generate_pipeline_code(req).await.expect("ok");
+        assert!(code.contains("example.host"), "snippet must embed the URI: {code}");
+
+        // Empty URI falls back to the localhost placeholder.
+        let req = GeneratePipelineCodeRequest {
+            database: "shop".into(),
+            collection: "orders".into(),
+            pipeline: vec![],
+            language: "python".into(),
+            profile_name: None,
+            auth_mechanism: None,
+            uri: String::new(),
+        };
+        let code = generate_pipeline_code(req).await.expect("ok");
+        assert!(code.contains("mongodb://127.0.0.1:27017"), "fallback placeholder: {code}");
+    }
+
+    #[tokio::test]
+    async fn generate_pipeline_code_rejects_unknown_language() {
+        let req = GeneratePipelineCodeRequest {
+            database: "d".into(),
+            collection: "c".into(),
+            pipeline: vec![],
+            language: "cobol".into(),
+            profile_name: None,
+            auth_mechanism: None,
+            uri: String::new(),
+        };
+        let err = generate_pipeline_code(req).await.unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)), "{err:?}");
+    }
+}

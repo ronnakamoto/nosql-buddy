@@ -550,7 +550,6 @@ async fn attest_epoch_internal(
             sequence,
             &signature_hex,
             &chain.rpc_url,
-            &chain.horizon_url,
             &chain.contract_id,
             &chain.passphrase,
         )
@@ -677,7 +676,6 @@ async fn publish_and_commit(
             &metadata,
             kp,
             &chain.rpc_url,
-            &chain.horizon_url,
             &chain.contract_id,
             &chain.passphrase,
         )
@@ -689,7 +687,6 @@ async fn publish_and_commit(
             &metadata,
             kp,
             &chain.rpc_url,
-            &chain.horizon_url,
             &chain.contract_id,
             &chain.passphrase,
         )
@@ -918,7 +915,6 @@ async fn verify_onchain(
         &req.vk_ic,
         kp,
         &chain.rpc_url,
-        &chain.horizon_url,
         &chain.contract_id,
         &chain.passphrase,
     )

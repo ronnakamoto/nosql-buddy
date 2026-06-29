@@ -572,7 +572,7 @@ fn install_host(ctx: &mut Context) {
                 database
                     .run_command(cmd_doc)
                     .await
-                    .map_err(|e| AppError::Mongo(e.to_string()))
+                    .map_err(AppError::mongo)
             })
         });
         match result {
@@ -673,7 +673,7 @@ fn install_db_stub(ctx: &mut Context) {
                 database
                     .run_command(cmd_doc)
                     .await
-                    .map_err(|e| AppError::Mongo(e.to_string()))
+                    .map_err(AppError::mongo)
             })
         });
         match result {
@@ -915,11 +915,11 @@ fn dispatch_sync(
                     .find(filter)
                     .limit(50)
                     .await
-                    .map_err(|e| AppError::Mongo(e.to_string()))?;
+                    .map_err(AppError::mongo)?;
                 cursor
                     .try_collect()
                     .await
-                    .map_err(|e| AppError::Mongo(e.to_string()))
+                    .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
             SHELL_LAST_COLLECTION.with(|c| *c.borrow_mut() = Some(coll.to_string()));
@@ -946,7 +946,7 @@ fn dispatch_sync(
                     .collection::<Document>(coll)
                     .find_one(filter)
                     .await
-                    .map_err(|e| AppError::Mongo(e.to_string()))
+                    .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
             SHELL_LAST_COLLECTION.with(|c| *c.borrow_mut() = Some(coll.to_string()));
@@ -970,7 +970,7 @@ fn dispatch_sync(
                     .collection::<Document>(coll)
                     .count_documents(filter)
                     .await
-                    .map_err(|e| AppError::Mongo(e.to_string()))
+                    .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
             Ok(JsValue::from(n as f64))
@@ -1007,14 +1007,14 @@ fn dispatch_sync(
                     .collection::<Document>(coll)
                     .aggregate(pipeline)
                     .await
-                    .map_err(|e| AppError::Mongo(e.to_string()))
+                    .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
             let docs: Vec<Document> = runtime_block_on(async move {
                 cursor
                     .try_collect()
                     .await
-                    .map_err(|e| AppError::Mongo(e.to_string()))
+                    .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
             let arr = JsArray::new(ctx);
@@ -1049,7 +1049,7 @@ fn dispatch_sync(
                     .collection::<Document>(coll)
                     .distinct(field, filter)
                     .await
-                    .map_err(|e| AppError::Mongo(e.to_string()))
+                    .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
             let arr = JsArray::new(ctx);
@@ -1075,7 +1075,7 @@ fn dispatch_sync(
                     .collection::<Document>(coll)
                     .insert_one(doc_arg)
                     .await
-                    .map_err(|e| AppError::Mongo(e.to_string()))
+                    .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
             try_audit(|audit| {
@@ -1135,7 +1135,7 @@ fn dispatch_sync(
                     .collection::<Document>(coll)
                     .insert_many(docs)
                     .await
-                    .map_err(|e| AppError::Mongo(e.to_string()))
+                    .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
             try_audit(|audit| {
@@ -1200,7 +1200,7 @@ fn dispatch_sync(
                 } else {
                     coll_handle.update_one(filter, update).await
                 }
-                .map_err(|e| AppError::Mongo(e.to_string()))
+                .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
             try_audit(|audit| {
@@ -1274,7 +1274,7 @@ fn dispatch_sync(
                     .collection::<Document>(coll)
                     .replace_one(filter, replacement)
                     .await
-                    .map_err(|e| AppError::Mongo(e.to_string()))
+                    .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
             try_audit(|audit| {
@@ -1334,7 +1334,7 @@ fn dispatch_sync(
                 } else {
                     coll_handle.delete_one(filter).await
                 }
-                .map_err(|e| AppError::Mongo(e.to_string()))
+                .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
             try_audit(|audit| {
@@ -1379,7 +1379,7 @@ fn dispatch_sync(
                     .collection::<Document>(coll)
                     .drop()
                     .await
-                    .map_err(|e| AppError::Mongo(e.to_string()))
+                    .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
             try_audit(|audit| {
@@ -1450,7 +1450,7 @@ fn dispatch_sync(
                     .collection::<Document>(coll)
                     .create_index(index_model)
                     .await
-                    .map_err(|e| AppError::Mongo(e.to_string()))
+                    .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
             try_audit(|audit| {
@@ -1505,7 +1505,7 @@ fn dispatch_sync(
                     .collection::<Document>(coll)
                     .drop_index(name)
                     .await
-                    .map_err(|e| AppError::Mongo(e.to_string()))
+                    .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
             try_audit(|audit| {
@@ -1556,7 +1556,7 @@ fn dispatch_sync(
                         "to": to_ns,
                     })
                     .await
-                    .map_err(|e| AppError::Mongo(e.to_string()))
+                    .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
             try_audit(|audit| {
@@ -1592,7 +1592,7 @@ fn dispatch_sync(
                     .database(db)
                     .drop()
                     .await
-                    .map_err(|e| AppError::Mongo(e.to_string()))
+                    .map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
             try_audit(|audit| {
@@ -1645,7 +1645,7 @@ fn dispatch_sync(
                         a = a.array_filters(afs);
                     }
                 }
-                a.await.map_err(|e| AppError::Mongo(e.to_string()))
+                a.await.map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
             try_audit(|audit| {
@@ -1708,7 +1708,7 @@ fn dispatch_sync(
                         a = a.projection(proj.clone());
                     }
                 }
-                a.await.map_err(|e| AppError::Mongo(e.to_string()))
+                a.await.map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
             try_audit(|audit| {
@@ -1775,7 +1775,7 @@ fn dispatch_sync(
                         a = a.projection(proj.clone());
                     }
                 }
-                a.await.map_err(|e| AppError::Mongo(e.to_string()))
+                a.await.map_err(AppError::mongo)
             })
             .map_err(|e| js_err(e.to_string()))?;
             try_audit(|audit| {
@@ -1873,7 +1873,7 @@ fn dispatch_sync(
                                 .collection::<Document>(coll)
                                 .insert_one(doc)
                                 .await
-                                .map_err(|e| AppError::Mongo(e.to_string()))
+                                .map_err(AppError::mongo)
                         })
                         .map_err(|e| js_err(e.to_string()))?;
                         try_audit(|audit| {
@@ -1905,7 +1905,7 @@ fn dispatch_sync(
                             };
                             a.upsert(upsert)
                                 .await
-                                .map_err(|e| AppError::Mongo(e.to_string()))
+                                .map_err(AppError::mongo)
                         })
                         .map_err(|e| js_err(e.to_string()))?;
                         try_audit(|audit| {
@@ -1942,7 +1942,7 @@ fn dispatch_sync(
                                 .replace_one(filter, replacement)
                                 .upsert(upsert)
                                 .await
-                                .map_err(|e| AppError::Mongo(e.to_string()))
+                                .map_err(AppError::mongo)
                         })
                         .map_err(|e| js_err(e.to_string()))?;
                         try_audit(|audit| {
@@ -1973,7 +1973,7 @@ fn dispatch_sync(
                             } else {
                                 c.delete_one(filter).await
                             };
-                            r.map_err(|e| AppError::Mongo(e.to_string()))
+                            r.map_err(AppError::mongo)
                         })
                         .map_err(|e| js_err(e.to_string()))?;
                         try_audit(|audit| {
@@ -2140,9 +2140,6 @@ fn js_to_json(value: &JsValue, ctx: &mut Context) -> JsResult<JsonValue> {
         let keys = obj.own_property_keys(ctx)?;
         for key in keys {
             let key_str = key.to_string();
-            if key_str.parse::<u64>().is_ok() {
-                continue;
-            }
             let v = obj.get(key, ctx)?;
             map.insert(key_str, js_to_json(&v, ctx)?);
         }
@@ -2192,9 +2189,6 @@ fn jsvalue_to_bson(value: &JsValue, ctx: &mut Context) -> JsResult<bson::Bson> {
         let keys = obj.own_property_keys(ctx)?;
         for key in keys {
             let key_str = key.to_string();
-            if key_str.parse::<u64>().is_ok() {
-                continue;
-            }
             let v = obj.get(key, ctx)?;
             doc.insert(key_str, jsvalue_to_bson(&v, ctx)?);
         }
@@ -2682,6 +2676,50 @@ mod tests {
             }
             other => panic!("expected Bson::Document, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn js_to_json_preserves_numeric_string_object_keys() {
+        let mut ctx = Context::default();
+        let js = ctx
+            .eval(Source::from_bytes(b"({'123': 'kept', nested: {'456': 7}})"))
+            .unwrap();
+        let json = js_to_json(&js, &mut ctx).unwrap();
+        assert_eq!(json["123"], JsonValue::String("kept".into()));
+        assert_eq!(json["nested"]["456"], serde_json::json!(7.0));
+    }
+
+    #[test]
+    fn jsvalue_to_bson_preserves_numeric_string_object_keys() {
+        let mut ctx = Context::default();
+        let js = ctx
+            .eval(Source::from_bytes(b"({'123': 'kept', nested: {'456': 7}})"))
+            .unwrap();
+        let bson = jsvalue_to_bson(&js, &mut ctx).unwrap();
+        let doc = bson.as_document().expect("document");
+        assert_eq!(doc.get_str("123").unwrap(), "kept");
+        assert!(doc.get_document("nested").unwrap().contains_key("456"));
+    }
+
+    #[test]
+    fn jsvalue_to_bson_characterizes_hex_and_rfc3339_string_coercion() {
+        let mut ctx = Context::default();
+
+        let oid_js = ctx
+            .eval(Source::from_bytes(b"\"507f1f77bcf86cd799439011\""))
+            .unwrap();
+        assert!(matches!(
+            jsvalue_to_bson(&oid_js, &mut ctx).unwrap(),
+            bson::Bson::ObjectId(_)
+        ));
+
+        let date_js = ctx
+            .eval(Source::from_bytes(b"\"2026-06-29T07:05:09Z\""))
+            .unwrap();
+        assert!(matches!(
+            jsvalue_to_bson(&date_js, &mut ctx).unwrap(),
+            bson::Bson::DateTime(_)
+        ));
     }
 
     /// The `COLL_HELP_TEXT` must list every write method we

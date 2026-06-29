@@ -109,9 +109,10 @@ function EventRow({ event, selected, proofLoading, onSelect, onProof, style }: E
       <span className="audit-event-row__leaf">leaf {event.leafHex.slice(0, 10)}…</span>
       <Button
         variant="ghost"
+        size="sm"
         loading={proofLoading}
         onClick={onProof}
-        style={{ padding: "2px 8px", fontSize: "var(--font-size-xs)", marginLeft: "auto" }}
+        style={{ marginLeft: "auto" }}
       >
         Proof
       </Button>

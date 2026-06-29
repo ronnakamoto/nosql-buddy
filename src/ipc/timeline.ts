@@ -141,6 +141,7 @@ export function operationKindLabel(kind: OperationKind): string {
     case "export": return "Export";
     case "dump": return "Dump";
     case "restore": return "Restore";
+    default: return kind;
   }
 }
 
@@ -150,6 +151,7 @@ export function approvalStatusLabel(status: ApprovalStatus): string {
     case "pending": return "Pending";
     case "approved": return "Approved";
     case "rejected": return "Rejected";
+    default: return status;
   }
 }
 
@@ -159,5 +161,6 @@ export function rollbackLevelLabel(level: RollbackLevel): string {
     case "sample": return "Sample";
     case "changedFields": return "Changed Fields";
     case "full": return "Full";
+    default: return level;
   }
 }

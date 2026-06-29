@@ -257,15 +257,17 @@ export function AuditSettings({
             active={mode === "production"}
             label="Production Mode"
             hint="In-app, your keys"
-            onClick={() => switchMode("production")}
-            loading={switching && mode !== "production"}
+            onClick={() => {}}
+            disabled
+            badge={<Badge tone="neutral">Coming soon</Badge>}
           />
         </div>
       </Card>
 
       {/* ─── Production config ────────────────────────────────────── */}
+      <div style={{ opacity: 0.6, pointerEvents: "none" }} aria-disabled="true">
       <Card>
-        <CardHeader title="Production Network" subtitle="Testnet or Mainnet — the double check" />
+        <CardHeader title="Production Network" subtitle="Coming soon — production mode is not yet available" />
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: "var(--space-2)", marginBottom: "var(--space-3)", alignItems: "center" }}>
           <ModeToggle
             active={network === "testnet"}
@@ -325,6 +327,7 @@ export function AuditSettings({
           )}
         </div>
       </Card>
+      </div>
 
       {/* ─── Pinata ───────────────────────────────────────────────── */}
       <Card>
@@ -396,24 +399,29 @@ function ModeToggle({
   hint,
   onClick,
   loading,
+  disabled = false,
+  badge,
 }: {
   active: boolean;
   label: string;
   hint: string;
   onClick: () => void;
   loading?: boolean;
+  disabled?: boolean;
+  badge?: React.ReactNode;
 }) {
   return (
     <button
       onClick={onClick}
-      disabled={loading}
+      disabled={loading || disabled}
       style={{
         textAlign: "left",
         padding: "var(--space-3)",
         borderRadius: "var(--radius-md)",
-        background: active ? "var(--accent-100)" : "var(--surface-2)",
-        border: `1px solid ${active ? "var(--accent-500)" : "var(--border)"}`,
-        cursor: loading ? "wait" : "pointer",
+        background: active && !disabled ? "var(--accent-100)" : "var(--surface-2)",
+        border: `1px solid ${active && !disabled ? "var(--accent-500)" : "var(--border)"}`,
+        cursor: disabled ? "not-allowed" : loading ? "wait" : "pointer",
+        opacity: disabled ? 0.6 : 1,
         transition: "border-color 0.12s ease, background 0.12s ease",
         display: "flex",
         alignItems: "center",
@@ -421,8 +429,11 @@ function ModeToggle({
       }}
     >
       {loading && <Spinner size={13} />}
-      <div>
-        <div style={{ fontSize: "var(--font-size-sm)", fontWeight: 600, color: "var(--ink)" }}>{label}</div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
+          <span style={{ fontSize: "var(--font-size-sm)", fontWeight: 600, color: "var(--ink)" }}>{label}</span>
+          {badge}
+        </div>
         <div style={{ fontSize: "var(--font-size-xs)", color: "var(--ink-faint)", marginTop: "2px" }}>{hint}</div>
       </div>
     </button>

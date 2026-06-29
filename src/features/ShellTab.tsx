@@ -1,16 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { acceptCompletion, completionStatus, moveCompletionSelection } from "@codemirror/autocomplete";
+import type { EditorView, KeyBinding } from "@codemirror/view";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import commands, {
-  type AutocompleteResponse,
-  type CompletionItem,
   type ProfileSummary,
   type ShellOutput,
   type ShellResponse,
   type ShellTable,
 } from "../ipc/commands";
+import { CodeEditor } from "../components/CodeEditor";
 import { ResultsTable } from "../components/ResultsTable";
 import { ExplainTree } from "../components/ExplainTree";
 import { DriverCodePanel } from "../components/DriverCodePanel";
 import { useToast } from "../context/ToastContext";
+import { makeShellCompletionSource } from "../lib/shellCompletion";
+import { HISTORY_CLEAR, nextHistoryIndex, prevHistoryIndex } from "../lib/shellHistory";
 
 export interface ShellTabProps {
   connectionId: string;
@@ -30,7 +33,7 @@ interface HistoryEntry {
  * Shell tab — production-grade mongo shell REPL.
  *
  * Architecture:
- *  - Multi-line textarea for input. Enter runs the script;
+ *  - CodeMirror editor for input. Enter runs the script;
  *    Shift+Enter inserts a newline.
  *  - Output area renders one card per output line (text / json /
  *    error / table) with colour coding.
@@ -57,18 +60,17 @@ export function ShellTab({
   const [explainOpen, setExplainOpen] = useState(false);
   const [explainRaw, setExplainRaw] = useState<unknown | null>(null);
   const [historyCursor, setHistoryCursor] = useState<number>(-1);
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-  // --- Autocomplete state ---
-  const [autocompleteItems, setAutocompleteItems] = useState<CompletionItem[]>([]);
-  const [autocompleteOpen, setAutocompleteOpen] = useState(false);
-  const [autocompleteIdx, setAutocompleteIdx] = useState(0);
-  const autocompleteRef = useRef<AutocompleteResponse | null>(null);
-  const autocompleteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // The partial token being typed (e.g. "findO" in "db.users.findO").
-  // We store it so we know what to replace when the user accepts
-  // a suggestion.
-  const autocompletePartial = useRef<string>("");
+  // Live refs so the CodeMirror completion source and keymap can be built
+  // once (stable identity) yet always read the latest props/state. Rebuilding
+  // these on every keystroke would force CodeMirror to reconfigure the editor.
+  const runRef = useRef<(text?: string) => void>(() => {});
+  const historyRef = useRef<HistoryEntry[]>(history);
+  const historyCursorRef = useRef<number>(historyCursor);
+  const completionCtxRef = useRef({ connectionId, activeDb, database });
+  historyRef.current = history;
+  historyCursorRef.current = historyCursor;
+  completionCtxRef.current = { connectionId, activeDb, database };
 
   // Fetch the full URI for driver-code generation. Same pattern
   // as AggregationEditor.
@@ -125,151 +127,110 @@ export function ShellTab({
     },
     [script, running, connectionId, activeDb, database],
   );
+  runRef.current = run;
 
-  // --- Autocomplete: debounced fetch on text/cursor change ---
-  const fetchAutocomplete = useCallback(
-    (text: string, cursorPos: number) => {
-      const textBeforeCursor = text.slice(0, cursorPos);
-      // Extract the partial token being typed (identifier chars
-      // at the end of textBeforeCursor).
-      const partialMatch = textBeforeCursor.match(/[A-Za-z0-9_]*$/);
-      const partial = partialMatch ? partialMatch[0] : "";
-      autocompletePartial.current = partial;
-
-      if (autocompleteTimer.current) {
-        clearTimeout(autocompleteTimer.current);
-      }
-      autocompleteTimer.current = setTimeout(async () => {
-        try {
-          const resp = await commands.shellAutocomplete({
-            connectionId,
-            textBeforeCursor,
-            activeDatabase: activeDb,
-            fallbackDatabase: database,
-          });
-          autocompleteRef.current = resp;
-          if (resp.items.length > 0 && resp.kind.kind !== "none") {
-            setAutocompleteItems(resp.items);
-            setAutocompleteIdx(0);
-            setAutocompleteOpen(true);
-          } else {
-            setAutocompleteOpen(false);
-          }
-        } catch {
-          setAutocompleteOpen(false);
-        }
-      }, 150);
-    },
-    [connectionId, activeDb, database],
-  );
-
-  // Accept a completion: replace the partial token with the
-  // chosen label and close the dropdown.
-  const acceptCompletion = useCallback(
-    (item: CompletionItem) => {
-      const ta = textareaRef.current;
-      if (!ta) return;
-      const pos = ta.selectionStart ?? script.length;
-      const textBefore = script.slice(0, pos);
-      const textAfter = script.slice(pos);
-      // Remove the partial token from the end of textBefore.
-      const partial = autocompletePartial.current;
-      const cutPos = textBefore.length - partial.length;
-      const next = textBefore.slice(0, cutPos) + item.label + textAfter;
-      setScript(next);
-      setAutocompleteOpen(false);
-      // Move cursor to just after the inserted label.
-      const newPos = cutPos + item.label.length;
-      requestAnimationFrame(() => {
-        ta.focus();
-        ta.setSelectionRange(newPos, newPos);
-      });
-    },
-    [script],
-  );
-
-  const closeAutocomplete = useCallback(() => {
-    setAutocompleteOpen(false);
+  /** Replace the entire editor document and place the caret at its end.
+   *  Mirrors the new text into React state so the controlled value stays
+   *  in sync with the view. */
+  const replaceDoc = useCallback((view: EditorView, text: string) => {
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: text },
+      selection: { anchor: text.length },
+    });
+    setScript(text);
   }, []);
 
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      // --- Autocomplete navigation (takes priority when open) ---
-      if (autocompleteOpen && autocompleteItems.length > 0) {
-        if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
-          e.preventDefault();
-          const item = autocompleteItems[autocompleteIdx];
-          if (item) acceptCompletion(item);
-          return;
-        }
-        if (e.key === "Escape") {
-          e.preventDefault();
-          closeAutocomplete();
-          return;
-        }
-        if (e.key === "ArrowUp") {
-          e.preventDefault();
-          setAutocompleteIdx((i) =>
-            i <= 0 ? autocompleteItems.length - 1 : i - 1,
-          );
-          return;
-        }
-        if (e.key === "ArrowDown") {
-          e.preventDefault();
-          setAutocompleteIdx((i) =>
-            i >= autocompleteItems.length - 1 ? 0 : i + 1,
-          );
-          return;
-        }
-      }
+  const shellCompletionSource = useMemo(
+    () =>
+      makeShellCompletionSource({
+        request: ({ textBeforeCursor }) => {
+          const ctx = completionCtxRef.current;
+          return commands.shellAutocomplete({
+            connectionId: ctx.connectionId,
+            textBeforeCursor,
+            activeDatabase: ctx.activeDb,
+            fallbackDatabase: ctx.database,
+          });
+        },
+      }),
+    [],
+  );
 
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        void run();
-        return;
-      }
-      if (e.key === "ArrowUp" && history.length > 0 && !autocompleteOpen) {
-        // Only navigate history when the cursor is on the first
-        // line — otherwise the user is just moving within the
-        // textarea.
-        const ta = e.currentTarget;
-        if (ta.selectionStart === 0 || ta.value.indexOf("\n", ta.selectionStart) === -1) {
-          e.preventDefault();
-          const next = historyCursor < 0
-            ? history.length - 1
-            : Math.max(0, historyCursor - 1);
-          const entry = history[next];
-          if (entry) {
-            setScript(entry.script);
-            setHistoryCursor(next);
+  const shellKeymap = useMemo<KeyBinding[]>(
+    () => [
+      {
+        key: "Tab",
+        run(view) {
+          if (completionStatus(view.state) === "active") {
+            acceptCompletion(view);
+            return true;
           }
-        }
-      }
-      if (e.key === "ArrowDown" && historyCursor >= 0 && !autocompleteOpen) {
-        e.preventDefault();
-        const next = historyCursor + 1;
-        if (next >= history.length) {
-          setScript("");
-          setHistoryCursor(-1);
-        } else {
-          const entry = history[next];
-          if (entry) {
-            setScript(entry.script);
-            setHistoryCursor(next);
+          return false;
+        },
+      },
+      {
+        key: "Enter",
+        run(view) {
+          if (completionStatus(view.state) === "active") {
+            acceptCompletion(view);
+            return true;
           }
-        }
-      }
-    },
-    [
-      history,
-      historyCursor,
-      run,
-      autocompleteOpen,
-      autocompleteItems,
-      autocompleteIdx,
-      acceptCompletion,
-      closeAutocomplete,
+          runRef.current(view.state.doc.toString());
+          return true;
+        },
+      },
+      {
+        key: "Shift-Enter",
+        run(view) {
+          view.dispatch(view.state.replaceSelection("\n"));
+          return true;
+        },
+      },
+      {
+        key: "ArrowUp",
+        run(view) {
+          if (completionStatus(view.state) === "active") {
+            moveCompletionSelection(false)(view);
+            return true;
+          }
+          const head = view.state.selection.main.head;
+          if (view.state.doc.lineAt(head).number !== 1) return false;
+          const entries = historyRef.current;
+          const next = prevHistoryIndex(entries.length, historyCursorRef.current);
+          if (next == null) return false;
+          const entry = entries[next];
+          if (!entry) return false;
+          replaceDoc(view, entry.script);
+          setHistoryCursor(next);
+          return true;
+        },
+      },
+      {
+        key: "ArrowDown",
+        run(view) {
+          if (completionStatus(view.state) === "active") {
+            moveCompletionSelection(true)(view);
+            return true;
+          }
+          const head = view.state.selection.main.head;
+          if (view.state.doc.lineAt(head).number !== view.state.doc.lines) return false;
+          const entries = historyRef.current;
+          const next = nextHistoryIndex(entries.length, historyCursorRef.current);
+          if (next == null) return false;
+          if (next === HISTORY_CLEAR) {
+            replaceDoc(view, "");
+            setHistoryCursor(-1);
+            return true;
+          }
+          const entry = entries[next];
+          if (!entry) return false;
+          replaceDoc(view, entry.script);
+          setHistoryCursor(next);
+          return true;
+        },
+      },
     ],
+    [replaceDoc],
   );
 
   // The pipeline used for the explain / code handoff. The shell
@@ -402,44 +363,17 @@ export function ShellTab({
 
       <div className="shell-tab__body">
         <div className="shell-tab__input-wrap">
-          <textarea
-            ref={textareaRef}
-            className="shell-tab__input"
+          <CodeEditor
+            className="shell-tab__editor"
             value={script}
-            onChange={(e) => {
-              setScript(e.target.value);
-              fetchAutocomplete(e.target.value, e.target.selectionStart ?? e.target.value.length);
-            }}
-            onKeyUp={(e) => {
-              // Re-fetch on cursor movement keys that don't
-              // change the text (Left/Right/Home/End). Skip
-              // navigation keys when the dropdown is open —
-              // otherwise the async response resets the
-              // selected index and fights the user's
-              // ArrowUp/Down navigation.
-              if (autocompleteOpen && ["ArrowUp", "ArrowDown", "Tab", "Enter", "Escape"].includes(e.key)) {
-                return;
-              }
-              const ta = e.currentTarget;
-              fetchAutocomplete(ta.value, ta.selectionStart ?? ta.value.length);
-            }}
-            onKeyDown={handleKeyDown}
-            onBlur={() => {
-              // Delay close so a click on a suggestion item
-              // registers first.
-              setTimeout(() => closeAutocomplete(), 150);
-            }}
-            spellCheck={false}
+            onChange={setScript}
+            context="shell"
+            ariaLabel="Mongo shell script"
+            completionSource={shellCompletionSource}
+            extraKeymap={shellKeymap}
             placeholder={`// Try one of these (one per line — Enter to run):\n// use sample_mflix;\n// db.movies.find({year: 2010}, null, null, 3);\n// var recent = db.movies.countDocuments({year: {"$gte": 2015}});\n// printjson(recent);\n// db.runCommand({ping: 1});`}
-            rows={6}
+            minHeight="120px"
           />
-          {autocompleteOpen && autocompleteItems.length > 0 && (
-            <AutocompleteDropdown
-              items={autocompleteItems}
-              selectedIdx={autocompleteIdx}
-              onSelect={acceptCompletion}
-            />
-          )}
         </div>
         <div className="shell-tab__output" data-testid="shell-output">
           {history.length === 0 ? (
@@ -523,48 +457,6 @@ function TableView({ table }: { table: ShellTable }) {
         collection=""
         editable={false}
       />
-    </div>
-  );
-}
-
-/**
- * Autocomplete dropdown overlay. Renders below the textarea
- * input area. Keyboard navigation (Up/Down/Tab/Enter/Esc) is
- * handled by the parent's `handleKeyDown`; this component only
- * handles mouse clicks.
- */
-function AutocompleteDropdown({
-  items,
-  selectedIdx,
-  onSelect,
-}: {
-  items: CompletionItem[];
-  selectedIdx: number;
-  onSelect: (item: CompletionItem) => void;
-}) {
-  return (
-    <div className="shell-autocomplete" data-testid="shell-autocomplete">
-      {items.map((item, i) => (
-        <button
-          key={`${item.label}-${i}`}
-          className={
-            "shell-autocomplete__item" +
-            (i === selectedIdx ? " shell-autocomplete__item--selected" : "")
-          }
-          onMouseDown={(e) => {
-            // mousedown fires before the textarea's onBlur,
-            // so the click registers before the dropdown closes.
-            e.preventDefault();
-            onSelect(item);
-          }}
-          type="button"
-        >
-          <span className="shell-autocomplete__label">{item.label}</span>
-          {item.detail && (
-            <span className="shell-autocomplete__detail">{item.detail}</span>
-          )}
-        </button>
-      ))}
     </div>
   );
 }

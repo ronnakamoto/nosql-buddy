@@ -227,7 +227,6 @@ async fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             &contract_id,
             &publisher_kp,
             &rpc_url,
-            &horizon_url,
             &passphrase,
         )
         .await?;
@@ -273,7 +272,6 @@ async fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         &attester_kp.account_id(),
         &ed25519_pubkey_hex,
         &rpc_url,
-        &horizon_url,
         &passphrase,
     )
     .await?;
@@ -689,14 +687,12 @@ async fn initialize_contract(
     contract_id: &str,
     admin_keypair: &audit_service::audit::stellar_native::StellarKeypair,
     rpc_url: &str,
-    horizon_url: &str,
     passphrase: &str,
 ) -> Result<(), String> {
     audit_service::audit::stellar_native::initialize_contract_native(
         contract_id,
         admin_keypair,
         rpc_url,
-        horizon_url,
         passphrase,
     )
     .await
@@ -710,7 +706,6 @@ async fn authorize_attester(
     attester_address: &str,
     attester_ed25519_pubkey_hex: &str,
     rpc_url: &str,
-    horizon_url: &str,
     passphrase: &str,
 ) -> Result<(), String> {
     audit_service::audit::stellar_native::authorize_attester_native(
@@ -719,7 +714,6 @@ async fn authorize_attester(
         attester_address,
         attester_ed25519_pubkey_hex,
         rpc_url,
-        horizon_url,
         passphrase,
     )
     .await

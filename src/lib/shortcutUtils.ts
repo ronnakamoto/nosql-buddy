@@ -122,10 +122,14 @@ export function parseSingleShortcut(shortcutStr: string): ShortcutKeys {
  */
 export function eventMatchesShortcut(event: KeyboardEvent, shortcut: ShortcutKeys): boolean {
   return (
-    event.ctrlKey === shortcut.ctrl &&
-    event.altKey === shortcut.alt &&
-    event.shiftKey === shortcut.shift &&
-    event.metaKey === shortcut.meta &&
+    // Modifier flags are optional on `ShortcutKeys`; an omitted flag means
+    // "must not be pressed". Coerce undefined → false so `false === undefined`
+    // doesn't make every `COMMON_SHORTCUTS` entry (which omits unused
+    // modifiers) fail to match.
+    event.ctrlKey === (shortcut.ctrl ?? false) &&
+    event.altKey === (shortcut.alt ?? false) &&
+    event.shiftKey === (shortcut.shift ?? false) &&
+    event.metaKey === (shortcut.meta ?? false) &&
     event.key.toLowerCase() === shortcut.key.toLowerCase()
   );
 }

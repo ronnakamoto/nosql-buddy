@@ -555,16 +555,29 @@
   display: flex;
   align-items: flex-start;
   gap: var(--space-3);
-  padding: var(--space-3);
-  background: color-mix(in oklch, var(--success-500) 8%, var(--surface));
-  border: 1px solid color-mix(in oklch, var(--success-500) 20%, var(--border));
-  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklch, var(--success-500) 10%, var(--surface)),
+    color-mix(in oklch, var(--success-500) 5%, var(--surface))
+  );
+  border: 1px solid color-mix(in oklch, var(--success-500) 22%, var(--border));
+  border-radius: var(--radius-lg);
+  box-shadow: inset 0 1px 0 0 var(--highlight);
 }
 
 .audit-proof-card__check {
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
   color: var(--success-500);
-  margin-top: 1px;
+  background: color-mix(in oklch, var(--success-500) 15%, var(--surface));
+  box-shadow: 0 0 0 1px color-mix(in oklch, var(--success-500) 30%, transparent),
+    inset 0 1px 0 0 var(--highlight);
 }
 
 .audit-proof-card__summary-text {
@@ -575,10 +588,11 @@
 }
 
 .audit-proof-card__summary-title {
-  font-size: var(--font-size-md);
+  font-size: var(--font-size-lg);
   font-weight: 600;
   color: var(--ink);
   line-height: var(--line-height-tight);
+  text-wrap: balance;
 }
 
 .audit-proof-card__summary-body {
@@ -586,7 +600,7 @@
   font-size: var(--font-size-sm);
   color: var(--ink-muted);
   line-height: var(--line-height-normal);
-  max-width: 70ch;
+  text-wrap: pretty;
 }
 
 .audit-proof-card__actions {
@@ -596,68 +610,22 @@
   gap: var(--space-2);
 }
 
-.audit-proof-card__primary-link {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: 7px 14px;
-  border-radius: var(--radius-md);
-  font-size: var(--font-size-sm);
-  font-weight: 500;
-  text-decoration: none;
-  background: var(--accent-500);
-  color: var(--accent-fg);
-  border: 1px solid transparent;
-  box-shadow: inset 0 1px 0 0 var(--highlight), 0 1px 2px 0 oklch(0 0 0 / 0.12);
-  transition: background 0.12s ease, box-shadow 0.12s ease;
-}
-
-.audit-proof-card__primary-link:hover {
-  background: var(--accent-600);
-  color: var(--accent-fg);
-  text-decoration: none;
-}
-
-.audit-proof-card__pending {
-  font-size: var(--font-size-sm);
-  color: var(--ink-faint);
-  font-style: italic;
-}
-
 .audit-proof-card__error {
   font-size: var(--font-size-xs);
   color: var(--danger-500, #dc2626);
 }
 
-button.audit-proof-card__primary-link {
-  border: none;
-  cursor: pointer;
-  font-family: inherit;
+/* Disclosure chevron for the cryptographic-details toggle. */
+.audit-proof-chevron {
+  transition: transform 0.18s ease-out;
 }
-
-button.audit-proof-card__primary-link:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+.audit-proof-chevron--open {
+  transform: rotate(180deg);
 }
-
-.audit-proof-card__secondary-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: 7px 14px;
-  border-radius: var(--radius-md);
-  font-size: var(--font-size-sm);
-  font-weight: 500;
-  background: var(--surface-2);
-  color: var(--ink);
-  border: 1px solid var(--border);
-  cursor: pointer;
-  transition: background 0.12s ease, border-color 0.12s ease;
-}
-
-.audit-proof-card__secondary-btn:hover {
-  background: var(--surface-3);
-  border-color: var(--border-strong);
+@media (prefers-reduced-motion: reduce) {
+  .audit-proof-chevron {
+    transition: none;
+  }
 }
 
 .audit-proof-card__advanced {
@@ -1158,17 +1126,40 @@ button.audit-proof-card__primary-link:disabled {
   align-items: center;
   justify-content: center;
   gap: var(--space-2);
-  padding: 7px 14px;
+  height: 28px;
+  padding: 0 10px;
   border-radius: var(--radius-md);
   font-size: var(--font-size-sm);
   font-weight: 500;
+  letter-spacing: -0.003em;
+  white-space: nowrap;
+  user-select: none;
+  text-decoration: none;
   cursor: pointer;
-  transition: background 0.12s ease, border-color 0.12s ease, opacity 0.12s ease, box-shadow 0.12s ease;
+  transition: background 0.12s ease, border-color 0.12s ease, opacity 0.12s ease,
+    box-shadow 0.12s ease, color 0.12s ease;
 }
 
 .audit-btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+.audit-btn:not(:disabled):active {
+  transform: translateY(0.5px);
+}
+
+.audit-btn:focus-visible {
+  outline: 2px solid var(--accent-500);
+  outline-offset: 1px;
+}
+
+/* Small variant: matches the app's .btn--sm footprint. */
+.audit-btn--sm {
+  height: 24px;
+  padding: 0 var(--space-2);
+  font-size: var(--font-size-xs);
+  border-radius: var(--radius-sm);
 }
 
 .audit-btn--primary {
@@ -1214,6 +1205,17 @@ button.audit-proof-card__primary-link:disabled {
 }
 .audit-btn--danger:not(:disabled):hover {
   background: color-mix(in oklch, var(--danger-500) 18%, transparent);
+}
+
+/* Keyboard hint pill inside audit buttons. Reuses the global .kbd vocabulary
+   so audit actions read the same as the rest of the app. */
+.audit-btn .kbd {
+  margin-left: var(--space-1);
+}
+.audit-btn--primary .kbd {
+  background: oklch(1 0 0 / 0.16);
+  border-color: oklch(1 0 0 / 0.24);
+  color: var(--accent-fg);
 }
 
 /* ─── Spinner ──────────────────────────────────────────────────── */

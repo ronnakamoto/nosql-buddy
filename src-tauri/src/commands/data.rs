@@ -8,7 +8,10 @@ use tauri::{AppHandle, State};
 /// Return all data items.
 #[tauri::command]
 pub async fn get_data(state: State<'_, AppState>) -> AppResult<Vec<DataItem>> {
-    let items = state.items.lock().expect("items mutex poisoned");
+    let items = state
+        .items
+        .lock()
+        .map_err(|e| AppError::Internal(format!("items mutex poisoned: {e}")))?;
     Ok(items.clone())
 }
 
@@ -23,7 +26,10 @@ pub async fn save_data(
         return Err(AppError::Validation("item name must not be empty".into()));
     }
     let count = {
-        let mut items = state.items.lock().expect("items mutex poisoned");
+        let mut items = state
+            .items
+            .lock()
+            .map_err(|e| AppError::Internal(format!("items mutex poisoned: {e}")))?;
         items.push(item);
         items.len()
     };

@@ -128,7 +128,7 @@ function ProofInspector({
           Proof for event #{proof.leafIndex}
         </span>
         <div className="audit-proof-inspector__actions">
-          <Button variant="ghost" onClick={onExport} style={{ fontSize: "var(--font-size-xs)" }}>
+          <Button variant="ghost" size="sm" onClick={onExport}>
             Export JSON
           </Button>
         </div>

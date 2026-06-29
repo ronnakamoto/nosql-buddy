@@ -144,7 +144,6 @@ pub async fn commit_epoch(
             &metadata,
             kp,
             &chain.rpc_url,
-            &chain.horizon_url,
             &chain.contract_id,
             &chain.passphrase,
         )
@@ -155,7 +154,6 @@ pub async fn commit_epoch(
             &metadata,
             kp,
             &chain.rpc_url,
-            &chain.horizon_url,
             &chain.contract_id,
             &chain.passphrase,
         )

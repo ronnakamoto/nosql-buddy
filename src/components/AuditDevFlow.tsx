@@ -25,7 +25,7 @@ import {
 import type { ProofResult, DevSetupParams } from "../ipc/commands";
 import { onAuditSetupProgress } from "../ipc/events";
 import { useToast } from "../context/ToastContext";
-import { FlaskConical, CircleDashed, X, CheckCircle, ExternalLink } from "lucide-react";
+import { FlaskConical, CircleDashed, X, CheckCircle, ExternalLink, ChevronDown, Copy, Check } from "lucide-react";
 import { InfoPopover } from "./InfoPopover";
 
 /**
@@ -502,13 +502,14 @@ function SetupWizardModal({
       title="Set up the audit stack"
       subtitle="Generates Stellar keys, funds them on testnet, and writes credentials"
       maxWidth={560}
+      onSubmit={resultLog || busy ? undefined : submit}
       footer={
         resultLog ? (
-          <Button variant="primary" onClick={onClose}>Done</Button>
+          <Button variant="primary" shortcut="Escape" onClick={onClose}>Done</Button>
         ) : (
           <div style={{ display: "flex", gap: "var(--space-2)" }}>
-            <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
-            <Button variant="primary" loading={busy} disabled={busy} onClick={submit}>
+            <Button variant="ghost" shortcut="Escape" onClick={onClose} disabled={busy}>Cancel</Button>
+            <Button variant="primary" shortcut="CmdOrCtrl+Enter" loading={busy} disabled={busy} onClick={submit}>
               Run Setup
             </Button>
           </div>
@@ -1114,7 +1115,7 @@ function DevLiveViewInner() {
           <div className="audit-proof-card">
             <div className="audit-proof-card__summary">
               <div className="audit-proof-card__check">
-                <CheckCircle size={32} />
+                <CheckCircle size={22} />
               </div>
               <div className="audit-proof-card__summary-text">
                 <div className="audit-proof-card__summary-title">
@@ -1131,7 +1132,7 @@ function DevLiveViewInner() {
             <div className="audit-proof-card__actions">
               {verifyTxHash ? (
                 <a
-                  className="audit-proof-card__primary-link"
+                  className="audit-btn audit-btn--primary"
                   href={`https://stellar.expert/explorer/${proofResult.network === "mainnet" ? "public" : proofResult.network}/tx/${verifyTxHash}`}
                   target="_blank"
                   rel="noopener noreferrer"
@@ -1141,10 +1142,11 @@ function DevLiveViewInner() {
                   View verification tx
                 </a>
               ) : (
-                <button
-                  className="audit-proof-card__primary-link"
-                  onClick={handleVerifyOnchain}
+                <Button
+                  variant="primary"
+                  loading={verifyBusy}
                   disabled={verifyBusy || !proofResult.txHash}
+                  onClick={handleVerifyOnchain}
                   title={
                     proofResult.txHash
                       ? "Submit the proof to the Soroban contract for on-chain verification"
@@ -1152,23 +1154,20 @@ function DevLiveViewInner() {
                   }
                 >
                   {verifyBusy ? (
-                    <>
-                      <Spinner size={14} />
-                      Verifying on-chain…
-                    </>
+                    "Verifying on-chain…"
                   ) : (
                     <>
                       <ExternalLink size={14} />
                       Verify on-chain
                     </>
                   )}
-                </button>
+                </Button>
               )}
               {verifyError && (
                 <span className="audit-proof-card__error">{verifyError}</span>
               )}
-              <button
-                className="audit-proof-card__secondary-btn"
+              <Button
+                variant="secondary"
                 onClick={() => {
                   const payload = {
                     rootHex: proofResult.rootHex,
@@ -1183,16 +1182,30 @@ function DevLiveViewInner() {
                   setCopyProofHint(true);
                   setTimeout(() => setCopyProofHint(false), 1500);
                 }}
-                aria-label="Copy proof data to clipboard"
+                title="Copy the full proof payload as JSON"
               >
-                {copyProofHint ? "Copied" : "Copy proof"}
-              </button>
+                {copyProofHint ? (
+                  <>
+                    <Check size={14} />
+                    Copied
+                  </>
+                ) : (
+                  <>
+                    <Copy size={14} />
+                    Copy proof
+                  </>
+                )}
+              </Button>
               <button
-                className="audit-proof-card__secondary-btn"
+                className="audit-btn audit-btn--ghost"
                 onClick={() => setShowProofDetails((s) => !s)}
                 aria-expanded={showProofDetails}
                 aria-controls="audit-proof-advanced"
               >
+                <ChevronDown
+                  size={14}
+                  className={`audit-proof-chevron${showProofDetails ? " audit-proof-chevron--open" : ""}`}
+                />
                 {showProofDetails ? "Hide details" : "Show cryptographic details"}
               </button>
             </div>
@@ -1298,10 +1311,10 @@ function DevLiveViewInner() {
                   <span className="audit-event-time">{new Date(ev.timestamp).toLocaleTimeString()}</span>
                   <Button
                     variant="ghost"
+                    size="sm"
                     loading={proofBusy === ev.index}
                     disabled={proofBusy !== null}
                     onClick={() => handleGenerateProof(ev.index)}
-                    style={{ fontSize: "var(--font-size-xs)", padding: "3px 10px", minHeight: "auto" }}
                     title={provenIndex === ev.index ? "Regenerate proof" : "Generate ZK inclusion proof"}
                   >
                     {provenIndex === ev.index ? "Re-prove" : "Prove"}

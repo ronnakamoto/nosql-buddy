@@ -163,3 +163,16 @@ impl From<audit_service::AuditError> for AppError {
 
 /// Convenience alias used across command handlers.
 pub type AppResult<T> = Result<T, AppError>;
+
+impl AppError {
+    /// Construct a redacted `Mongo` error from any displayable error.
+    ///
+    /// Many call sites map driver/cursor errors with
+    /// `.map_err(|e| AppError::Mongo(e.to_string()))`, which bypasses the
+    /// redaction in `From<mongodb::error::Error>` and can leak a connection
+    /// URI (`user:pass@host`) embedded in the driver message. Use this helper
+    /// so the message is always passed through the `Redactor` first.
+    pub fn mongo<E: std::fmt::Display>(err: E) -> Self {
+        AppError::Mongo(Redactor::new().redact(&err.to_string()))
+    }
+}

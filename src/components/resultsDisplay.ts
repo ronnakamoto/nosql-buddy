@@ -65,8 +65,17 @@ export function displayValue(value: unknown): string {
         return JSON.stringify(d);
       }
     }
-    if (obj.$numberDecimal)
-      return String((obj.$numberDecimal as Record<string, unknown>).$numberString ?? "");
+    if (obj.$numberDecimal !== undefined) {
+      // Canonical/relaxed Extended JSON encodes `$numberDecimal` as a *string*
+      // (`{ "$numberDecimal": "9.99" }`). The old code only handled the
+      // non-standard `{ $numberDecimal: { $numberString } }` object form and
+      // returned an empty string for the standard string form.
+      const dec = obj.$numberDecimal;
+      if (typeof dec === "string") return dec;
+      if (typeof dec === "object" && dec)
+        return String((dec as Record<string, unknown>).$numberString ?? "");
+      return String(dec);
+    }
     if (obj.$numberInt) return String(obj.$numberInt);
     if (obj.$numberLong) return String(obj.$numberLong);
     return JSON.stringify(value);

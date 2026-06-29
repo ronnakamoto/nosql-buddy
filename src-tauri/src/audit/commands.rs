@@ -195,7 +195,6 @@ pub async fn audit_verify_proof_onchain(
         &vk_ic,
         &kp,
         &chain.rpc_url,
-        &chain.horizon_url,
         &chain.contract_id,
         &chain.passphrase,
     )
@@ -364,7 +363,6 @@ pub async fn audit_commit_root(
         &meta,
         &kp,
         &chain.rpc_url,
-        &chain.horizon_url,
         &chain.contract_id,
         &chain.passphrase,
     )
@@ -787,7 +785,6 @@ async fn commit_latest_epoch_root(
             &meta,
             kp,
             &chain.rpc_url,
-            &chain.horizon_url,
             &chain.contract_id,
             &chain.passphrase,
         )
@@ -813,7 +810,6 @@ async fn commit_latest_epoch_root(
         &meta,
         kp,
         &chain.rpc_url,
-        &chain.horizon_url,
         &chain.contract_id,
         &chain.passphrase,
     )

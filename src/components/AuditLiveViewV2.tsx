@@ -579,7 +579,7 @@ function EventRow({
       <span style={{ fontSize: "var(--font-size-xs)", color: "var(--ink-faint)" }}>
         {new Date(event.timestamp).toLocaleTimeString()}
       </span>
-      <Button variant="ghost" loading={proofLoading} onClick={onProof} style={{ padding: "3px 8px", fontSize: "var(--font-size-xs)" }}>
+      <Button variant="ghost" size="sm" loading={proofLoading} onClick={onProof}>
         Proof
       </Button>
     </div>

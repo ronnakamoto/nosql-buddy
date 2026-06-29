@@ -17,6 +17,7 @@ pub struct RowError {
     pub message: String,
 }
 
+#[derive(Debug)]
 pub enum RowResult {
     Doc(Document),
     Skipped,

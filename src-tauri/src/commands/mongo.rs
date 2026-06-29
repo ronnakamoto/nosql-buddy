@@ -597,7 +597,9 @@ pub async fn count_documents(request: CountRequest, state: State<'_, AppState>) 
         .client
         .database(&request.database)
         .collection::<Document>(&request.collection);
-    Ok(coll.count_documents(filter).await.unwrap_or(0))
+    // Propagate count failures instead of masking them as `0`. A swallowed
+    // error here is indistinguishable from a genuinely empty result.
+    Ok(coll.count_documents(filter).await?)
 }
 
 #[tauri::command]
@@ -1432,7 +1434,9 @@ pub async fn preview_delete(request: PreviewRequest, state: State<'_, AppState>)
         .client
         .database(&request.database)
         .collection::<Document>(&request.collection);
-    Ok(coll.count_documents(filter).await.unwrap_or(0))
+    // A delete preview MUST NOT report `0` on a count error — that would tell
+    // the user a destructive op is harmless when the count actually failed.
+    Ok(coll.count_documents(filter).await?)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1459,7 +1463,8 @@ pub async fn preview_update(
         .client
         .database(&request.database)
         .collection::<Document>(&request.collection);
-    Ok(coll.count_documents(filter).await.unwrap_or(0))
+    // An update preview MUST NOT report `0` on a count error (see preview_delete).
+    Ok(coll.count_documents(filter).await?)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,8 +1,10 @@
 import { useMemo } from "react";
 import CodeMirror from "@uiw/react-codemirror";
-import { EditorView, keymap, placeholder as placeholderExt, tooltips } from "@codemirror/view";
+import { EditorView, keymap, placeholder as placeholderExt, tooltips, type KeyBinding } from "@codemirror/view";
+import { Prec, type Extension } from "@codemirror/state";
 import { json } from "@codemirror/lang-json";
 import { sql } from "@codemirror/lang-sql";
+import { javascript } from "@codemirror/lang-javascript";
 import { linter, lintGutter, type Diagnostic } from "@codemirror/lint";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
@@ -13,6 +15,7 @@ import {
   type Completion,
   type CompletionContext,
   type CompletionResult as CMCompletionResult,
+  type CompletionSource,
 } from "@codemirror/autocomplete";
 import { getSuggestions, type EditorContext, type Suggestion } from "../lib/autocomplete";
 
@@ -103,6 +106,10 @@ export interface CodeEditorProps {
   maxHeight?: string;
   /** Tighter padding / smaller type for inline editors (e.g. agg stages). */
   compact?: boolean;
+  /** Optional completion source for non-JSON/SQL modes such as Shell. */
+  completionSource?: CompletionSource;
+  /** Optional high-priority keymap layered before the default editor bindings. */
+  extraKeymap?: KeyBinding[];
 }
 
 function cmType(kind: Suggestion["kind"]): Completion["type"] {
@@ -187,14 +194,22 @@ const compactTheme = EditorView.theme({
 });
 
 const highlightStyle = HighlightStyle.define([
+  // Shared across JSON, SQL, and JS
   { tag: t.keyword, color: "var(--accent-600)" },
   { tag: t.operator, color: "var(--accent-600)" },
   { tag: [t.string, t.special(t.string)], color: "var(--success-500)" },
   { tag: [t.number, t.bool, t.null], color: "var(--info-500)" },
-  { tag: t.propertyName, color: "var(--ink)" },
+  { tag: [t.propertyName], color: "var(--ink)" },
   { tag: [t.punctuation, t.separator, t.bracket], color: "var(--ink-faint)" },
   { tag: t.comment, color: "var(--ink-muted)", fontStyle: "italic" },
   { tag: t.invalid, color: "var(--danger-500)" },
+  // JavaScript-specific (lang-javascript)
+  { tag: [t.variableName, t.definition(t.variableName)], color: "var(--ink)" },
+  { tag: [t.function(t.variableName), t.function(t.propertyName)], color: "var(--accent-600)" },
+  { tag: [t.typeName, t.definition(t.typeName)], color: "var(--info-500)" },
+  { tag: t.tagName, color: "var(--accent-600)" },
+  { tag: t.regexp, color: "var(--success-500)" },
+  { tag: [t.annotation], color: "var(--ink-muted)" },
 ]);
 
 // Open the completion popup as the user types (operators start with "$",
@@ -218,13 +233,17 @@ export function CodeEditor({
   minHeight,
   maxHeight,
   compact = false,
+  completionSource,
+  extraKeymap,
 }: CodeEditorProps) {
   const extensions = useMemo(() => {
-    const exts = [
-      context === "sql" ? sql() : json(),
+    const language =
+      context === "sql" ? sql() : context === "shell" ? javascript() : json();
+    const exts: Extension[] = [
+      language,
       keymap.of(completionKeymap),
       autocompletion({
-        override: [makeCompletionSource(context, schema)],
+        override: [completionSource ?? makeCompletionSource(context, schema)],
         activateOnTyping: false,
         defaultKeymap: false,
       }),
@@ -234,7 +253,7 @@ export function CodeEditor({
       EditorView.lineWrapping,
       tooltips({ parent: document.body }),
     ];
-    if (context !== "sql") {
+    if (context !== "sql" && context !== "shell") {
       exts.push(
         linter(mongoJsonLinter, { delay: 300 }),
         lintGutter(),
@@ -244,8 +263,11 @@ export function CodeEditor({
     if (compact) exts.push(compactTheme);
     if (placeholder) exts.push(placeholderExt(placeholder));
     if (ariaLabel) exts.push(EditorView.contentAttributes.of({ "aria-label": ariaLabel }));
+    if (extraKeymap && extraKeymap.length > 0) {
+      exts.push(Prec.highest(keymap.of(extraKeymap)));
+    }
     return exts;
-  }, [context, schema, placeholder, ariaLabel, compact]);
+  }, [context, schema, placeholder, ariaLabel, compact, completionSource, extraKeymap]);
 
   return (
     <CodeMirror

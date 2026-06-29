@@ -88,7 +88,6 @@ export function AuditModeChooser({
             color: "var(--ink-muted)",
             margin: 0,
             lineHeight: "var(--line-height-normal)",
-            maxWidth: "60ch",
           }}
         >
           Every MongoDB insert, update, and delete is recorded in a tamper-evident log that you can cryptographically prove. Seal batches of changes and anchor their fingerprints on the Stellar blockchain so no one can alter history undetected.
@@ -138,6 +137,7 @@ export function AuditModeChooser({
           selected={lastMode === "production"}
           loading={selecting === "production"}
           onClick={() => choose("production")}
+          disabled
           tone="success"
           symbol={<CheckCircle size={22} />}
           title="Production Mode"
@@ -175,6 +175,7 @@ function ModeCard({
   selected,
   loading,
   onClick,
+  disabled = false,
   tone,
   symbol,
   title,
@@ -185,6 +186,7 @@ function ModeCard({
   selected: boolean;
   loading: boolean;
   onClick: () => void;
+  disabled?: boolean;
   tone: "accent" | "success";
   symbol: React.ReactNode;
   title: string;
@@ -193,26 +195,28 @@ function ModeCard({
   footerBadge: React.ReactNode;
 }) {
   const accent = tone === "accent" ? "var(--accent-500)" : "var(--success-500)";
+  const isSelected = selected && !disabled;
   return (
     <Card
       padded={false}
       style={{
-        borderColor: selected ? accent : "var(--border)",
-        boxShadow: selected ? `0 0 0 1px ${accent}` : "none",
+        borderColor: isSelected ? accent : "var(--border)",
+        boxShadow: isSelected ? `0 0 0 1px ${accent}` : "none",
+        opacity: disabled ? 0.6 : 1,
         transition: "border-color 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease",
         overflow: "hidden",
       }}
     >
       <button
         onClick={onClick}
-        disabled={loading}
+        disabled={loading || disabled}
         style={{
           width: "100%",
           background: "transparent",
           border: "none",
           textAlign: "left",
           padding: "var(--space-4)",
-          cursor: loading ? "wait" : "pointer",
+          cursor: disabled ? "not-allowed" : loading ? "wait" : "pointer",
           display: "flex",
           flexDirection: "column",
           gap: "var(--space-3)",
@@ -228,8 +232,8 @@ function ModeCard({
               alignItems: "center",
               justifyContent: "center",
               borderRadius: "var(--radius-md)",
-              background: selected ? accent : "var(--surface-2)",
-              color: selected ? "white" : accent,
+              background: isSelected ? accent : "var(--surface-2)",
+              color: isSelected ? "white" : accent,
               flexShrink: 0,
               transition: "background 0.15s ease, color 0.15s ease",
             }}
@@ -247,7 +251,11 @@ function ModeCard({
               <span style={{ fontSize: "var(--font-size-lg)", fontWeight: 700, color: "var(--ink)" }}>
                 {title}
               </span>
-              {selected && <Badge tone={tone}>Last used</Badge>}
+              {disabled ? (
+                <Badge tone="neutral">Coming soon</Badge>
+              ) : (
+                isSelected && <Badge tone={tone}>Last used</Badge>
+              )}
             </div>
           </div>
         </div>
@@ -291,8 +299,16 @@ function ModeCard({
         </ul>
 
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: "var(--space-1)" }}>
-          {footerBadge}
-          {loading ? <Spinner size={14} /> : <Button variant={selected ? "primary" : "secondary"}>Select</Button>}
+          {disabled ? (
+            <span style={{ fontSize: "var(--font-size-xs)", color: "var(--ink-faint)" }}>
+              Available in a future release
+            </span>
+          ) : (
+            <>
+              {footerBadge}
+              {loading ? <Spinner size={14} /> : <Button variant={isSelected ? "primary" : "secondary"}>Select</Button>}
+            </>
+          )}
         </div>
       </button>
     </Card>

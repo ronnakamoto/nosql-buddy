@@ -1,5 +1,6 @@
-import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { X } from "lucide-react";
+import { formatShortcut, isMac, parseShortcut } from "../lib/shortcutUtils";
 import "./audit.css";
 
 /**
@@ -217,10 +218,13 @@ export function Badge({
 // ─── Button ─────────────────────────────────────────────────────────────
 
 type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
+type ButtonSize = "sm" | "md";
 
 export function Button({
   children,
   variant = "secondary",
+  size = "md",
+  shortcut,
   loading = false,
   disabled = false,
   onClick,
@@ -229,6 +233,8 @@ export function Button({
 }: {
   children: ReactNode;
   variant?: ButtonVariant;
+  size?: ButtonSize;
+  shortcut?: string;
   loading?: boolean;
   disabled?: boolean;
   onClick?: () => void;
@@ -236,18 +242,28 @@ export function Button({
   title?: string;
 }) {
   const isInactive = disabled || loading;
+  const displayShortcut = shortcut ? formatAuditShortcut(shortcut) : undefined;
   return (
     <button
       title={title}
       onClick={onClick}
       disabled={isInactive}
-      className={`audit-btn audit-btn--${variant}`}
+      className={size === "sm" ? `audit-btn audit-btn--${variant} audit-btn--sm` : `audit-btn audit-btn--${variant}`}
       style={style}
     >
       {loading && <Spinner size={13} />}
       {children}
+      {displayShortcut && <kbd className="kbd">{displayShortcut}</kbd>}
     </button>
   );
+}
+
+function formatAuditShortcut(shortcut: string): string {
+  if (shortcut.startsWith("CmdOrCtrl+")) {
+    const key = shortcut.slice("CmdOrCtrl+".length);
+    return `${isMac ? "⌘" : "Ctrl+"}${formatShortcut(parseShortcut(key))}`;
+  }
+  return formatShortcut(parseShortcut(shortcut));
 }
 
 // ─── Spinner ────────────────────────────────────────────────────────────
@@ -436,6 +452,7 @@ export function Modal({
   children,
   footer,
   maxWidth = 640,
+  onSubmit,
 }: {
   open: boolean;
   onClose: () => void;
@@ -444,7 +461,25 @@ export function Modal({
   children: ReactNode;
   footer?: ReactNode;
   maxWidth?: number;
+  onSubmit?: () => void;
 }) {
+  // Escape closes; Cmd/Ctrl+Enter submits when a primary action is wired.
+  // Mirrors the keyboard vocabulary the rest of the app uses for modals.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      } else if (onSubmit && (e.metaKey || e.ctrlKey) && e.key === "Enter") {
+        e.preventDefault();
+        onSubmit();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose, onSubmit]);
+
   if (!open) return null;
 
   return (
@@ -524,7 +559,7 @@ export function LogsModal({
               ? `${filtered.length} of ${lines.length} lines match`
               : "Most recent 120 lines"}
           </div>
-          <Button variant="secondary" onClick={onClose}>Close</Button>
+          <Button variant="secondary" shortcut="Escape" onClick={onClose}>Close</Button>
         </>
       }
     >
