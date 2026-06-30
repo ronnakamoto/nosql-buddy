@@ -214,6 +214,7 @@ pub async fn open_connection(
                 deployment_id,
                 (*client).clone(),
                 state.audit_log.clone(),
+                Some(state.epoch_manager.clone()),
             )
             .await;
     }

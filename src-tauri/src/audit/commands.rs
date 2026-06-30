@@ -12,7 +12,7 @@
 use serde::Serialize;
 use tauri::State;
 
-use crate::audit::audit_mode::{load_mode_config, AuditNetwork};
+use crate::audit::audit_mode::{load_mode_config, AuditModeConfig, AuditNetwork};
 use crate::audit::dev_setup::ChainConfig;
 use crate::audit::stellar::{CommitResult, OnChainRoot, VerifyInclusionResult};
 use crate::audit::stellar_native;
@@ -28,12 +28,25 @@ use crate::state::AppState;
 /// hardcoding `ChainConfig::testnet()`.
 fn chain_config(app: &tauri::AppHandle) -> AppResult<ChainConfig> {
     let mode = load_mode_config(app)?;
-    Ok(match mode.network {
-        AuditNetwork::Testnet => ChainConfig::testnet(),
-        AuditNetwork::Mainnet => {
-            ChainConfig::mainnet(mode.mainnet_rpc_url, mode.mainnet_contract_id)
-        }
-    })
+    Ok(chain_config_from_mode(&mode))
+}
+
+fn chain_config_from_mode(mode: &AuditModeConfig) -> ChainConfig {
+    match mode.network {
+        AuditNetwork::Testnet => testnet_chain_from_contract_id(&mode.testnet_contract_id),
+        AuditNetwork::Mainnet => ChainConfig::mainnet(
+            mode.mainnet_rpc_url.clone(),
+            mode.mainnet_contract_id.clone(),
+        ),
+    }
+}
+
+fn testnet_chain_from_contract_id(contract_id: &str) -> ChainConfig {
+    if contract_id.trim().is_empty() {
+        ChainConfig::testnet()
+    } else {
+        ChainConfig::testnet_with_contract(contract_id.to_string())
+    }
 }
 
 /// Status snapshot of the audit log.
@@ -188,10 +201,9 @@ pub async fn audit_generate_proof(
     let root_hex = hex::encode(&root_bytes);
 
     let mode_config = load_mode_config(&app)?;
-    let (network, contract_id) = match mode_config.network {
-        AuditNetwork::Testnet => ("testnet".to_string(), ChainConfig::testnet().contract_id),
-        AuditNetwork::Mainnet => ("mainnet".to_string(), mode_config.mainnet_contract_id),
-    };
+    let chain = chain_config_from_mode(&mode_config);
+    let network = chain.network.clone();
+    let contract_id = chain.contract_id.clone();
 
     // Find the epoch that contains this leaf and get its on-chain tx hash.
     let tx_hash = state
@@ -232,21 +244,7 @@ pub async fn audit_verify_proof_onchain(
     use crate::audit::audit_mode::load_production_keypair;
 
     let mode_config = load_mode_config(&app)?;
-    let (network, contract_id) = match mode_config.network {
-        AuditNetwork::Testnet => ("testnet".to_string(), ChainConfig::testnet().contract_id),
-        AuditNetwork::Mainnet => ("mainnet".to_string(), mode_config.mainnet_contract_id),
-    };
-
-    let chain = match mode_config.network {
-        AuditNetwork::Testnet => ChainConfig::testnet(),
-        AuditNetwork::Mainnet => ChainConfig {
-            contract_id,
-            rpc_url: mode_config.mainnet_rpc_url,
-            horizon_url: "https://horizon.stellar.org".to_string(),
-            passphrase: stellar_native::MAINNET_PASSPHRASE.to_string(),
-            network,
-        },
-    };
+    let chain = chain_config_from_mode(&mode_config);
 
     let kp = load_production_keypair()?.ok_or_else(|| {
         AppError::Validation("no production keypair found — save it in Audit Settings".to_string())
@@ -787,16 +785,9 @@ pub async fn audit_verify_reader_mode(
 
     // Resolve chain config for the on-chain root query.
     use crate::audit::audit_mode::load_mode_config;
-    use crate::audit::dev_setup::ChainConfig;
 
     let config = load_mode_config(&app)?;
-    let chain = match config.network {
-        crate::audit::audit_mode::AuditNetwork::Testnet => ChainConfig::testnet(),
-        crate::audit::audit_mode::AuditNetwork::Mainnet => ChainConfig::mainnet(
-            config.mainnet_rpc_url.clone(),
-            config.mainnet_contract_id.clone(),
-        ),
-    };
+    let chain = chain_config_from_mode(&config);
 
     let result = crate::audit::reader::verify_against_onchain(
         &events_jsonl,
@@ -922,17 +913,10 @@ pub async fn audit_get_onchain_root_rpc(
     rpc_url: Option<String>,
 ) -> AppResult<Option<OnChainRoot>> {
     use crate::audit::audit_mode::load_mode_config;
-    use crate::audit::dev_setup::ChainConfig;
     use crate::audit::stellar_native;
 
     let config = load_mode_config(&app)?;
-    let chain = match config.network {
-        crate::audit::audit_mode::AuditNetwork::Testnet => ChainConfig::testnet(),
-        crate::audit::audit_mode::AuditNetwork::Mainnet => ChainConfig::mainnet(
-            config.mainnet_rpc_url.clone(),
-            config.mainnet_contract_id.clone(),
-        ),
-    };
+    let chain = chain_config_from_mode(&config);
 
     let url = rpc_url.unwrap_or_else(|| chain.rpc_url.clone());
     let kp = stellar_native::generate_keypair();
@@ -990,6 +974,146 @@ pub async fn audit_generate_stellar_account() -> AppResult<String> {
     Ok(account_id)
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditContractProvisionResult {
+    pub account_id: String,
+    pub contract_id: String,
+    pub reused: bool,
+    pub wasm_hash_hex: Option<String>,
+    pub upload_tx_hash: Option<String>,
+    pub create_tx_hash: Option<String>,
+}
+
+/// Provision a per-user testnet commitment contract owned by the in-app key.
+#[tauri::command]
+pub async fn audit_provision_testnet_contract(
+    _state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> AppResult<AuditContractProvisionResult> {
+    use crate::audit::audit_mode::{
+        load_mode_config, load_production_keypair, save_production_network, AuditMode, AuditNetwork,
+    };
+    use crate::audit::dev_setup::{
+        generate_and_fund_account, load_keypair_from_keychain, save_keypair_to_keychain,
+    };
+    use tauri::Manager;
+
+    let config = load_mode_config(&app)?;
+
+    // The keypair that deploys and initializes the contract MUST be the same
+    // one that later signs commits (`commit_root*` is admin-gated). Pick it by
+    // mode so deploy, commit, and attest all use one identity:
+    //   - Production: the user's imported `S…` key (funded on testnet so it can
+    //     pay deploy fees; a no-op if already funded).
+    //   - Dev: the app's local trial key (generated + funded on first use).
+    let kp = match config.mode {
+        AuditMode::Production => {
+            let kp = load_production_keypair()?.ok_or_else(|| {
+                AppError::Validation(
+                    "no production keypair found — import your Stellar secret key in Audit \
+                     Settings before provisioning a testnet contract"
+                        .to_string(),
+                )
+            })?;
+            if let Err(e) = stellar_native::fund_account(&kp.account_id()).await {
+                // Friendbot rejects already-funded accounts; that is fine. A
+                // genuinely unfunded account will surface a clear error at deploy.
+                tracing::warn!("friendbot funding for {} skipped: {e}", kp.account_id());
+            }
+            kp
+        }
+        AuditMode::Dev => match load_keypair_from_keychain()? {
+            Some(kp) => kp,
+            None => {
+                let kp = generate_and_fund_account().await?;
+                save_keypair_to_keychain(&kp)?;
+                kp
+            }
+        },
+    };
+    let account_id = kp.account_id();
+
+    let existing_contract_id = config.testnet_contract_id.clone();
+    if !existing_contract_id.trim().is_empty() {
+        let chain = ChainConfig::testnet_with_contract(existing_contract_id.clone());
+        match stellar_native::get_admin_native(&kp, &chain.rpc_url, &chain.contract_id).await {
+            Ok(Some(admin)) if admin == account_id => {
+                return Ok(AuditContractProvisionResult {
+                    account_id,
+                    contract_id: existing_contract_id,
+                    reused: true,
+                    wasm_hash_hex: None,
+                    upload_tx_hash: None,
+                    create_tx_hash: None,
+                });
+            }
+            Ok(Some(admin)) => {
+                return Err(AppError::Validation(format!(
+                    "configured testnet contract {contract} is owned by {admin}, not this app key ({account}). Clear it or import the admin key.",
+                    contract = existing_contract_id,
+                    account = account_id,
+                )));
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "configured testnet contract {} is not initialized; deploying a fresh contract",
+                    existing_contract_id
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "could not validate configured testnet contract {}: {}; deploying a fresh contract",
+                    existing_contract_id,
+                    e
+                );
+            }
+        }
+    }
+
+    let resource = app
+        .path()
+        .resolve(
+            "resources/contract/zk_audit_commitment.wasm",
+            tauri::path::BaseDirectory::Resource,
+        )
+        .map_err(|e| AppError::Validation(format!("resolve contract WASM resource: {e}")))?;
+    let wasm = std::fs::read(&resource)
+        .map_err(|e| AppError::Validation(format!("read contract WASM resource: {e}")))?;
+
+    let chain = ChainConfig::testnet();
+    let deployed = stellar_native::deploy_contract_native(
+        &wasm,
+        &kp,
+        &chain.rpc_url,
+        &chain.passphrase,
+    )
+    .await?;
+    stellar_native::initialize_contract_native(
+        &deployed.contract_id,
+        &kp,
+        &chain.rpc_url,
+        &chain.passphrase,
+    )
+    .await?;
+
+    save_production_network(
+        &app,
+        AuditNetwork::Testnet,
+        deployed.contract_id.clone(),
+        String::new(),
+    )?;
+
+    Ok(AuditContractProvisionResult {
+        account_id,
+        contract_id: deployed.contract_id,
+        reused: false,
+        wasm_hash_hex: Some(deployed.wasm_hash_hex),
+        upload_tx_hash: Some(deployed.upload_tx_hash),
+        create_tx_hash: Some(deployed.create_tx_hash),
+    })
+}
+
 /// Check if the given MongoDB connection is a replica set
 /// (required for change streams).
 #[tauri::command]
@@ -1041,6 +1165,30 @@ async fn commit_latest_epoch_root(
     use crate::audit::oplog::{compute_oplog_range_hash, get_majority_commit_ts};
 
     let audit = &state.audit_log;
+
+    // Preflight: `commit_root*` are admin-gated (`admin.require_auth()`). A
+    // commit signed by a non-admin key passes simulation (Soroban records auth
+    // without verifying signatures) but traps on-chain
+    // (`INVOKE_HOST_FUNCTION_TRAPPED`), wasting a fee and surfacing an opaque
+    // XDR. Check the contract admin up front and fail with an actionable
+    // message. A read failure (e.g. RPC hiccup) must not block the commit, so
+    // we only hard-fail on a confirmed mismatch.
+    match stellar_native::get_admin_native(kp, &chain.rpc_url, &chain.contract_id).await {
+        Ok(Some(admin)) if admin != kp.account_id() => {
+            return Err(AppError::Validation(format!(
+                "this Stellar key ({signer}) is not the admin of contract {contract} \
+                 (admin is {admin}). Commits are owner-only, so the network would reject this \
+                 on-chain. Deploy and initialize your own contract so this key becomes admin and \
+                 set its contract ID, or import the admin key.",
+                signer = kp.account_id(),
+                contract = chain.contract_id,
+            )));
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!("commit preflight admin check could not complete (continuing): {e}");
+        }
+    }
 
     // Find the most recent sealed (closed), uncommitted epoch. The UI seals an
     // epoch before committing, so this is the epoch the user intends to commit.
@@ -1198,25 +1346,16 @@ pub async fn audit_commit_root_production(
     connection_id: Option<String>,
 ) -> AppResult<CommitResult> {
     use crate::audit::audit_mode::{load_mode_config, load_production_keypair, AuditNetwork};
-    use crate::audit::dev_setup::ChainConfig;
 
     // Load mode config to pick the network + contract/rpc.
     let config = load_mode_config(&app)?;
 
-    let chain = match config.network {
-        AuditNetwork::Testnet => ChainConfig::testnet(),
-        AuditNetwork::Mainnet => {
-            if config.mainnet_contract_id.is_empty() {
-                return Err(AppError::Validation(
-                    "mainnet contract ID is not configured — set it in Audit Settings".to_string(),
-                ));
-            }
-            ChainConfig::mainnet(
-                config.mainnet_rpc_url.clone(),
-                config.mainnet_contract_id.clone(),
-            )
-        }
-    };
+    if config.network == AuditNetwork::Mainnet && config.mainnet_contract_id.is_empty() {
+        return Err(AppError::Validation(
+            "mainnet contract ID is not configured — set it in Audit Settings".to_string(),
+        ));
+    }
+    let chain = chain_config_from_mode(&config);
 
     // Load the production keypair from the keychain.
     let kp = load_production_keypair()?.ok_or_else(|| {
@@ -1383,6 +1522,128 @@ pub async fn audit_get_attestation_status(
     Ok(state
         .attestation_manager
         .get_status(epoch_number, &root_hex)?)
+}
+
+// ─── On-chain (independent) attestation commands ──────────────────────
+//
+// These wrap the Soroban contract directly. Unlike the off-chain
+// `attestation_manager` (operator-held), the trust here comes from the
+// contract: only keys the admin authorized can attest, signatures are
+// ed25519-verified on-chain, and `verify_attestation` enforces the K-of-N
+// threshold. The operator never holds an attester's secret key — auditors run
+// their own attester and submit `attest_oplog` from their own account.
+
+/// Load the mode-aware operator keypair (admin of the on-chain contract).
+fn load_operator_keypair(
+    app: &tauri::AppHandle,
+) -> AppResult<stellar_native::StellarKeypair> {
+    use crate::audit::audit_mode::{load_mode_config, load_production_keypair, AuditMode};
+    use crate::audit::dev_setup::load_keypair_from_keychain;
+    let config = load_mode_config(app)?;
+    match config.mode {
+        AuditMode::Production => load_production_keypair()?.ok_or_else(|| {
+            AppError::Validation(
+                "no production keypair found — import your Stellar secret key in Audit Settings"
+                    .to_string(),
+            )
+        }),
+        AuditMode::Dev => load_keypair_from_keychain()?.ok_or_else(|| {
+            AppError::Validation("no dev keypair found — start the audit trial first".to_string())
+        }),
+    }
+}
+
+/// Authorize an external auditor's attester key on-chain (admin only).
+///
+/// `stellar_address` is the auditor's `G...` account; `ed25519_pubkey_hex` is
+/// the 32-byte ed25519 public key (64 hex chars) that signs oplog attestations.
+/// The auditor keeps both secrets; the operator only ever receives public
+/// material. This is the F1 key-separation step.
+#[tauri::command]
+pub async fn audit_authorize_onchain_attester(
+    app: tauri::AppHandle,
+    stellar_address: String,
+    ed25519_pubkey_hex: String,
+) -> AppResult<()> {
+    let chain = chain_config(&app)?;
+    let kp = load_operator_keypair(&app)?;
+    stellar_native::authorize_attester_native(
+        &chain.contract_id,
+        &kp,
+        stellar_address.trim(),
+        ed25519_pubkey_hex.trim(),
+        &chain.rpc_url,
+        &chain.passphrase,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Revoke a previously-authorized attester on-chain (admin only).
+#[tauri::command]
+pub async fn audit_revoke_onchain_attester(
+    app: tauri::AppHandle,
+    stellar_address: String,
+) -> AppResult<()> {
+    let chain = chain_config(&app)?;
+    let kp = load_operator_keypair(&app)?;
+    stellar_native::revoke_attester_native(
+        &chain.contract_id,
+        &kp,
+        stellar_address.trim(),
+        &chain.rpc_url,
+        &chain.passphrase,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Set the on-chain K-of-N attestation threshold (admin only).
+#[tauri::command]
+pub async fn audit_set_onchain_threshold(
+    app: tauri::AppHandle,
+    threshold: u32,
+) -> AppResult<()> {
+    let chain = chain_config(&app)?;
+    let kp = load_operator_keypair(&app)?;
+    stellar_native::set_threshold_native(
+        &chain.contract_id,
+        &kp,
+        threshold,
+        &chain.rpc_url,
+        &chain.passphrase,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Read the on-chain K-of-N attestation threshold.
+#[tauri::command]
+pub async fn audit_get_onchain_threshold(app: tauri::AppHandle) -> AppResult<u32> {
+    let chain = chain_config(&app)?;
+    let kp = load_operator_keypair(&app)?;
+    Ok(stellar_native::get_threshold_native(&kp, &chain.rpc_url, &chain.contract_id).await?)
+}
+
+/// Query the contract's independent attestation verdict for a sequence.
+///
+/// This is the trust anchor for the UI: `verified` means K distinct authorized
+/// attesters each signed the exact committed oplog root. The operator's own key
+/// cannot produce this verdict.
+#[tauri::command]
+pub async fn audit_verify_onchain_attestation(
+    app: tauri::AppHandle,
+    sequence: u64,
+) -> AppResult<crate::audit::stellar::OnChainAttestationVerification> {
+    let chain = chain_config(&app)?;
+    let kp = load_operator_keypair(&app)?;
+    Ok(stellar_native::verify_attestation_native(
+        &kp,
+        &chain.rpc_url,
+        &chain.contract_id,
+        sequence,
+    )
+    .await?)
 }
 
 // ─── Oplog completeness verification commands ─────────────────────────

@@ -27,7 +27,7 @@ pub struct AppState {
     pub timeline: Arc<TimelineStore>,
     pub audit_log: Arc<AuditLog>,
     pub change_streams: ChangeStreamRegistry,
-    pub epoch_manager: EpochManager,
+    pub epoch_manager: Arc<EpochManager>,
     pub attestation_manager: AttestationManager,
     pub verification_store: VerificationStore,
 }
@@ -62,7 +62,7 @@ impl AppState {
             timeline: Arc::new(TimelineStore::with_path(timeline_path)),
             audit_log: Arc::new(build_audit_log()),
             change_streams: ChangeStreamRegistry::new(),
-            epoch_manager: EpochManager::default(),
+            epoch_manager: Arc::new(EpochManager::default()),
             attestation_manager: AttestationManager::default(),
             verification_store: VerificationStore::default(),
         }

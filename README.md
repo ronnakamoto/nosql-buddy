@@ -191,7 +191,7 @@ There are two ways to run it (the Audit tab shows both as cards). Pick based on 
 |---|---|---|
 | **Runs where** | Full stack in Docker on your machine | In-app pipeline — no Docker, no daemons |
 | **Stellar keys** | Two testnet keys you generate (publisher + attester) | Your own keypair |
-| **Contract** | Bundled testnet contract | Auto-funded on testnet, or your own on mainnet |
+| **Contract** | Bundled testnet contract | Auto-deployed per-user contract on testnet (owned by your key), or your own on mainnet |
 | **Network** | Testnet | Testnet or mainnet |
 | **MongoDB** | 3-node replica set (`docker-compose.audit-db.yml`) | Your own replica set / cluster |
 | **Best for** | Learning and demoing the full system (publisher + independent attester + reader, K-of-N, oplog completeness) | Auditing your real data with keys and a contract you control |
@@ -210,9 +210,9 @@ Runs the **complete audit system** on your machine via Docker — publisher, ind
 
 1. Open the app, go to the Audit tab, and select **Dev Mode**.
 
-2. Click **Set up**. This runs the setup wizard for you — no terminal required. It generates the two independent Stellar keypairs (publisher + attester), funds them on testnet via Friendbot, uses the bundled testnet contract, generates the attester's ed25519 oplog key, authorizes the attester on the contract, and writes `attester.key` + `.env.audit`. Enter your Pinata API key/secret in the form to enable IPFS publishing (optional). Your secret keys are stored locally and are never displayed.
+2. Click **Set up**. This runs the setup wizard for you — no terminal required. It generates the two independent Stellar keypairs (publisher + attester), funds them on testnet via Friendbot, deploys a fresh audit contract so the publisher becomes its admin, generates the attester's ed25519 oplog key, authorizes the attester on the contract, and writes `attester.key` + `.env.audit`. Enter your Pinata API key/secret in the form to enable IPFS publishing (optional). Your secret keys are stored locally and are never displayed.
 
-   > **No `stellar` CLI needed for Dev Mode.** The wizard funds accounts and authorizes the attester with native signing against the bundled testnet contract. The CLI is only required if you choose to *deploy* a brand-new contract, which Dev Mode doesn't.
+   > **No host `stellar` CLI or Rust toolchain needed for Dev Mode.** The setup runs inside the audit Docker image, which bundles the `stellar` CLI and a prebuilt contract WASM. The wizard deploys the contract and authorizes the attester from there, so deploying a per-user contract is the default — your publisher key owns it, which is required for committing roots and authorizing the attester.
    >
    > **Why two keys?** The trust model requires the attester to be independent from the operator. If both used the same key, the operator could submit fake attestations themselves, defeating independent verification — so the wizard generates two separate keypairs.
 
@@ -239,7 +239,7 @@ Runs the in-app audit pipeline with **your own Stellar keypair** and contract. C
 **Use this when:** you want to audit your real data with keys and a contract you control — no Docker, no background daemons.
 
 **What you need:**
-- Your Stellar secret key (`S…`). On **testnet** the app auto-funds a fresh contract for you, so the key alone is enough to try it. On **mainnet** you also need your deployed contract ID (`C…`) and an RPC URL.
+- Your Stellar secret key (`S…`). On **testnet** the key alone is enough: the first commit funds your account via Friendbot and deploys a fresh commitment contract owned by that key. On **mainnet** you also need your deployed contract ID (`C…`) and an RPC URL.
 - A MongoDB **replica set** connection (change streams and oplog require it; a standalone `mongod` won't work).
 
 **Steps:**
@@ -254,9 +254,25 @@ Runs the in-app audit pipeline with **your own Stellar keypair** and contract. C
 
 5. The live view shows: event feed, epoch progress, on-chain root, verify integrity, per-event proofs, and advanced details — committing via your keypair on your chosen network.
 
-6. Click **Commit Now** to close the epoch, pin to IPFS, and commit the root on-chain via native signing.
+6. Click **Commit Now** to commit a sealed batch. On testnet the first commit also provisions your contract (see below); pin to IPFS, commit the root on-chain via native signing, then self-attest the root. The batch shows **Verified 1/1** once attested.
 
 **Switching modes:** Click **Settings** in the audit panel, then toggle between Dev and Production. The panel re-routes immediately.
+
+#### Testnet contract provisioning, persistence, and demo attestation
+
+Production Mode on **testnet** is self-contained: you never run the `stellar` CLI, deploy a contract by hand, or paste a contract ID. The app handles it on your first commit.
+
+**Automatic contract deploy (first testnet commit).** `commit_root*` is admin-gated on-chain, so a commit signed by a key that isn't the contract admin passes simulation but traps on apply. To avoid that, the first testnet commit provisions a commitment contract **owned by your imported key**:
+
+1. Funds your account via Friendbot if needed (a no-op if it's already funded).
+2. Uploads the bundled `zk_audit_commitment.wasm` (shipped in `src-tauri/resources/contract/`) and creates a contract instance, signing natively (ed25519 + Soroban RPC), with no `stellar` CLI.
+3. Calls `initialize`, which sets the contract **admin = your key**, so your later commits are authorized.
+
+The same key deploys, initializes, commits, and attests, so the admin check always passes. The step is **idempotent**: subsequent commits detect that your key already owns the contract and reuse it instead of redeploying.
+
+**Per-network contract ID persistence.** The deployed contract ID is saved to the app's global settings, keyed by network (`testnet` vs `mainnet`). It survives restarts and overrides the bundled testnet default, so every future testnet commit targets *your* contract. You can see the active contract ID under **Advanced → Your contract** in the Audit tab. Mainnet uses the contract ID you supply; nothing is auto-deployed there.
+
+**Single-attestor demo verification (K=1).** Full K-of-N threshold attestation (the Dev Mode model) requires independent attesters. Production Mode's in-app trial registers your key as the sole attester and sets the threshold to **K=1**, so after each commit the app signs the batch root and the batch immediately shows **Verified 1/1**. This demonstrates the attestation surface end to end with one identity; a real deployment registers independent attesters and raises K (see [Dev Mode](#dev-mode-full-stack-locally) and the [oplog completeness protocol](#oplog-completeness-protocol)).
 
 ### Audit domains and selective disclosure
 
@@ -298,7 +314,7 @@ If you don't want to install the Rust toolchain, you can run the full audit stac
    docker compose -f docker-compose.audit-db.yml up -d
    ```
 
-2. Run the setup wizard (interactive, in Docker). It generates the publisher + attester keypairs, funds them on testnet, uses the bundled testnet contract, generates and authorizes the attester's ed25519 oplog key, and writes `./attester.key` + `.env.audit` into the project root:
+2. Run the setup wizard (interactive, in Docker). It generates the publisher + attester keypairs, funds them on testnet, deploys a fresh audit contract (publisher becomes admin), generates and authorizes the attester's ed25519 oplog key, and writes `./attester.key` + `.env.audit` into the project root:
    ```bash
    docker compose -f docker-compose.audit.yml run --build --rm setup
    ```
@@ -356,7 +372,7 @@ The wizard walks you through:
 7. Entering Pinata IPFS credentials (optional)
 8. Writing `.env.audit` with all values
 
-> **Contract deployment** (deploying a brand-new contract) requires the `stellar` CLI and is only available via the from-source wizard — the Docker image doesn't bundle the CLI. Dev Mode and the default flow use the bundled testnet contract, so the Docker wizard is all you need. The `initialize` and `authorize_attester` calls use native signing — no CLI required.
+> **Contract deployment.** The audit Docker image bundles the `stellar` CLI and a prebuilt contract WASM, so the wizard deploys a fresh per-user contract by default (your publisher becomes its admin). Pass an existing `CONTRACT_ID` only if you want to reuse a contract you already control. Running the wizard from a full source checkout works too and additionally lets it build the WASM from source.
 >
 > **Setting up Dev Mode?** This is the recommended one-command path — see [Dev Mode](#dev-mode-full-stack-locally).
 

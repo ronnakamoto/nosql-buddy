@@ -857,6 +857,85 @@ pub async fn audit_dev_stack_setup(
         .map_err(|e| AppError::Internal(format!("stack setup task join: {e}")))?
 }
 
+/// The public Stellar addresses of the dev-stack publisher and attester.
+///
+/// Derived by reading `.env.audit` and decoding the secret-key strkeys into
+/// their corresponding public `G...` addresses. Used by the UI to make key
+/// separation visible: the publisher and attester are distinct accounts.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevStackIdentities {
+    /// The publisher's Stellar account address (operator).
+    pub publisher_address: String,
+    /// The attester's Stellar account address (independent auditor).
+    pub attester_address: String,
+    /// The Soroban contract ID the stack is configured against.
+    pub contract_id: String,
+}
+
+/// Read `.env.audit` and return the publisher/attester public addresses.
+///
+/// Only the public addresses are returned; secret keys are never exposed to
+/// the frontend.
+#[tauri::command]
+pub async fn audit_dev_stack_identities(
+    app: AppHandle,
+) -> AppResult<Option<DevStackIdentities>> {
+    use audit_service::auditd::load_keypair_from_secret_key;
+
+    let ctx = stack_ctx(&app).ok();
+    let ctx = match ctx {
+        Some(c) => c,
+        None => return Ok(None),
+    };
+    let env_path = ctx.dir.join(".env.audit");
+    if !env_path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&env_path)
+        .map_err(|e| AppError::Internal(format!("read .env.audit: {e}")))?;
+
+    let mut publisher_secret = String::new();
+    let mut attester_secret = String::new();
+    let mut contract_id = String::new();
+    for line in content.lines() {
+        if let Some(val) = line.strip_prefix("STELLAR_SECRET_KEY=") {
+            publisher_secret = val.trim().to_string();
+        } else if let Some(val) = line.strip_prefix("ATTESTER_SECRET_KEY=") {
+            attester_secret = val.trim().to_string();
+        } else if let Some(val) = line.strip_prefix("CONTRACT_ID=") {
+            contract_id = val.trim().to_string();
+        }
+    }
+
+    if publisher_secret.is_empty() && attester_secret.is_empty() {
+        return Ok(None);
+    }
+
+    let publisher_address = if publisher_secret.is_empty() {
+        String::new()
+    } else {
+        match load_keypair_from_secret_key(&publisher_secret) {
+            Ok(kp) => kp.account_id(),
+            Err(_) => String::new(),
+        }
+    };
+    let attester_address = if attester_secret.is_empty() {
+        String::new()
+    } else {
+        match load_keypair_from_secret_key(&attester_secret) {
+            Ok(kp) => kp.account_id(),
+            Err(_) => String::new(),
+        }
+    };
+
+    Ok(Some(DevStackIdentities {
+        publisher_address,
+        attester_address,
+        contract_id,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

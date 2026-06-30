@@ -130,11 +130,16 @@ pub struct AttestationVerification {
     pub attestation_count: u32,
     /// Number of attestations from currently-authorized attesters.
     pub authorized_count: u32,
-    /// True if all attestations are from authorized attesters and count > 0.
+    /// The K-of-N threshold in effect (minimum distinct authorized attesters
+    /// required for a "verified" verdict).
+    pub threshold: u32,
+    /// True if all attestations are from authorized attesters AND the count of
+    /// authorized attesters meets the threshold.
     pub all_match: bool,
-    /// "verified" if all attestations are authorized and count > 0,
+    /// "verified" if authorized attestations >= threshold,
     /// "no_attestations" if count == 0,
-    /// "unauthorized_attester" if any attester is no longer authorized.
+    /// "unauthorized_attester" if any attester is no longer authorized,
+    /// "threshold_not_met" if all authorized but fewer than the threshold.
     pub verdict: String,
 }
 
@@ -161,6 +166,7 @@ pub enum CommitmentError {
     DuplicateAttestation = 13,
     InvalidOplogRoot = 14,
     InvalidTimestampRange = 15,
+    InvalidThreshold = 16,
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +180,8 @@ pub enum InstanceKey {
     CurrentRoot,
     /// Set of authorized attester addresses.
     AuthorizedAttesters,
+    /// K-of-N attestation threshold (u32, minimum 1).
+    Threshold,
 }
 
 #[contracttype]
@@ -205,6 +213,9 @@ impl ZkAuditCommitment {
         admin.require_auth();
         env.storage().instance().set(&InstanceKey::Admin, &admin);
         env.storage().instance().set(&InstanceKey::Sequence, &0u64);
+        // Default threshold is 1 (any single authorized attester verifies an
+        // epoch). Admins raise this via `set_threshold` for multi-auditor trust.
+        env.storage().instance().set(&InstanceKey::Threshold, &1u32);
     }
 
     /// Set a new admin. Only the current admin can call this.
@@ -217,6 +228,30 @@ impl ZkAuditCommitment {
     /// Get the current admin address.
     pub fn get_admin(env: Env) -> Result<Address, CommitmentError> {
         Self::get_admin_or_err(&env)
+    }
+
+    /// Set the K-of-N attestation threshold: the minimum number of distinct
+    /// currently-authorized attesters required for an epoch's attestation to
+    /// be considered "verified". Only the admin can call this. Must be >= 1.
+    pub fn set_threshold(env: Env, threshold: u32) -> Result<(), CommitmentError> {
+        let admin = Self::get_admin_or_err(&env)?;
+        admin.require_auth();
+        if threshold < 1 {
+            return Err(CommitmentError::InvalidThreshold);
+        }
+        env.storage()
+            .instance()
+            .set(&InstanceKey::Threshold, &threshold);
+        Ok(())
+    }
+
+    /// Get the current K-of-N attestation threshold. Defaults to 1 for
+    /// contracts initialized before threshold support was added.
+    pub fn get_threshold(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&InstanceKey::Threshold)
+            .unwrap_or(1u32)
     }
 
     /// Commit a new Merkle root to the append-only log.
@@ -569,14 +604,17 @@ impl ZkAuditCommitment {
                 authorized_count += 1;
             }
         }
+        let threshold = Self::get_threshold(env.clone());
 
         // 5. Compute the verdict and all_match flag.
         let (all_match, verdict) = if attestation_count == 0 {
             (false, String::from_str(&env, "no_attestations"))
-        } else if authorized_count == attestation_count {
+        } else if authorized_count < attestation_count {
+            (false, String::from_str(&env, "unauthorized_attester"))
+        } else if authorized_count >= threshold {
             (true, String::from_str(&env, "verified"))
         } else {
-            (false, String::from_str(&env, "unauthorized_attester"))
+            (false, String::from_str(&env, "threshold_not_met"))
         };
 
         Ok(AttestationVerification {
@@ -584,6 +622,7 @@ impl ZkAuditCommitment {
             oplog_root: commitment.oplog_root,
             attestation_count,
             authorized_count,
+            threshold,
             all_match,
             verdict,
         })

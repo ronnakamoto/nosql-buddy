@@ -42,6 +42,24 @@ fn test_initialize_and_admin() {
 
     let got_admin = client.get_admin();
     assert_eq!(got_admin, admin);
+    assert_eq!(client.get_threshold(), 1);
+}
+
+#[test]
+fn test_set_threshold() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, ZkAuditCommitment);
+    let client = ZkAuditCommitmentClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    env.mock_all_auths();
+    client.initialize(&admin);
+
+    client.set_threshold(&2u32);
+    assert_eq!(client.get_threshold(), 2);
+
+    let result = client.try_set_threshold(&0u32);
+    assert!(result.is_err());
 }
 
 #[test]
@@ -528,6 +546,7 @@ fn test_verify_attestation() {
     assert_eq!(verification.oplog_root, oplog_root);
     assert_eq!(verification.attestation_count, 1);
     assert_eq!(verification.authorized_count, 1);
+    assert_eq!(verification.threshold, 1);
     assert_eq!(verification.all_match, true);
     assert_eq!(verification.verdict, String::from_str(&env, "verified"));
 
@@ -551,4 +570,62 @@ fn test_verify_attestation() {
     assert_eq!(verification2.authorized_count, 0);
     assert_eq!(verification2.all_match, false);
     assert_eq!(verification2.verdict, String::from_str(&env, "no_attestations"));
+}
+
+#[test]
+fn test_verify_attestation_threshold_k_of_n() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, ZkAuditCommitment);
+    let client = ZkAuditCommitmentClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let (attester1, key1, pk1) = generate_attester(&env);
+    let (attester2, key2, pk2) = generate_attester(&env);
+    env.mock_all_auths();
+    client.initialize(&admin);
+    client.authorize_attester(&attester1, &pk1);
+    client.authorize_attester(&attester2, &pk2);
+
+    // Require 2-of-N.
+    client.set_threshold(&2u32);
+
+    let root = Bytes::from_array(&env, &[0xaa; 32]);
+    let oplog_root = Bytes::from_array(&env, &[0xbb; 32]);
+    let oplog_end_ts = 1000u64;
+    let seq = client.commit_root_with_oplog(
+        &root,
+        &oplog_root,
+        &0u64,
+        &oplog_end_ts,
+        &42u64,
+        &String::from_str(&env, "epoch=0"),
+    );
+
+    // First attester signs — authorized but below the threshold of 2.
+    let sig1 = Bytes::from_array(&env, &sign_oplog_attestation(&key1, &[0xbb; 32], oplog_end_ts));
+    client.attest_oplog(&attester1, &seq, &sig1);
+
+    let v1 = client.verify_attestation(&seq);
+    assert_eq!(v1.threshold, 2);
+    assert_eq!(v1.authorized_count, 1);
+    assert_eq!(v1.all_match, false);
+    assert_eq!(v1.verdict, String::from_str(&env, "threshold_not_met"));
+
+    // Second authorized attester signs — threshold met.
+    let sig2 = Bytes::from_array(&env, &sign_oplog_attestation(&key2, &[0xbb; 32], oplog_end_ts));
+    client.attest_oplog(&attester2, &seq, &sig2);
+
+    let v2 = client.verify_attestation(&seq);
+    assert_eq!(v2.authorized_count, 2);
+    assert_eq!(v2.all_match, true);
+    assert_eq!(v2.verdict, String::from_str(&env, "verified"));
+
+    // Revoking one attester invalidates its on-record attestation, so the
+    // count of authorized attestations no longer matches the total — the
+    // verdict reflects an unauthorized attestation on record.
+    client.revoke_attester(&attester2);
+    let v3 = client.verify_attestation(&seq);
+    assert_eq!(v3.authorized_count, 1);
+    assert_eq!(v3.all_match, false);
+    assert_eq!(v3.verdict, String::from_str(&env, "unauthorized_attester"));
 }

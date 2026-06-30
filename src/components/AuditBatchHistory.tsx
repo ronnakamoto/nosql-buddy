@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { Epoch } from "../ipc/commands";
 import { Badge, Button, KeyValue, TxHashLink } from "./AuditUi";
 import { InfoPopover } from "./InfoPopover";
+import { ChevronRight } from "lucide-react";
 
 /**
  * AuditBatchHistory — compact epoch table with expandable rows and inline actions.
@@ -129,7 +130,9 @@ function EpochRow({
           )}
         </span>
 
-        <span className={`audit-epoch-summary__chevron ${expanded ? "audit-epoch-summary__chevron--open" : ""}`}>▶</span>
+        <span className={`audit-epoch-summary__chevron ${expanded ? "audit-epoch-summary__chevron--open" : ""}`}>
+          <ChevronRight size={13} aria-hidden="true" />
+        </span>
       </div>
 
       {/* Expanded detail */}
@@ -189,7 +192,7 @@ export function AuditBatchHistory({
 
   return (
     <div className="audit-section">
-      <div className="audit-section-header" onClick={onToggle} style={{ cursor: "pointer" }}>
+      <div className="audit-section-header" onClick={onToggle}>
         <span className="audit-section-header__title">
           Batch History
           <InfoPopover label="Help: Batch History" title="Batch History"><p>Table of all audit batches (epochs). Each row shows status, event count, on-chain transaction, and verification state. Expand a row for details.</p></InfoPopover>
@@ -198,7 +201,7 @@ export function AuditBatchHistory({
           </span>
         </span>
         <span className={`audit-section-header__chevron ${collapsed ? "" : "audit-section-header__chevron--open"}`}>
-          ▶
+          <ChevronRight size={15} aria-hidden="true" />
         </span>
       </div>
 

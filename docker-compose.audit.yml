@@ -146,7 +146,8 @@ services:
   # ─── One-off setup wizard (Dev Mode) ──────────────────────────────────
   # Interactive wizard that does all the audit key setup for you: generates
   # the publisher + attester Stellar keypairs, funds them on testnet via
-  # Friendbot, uses the bundled testnet contract, generates the attester
+  # Friendbot, deploys a fresh audit contract (publisher becomes admin),
+  # generates the attester
   # ed25519 oplog key, authorizes the attester on the contract, and writes
   # ./attester.key + .env.audit into the project root (mounted at /work) —
   # exactly where the publisher/attester/reader services pick them up.

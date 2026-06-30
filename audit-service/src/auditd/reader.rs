@@ -120,11 +120,17 @@ pub struct OplogIntegrityReport {
     pub auditor_oplog_root: Option<String>,
     /// Number of oplog entries in the range (from the auditor's computation).
     pub oplog_entry_count: Option<u64>,
-    /// Whether all three roots match.
+    /// Whether every comparison actually performed passed. In reader mode
+    /// the auditor connects to its own independent member and does NOT query
+    /// the operator's live replica, so this reflects the on-chain (operator's
+    /// committed) root vs the auditor's independent recomputation. It is not a
+    /// three-way compare unless `operator_oplog_root` is populated.
     pub all_match: bool,
     /// Whether the on-chain root matches the auditor's root.
     pub on_chain_matches_auditor: bool,
-    /// Whether the operator's root matches the auditor's root.
+    /// Whether the operator's *live* root matches the auditor's root. Only
+    /// meaningful when `operator_oplog_root` is populated; in reader mode the
+    /// operator's live root is not queried, so this is `false` (not computed).
     pub operator_matches_auditor: bool,
     /// Overall verdict: "complete", "mismatch", or "incomplete".
     pub verdict: String,
@@ -298,17 +304,23 @@ pub async fn verify_oplog(
         None => false,
     };
 
-    // The operator's root is not directly available in reader mode —
-    // the reader connects to the independent member. In a full deployment,
-    // the operator would expose their computed root via the publisher API.
-    // For now, we compare on-chain vs. auditor only.
+    // The operator's *live* root is not directly available in reader mode —
+    // the reader connects to the auditor's independent member. The operator's
+    // committed claim is the on-chain root, which we verify against the
+    // auditor's independent recomputation. `operator_oplog_root` stays None to
+    // make explicit that it was not independently recomputed here (a full
+    // deployment would expose it via the publisher API for a true 3-way compare).
     let operator_oplog_root: Option<String> = None;
     let operator_matches_auditor = match (&operator_oplog_root, &auditor_oplog_root) {
         (Some(op), Some(aud)) => op == aud,
         _ => false,
     };
 
-    let all_match = on_chain_matches_auditor && operator_matches_auditor;
+    // Report `all_match` as the comparison actually performed (on-chain vs
+    // auditor). Reporting a three-way AND with an un-computed operator root
+    // made `all_match` permanently false even on a verified `complete` verdict,
+    // which misled anyone reading the raw report.
+    let all_match = on_chain_matches_auditor;
 
     let (verdict, explanation, alerts) = if auditor_oplog_root.is_none() {
         (

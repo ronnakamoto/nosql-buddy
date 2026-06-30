@@ -37,12 +37,16 @@ impl Default for ChainConfig {
 
 impl ChainConfig {
     pub fn testnet() -> Self {
+        Self::testnet_with_contract(CONTRACT_ID.to_string())
+    }
+
+    pub fn testnet_with_contract(contract_id: String) -> Self {
         Self {
             network: "testnet".to_string(),
             rpc_url: TESTNET_RPC_URL.to_string(),
             horizon_url: TESTNET_HORIZON_URL.to_string(),
             passphrase: TESTNET_PASSPHRASE.to_string(),
-            contract_id: CONTRACT_ID.to_string(),
+            contract_id,
         }
     }
 

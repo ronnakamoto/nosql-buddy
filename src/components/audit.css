@@ -56,6 +56,28 @@
   box-shadow: var(--shadow-xs);
 }
 
+.audit-mode-tab:disabled {
+  cursor: not-allowed;
+  color: var(--ink-faint);
+  opacity: 0.7;
+}
+
+.audit-mode-tab:disabled:hover {
+  color: var(--ink-faint);
+}
+
+.audit-mode-tab__soon {
+  margin-left: 6px;
+  padding: 1px 5px;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-faint);
+  background: var(--surface-3);
+  border-radius: var(--radius-sm);
+}
+
 /* ─── Step guide (dev flow workflow indicator) ─────────────────── */
 
 .audit-step-guide {
@@ -1573,8 +1595,43 @@
 .audit-surface__body {
   display: flex;
   flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+
+/* Quiet maintenance footer: destructive actions live at the bottom, set
+   apart from the operational content by a hairline. */
+.audit-surface__maintenance {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+
+.audit-reset {
+  display: flex;
+  align-items: center;
   gap: var(--space-2);
-  padding: var(--space-3);
+}
+
+.audit-reset__prompt {
+  font-size: var(--font-size-xs);
+  color: var(--ink-muted);
+}
+
+.audit-reset__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-muted);
+}
+
+.audit-reset__trigger:hover {
+  color: var(--warning-500);
+}
+
+.audit-reset__confirm {
+  color: var(--danger-500);
 }
 
 /* ─── AuditHeader ───────────────────────────────────────────────────── */
@@ -1661,6 +1718,7 @@
   justify-content: space-between;
   padding: var(--space-3) var(--space-4);
   user-select: none;
+  cursor: pointer;
 }
 
 .audit-section-header:hover {
@@ -1679,10 +1737,15 @@
 }
 
 .audit-section-header__chevron {
-  font-size: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--ink-faint);
-  transition: transform 0.15s ease;
-  display: inline-block;
+  transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1), color 0.12s ease;
+}
+
+.audit-section-header:hover .audit-section-header__chevron {
+  color: var(--ink-muted);
 }
 
 .audit-section-header__chevron--open {
@@ -1690,6 +1753,19 @@
 }
 
 /* ─── AuditStatusSection ────────────────────────────────────────────── */
+
+/* Workflow stepper band: capture → seal → anchor. Reuses the .audit-step
+   element vocabulary but sits flush at the top of the status card. */
+.audit-status-workflow {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: var(--space-3) var(--space-4);
+}
+
+.audit-status-workflow + .audit-status-grid {
+  border-top: 1px solid var(--border);
+}
 
 .audit-section .audit-status-grid {
   display: flex;
@@ -1702,7 +1778,7 @@
   display: flex;
   align-items: flex-start;
   gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-2) var(--space-4);
   border-bottom: 1px solid var(--border);
   font-size: var(--font-size-sm);
 }
@@ -1719,7 +1795,8 @@
   color: var(--ink-faint);
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  padding-top: 1px;
+  padding-top: 3px;
+  white-space: nowrap;
 }
 
 .audit-status-row__value {
@@ -1728,6 +1805,23 @@
   gap: var(--space-2);
   flex: 1;
   color: var(--ink);
+  min-width: 0;
+}
+
+/* Top-aligned variant for multi-line content (the filling batch + bar). */
+.audit-status-row__value--top {
+  align-items: flex-start;
+}
+
+/* Fixed icon slot so every row's leading glyph aligns vertically. */
+.audit-status-row__icon {
+  flex-shrink: 0;
+  color: currentColor;
+  opacity: 0.85;
+}
+
+.audit-status-row__value--top .audit-status-row__icon {
+  margin-top: 1px;
 }
 
 .audit-status-row__value--success {
@@ -1756,6 +1850,21 @@
   flex-direction: column;
   gap: var(--space-1);
   flex: 1;
+  min-width: 0;
+}
+
+.audit-status-row__batch-line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  color: var(--ink);
+}
+
+.audit-status-row__batch-count {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--ink-muted);
+  font-variant-numeric: tabular-nums;
 }
 
 .audit-status-dot {
@@ -1777,18 +1886,20 @@
 }
 
 .audit-status-mini-bar {
-  height: 4px;
+  height: 5px;
   background: var(--surface-2);
-  border-radius: 2px;
+  border-radius: 999px;
   overflow: hidden;
   width: 100%;
-  max-width: 180px;
+  max-width: 240px;
+  box-shadow: inset 0 0 0 1px var(--border);
 }
 
 .audit-status-mini-bar__fill {
   height: 100%;
   background: var(--accent-500);
-  border-radius: 2px;
+  border-radius: 999px;
+  box-shadow: inset 0 1px 0 0 var(--highlight);
   transition: width 0.3s ease;
 }
 
@@ -1799,6 +1910,32 @@
   padding: var(--space-3) var(--space-4);
   border-top: 1px solid var(--border);
   flex-wrap: wrap;
+}
+
+/* Single, calm next-step instruction shown under the actions. */
+.audit-status-next {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--font-size-xs);
+  color: var(--ink-muted);
+  line-height: var(--line-height-normal);
+}
+
+.audit-status-actions + .audit-status-next {
+  padding-top: 0;
+}
+
+.audit-status-next__icon {
+  flex-shrink: 0;
+  color: var(--accent-600);
+  margin-top: 1px;
+}
+
+.audit-status-next__lead {
+  font-weight: 600;
+  color: var(--ink);
 }
 
 .audit-status-commit-step {
@@ -1817,12 +1954,6 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-}
-
-.audit-status-hint {
-  padding: var(--space-1) var(--space-4) var(--space-2);
-  font-size: var(--font-size-xs);
-  color: var(--ink-faint);
 }
 
 /* ─── AuditChangeFeed ───────────────────────────────────────────────── */
@@ -2117,10 +2248,10 @@
 }
 
 .audit-epoch-summary__chevron {
-  font-size: 9px;
   color: var(--ink-faint);
-  transition: transform 0.15s ease;
+  transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
   display: flex;
+  align-items: center;
   justify-content: center;
 }
 
@@ -2195,6 +2326,12 @@
 .audit-advanced__value--mono {
   font-family: var(--font-mono);
   letter-spacing: var(--letter-mono);
+}
+
+.audit-advanced__link {
+  color: var(--link);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
 }
 
 /* ─── Section collapse/expand animation ────────────────────────────── */

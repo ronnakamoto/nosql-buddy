@@ -5,6 +5,7 @@ import type {
   VerificationReport,
   CommitResult,
   IpfsPublishResult,
+  OnChainAttestationVerification,
 } from "../ipc/commands";
 import {
   Alert,
@@ -16,6 +17,20 @@ import {
 } from "./AuditUi";
 import type { HealthState } from "./AuditHeader";
 import { InfoPopover } from "./InfoPopover";
+import {
+  Anchor,
+  ArrowRight,
+  Check,
+  CircleCheckBig,
+  CircleDashed,
+  Layers,
+  Lock,
+  ShieldAlert,
+  ShieldCheck,
+  ShieldQuestion,
+} from "lucide-react";
+
+const ROW_ICON = 15;
 
 /**
  * AuditStatusSection — the always-expanded operational summary.
@@ -75,6 +90,8 @@ export interface AuditStatusSectionProps {
   commitResult: CommitResult | null;
   pinataResult: IpfsPublishResult | null;
   onCommit: () => void;
+  /** Independent on-chain K-of-N attestation verdict from the contract. */
+  onchainAttestation: OnChainAttestationVerification | null;
 
   // Derived
   canCloseEpoch: boolean;
@@ -103,6 +120,7 @@ export function AuditStatusSection({
   commitResult,
   pinataResult,
   onCommit,
+  onchainAttestation,
   canCloseEpoch,
   closeEpochDisabledReason,
   canCommit,
@@ -115,19 +133,40 @@ export function AuditStatusSection({
   const epochPct = EPOCH_THRESHOLD > 0 ? Math.min(100, (epochEventCount / EPOCH_THRESHOLD) * 100) : 0;
   const staleWarning = staleBatchWarning(staleBatchMs);
 
+  const tamperDetected = health === "tamper";
+
+  // Three stages mirror the operator's task flow: capture, seal, anchor.
+  const writeDone = epochEventCount > 0 || (status?.eventCount ?? 0) > 0;
+  const committed = !!currentEpoch?.committed || !!commitResult;
+  const sealDone = epochClosed || !!lastClosedEpoch || committed;
+  const sealActive = writeDone && !sealDone;
+  const commitActive = sealDone && !committed;
+
+  let nextStep: string | null = null;
+  if (tamperDetected) {
+    nextStep = "Open Investigation to compare local and on-chain roots.";
+  } else if (!writeDone) {
+    nextStep = "Write to the audited MongoDB endpoint to capture changes.";
+  } else if (sealActive && canCloseEpoch) {
+    nextStep = "Seal the current batch to lock its fingerprint.";
+  } else if (commitActive && lastClosedEpoch) {
+    nextStep = `Commit batch #${lastClosedEpoch.epochNumber} to anchor it on-chain.`;
+  }
+
   // Integrity row
   let integrityContent: React.ReactNode;
   if (health === "tamper") {
     integrityContent = (
       <span className="audit-status-row__value audit-status-row__value--danger">
-        ✗ Tamper detected
-        {verifyReport && <span className="audit-status-row__detail">{verifyReport.summary}</span>}
+        <ShieldAlert size={ROW_ICON} className="audit-status-row__icon" aria-hidden="true" />
+        Tamper detected
       </span>
     );
   } else if (health === "healthy") {
     integrityContent = (
       <span className="audit-status-row__value audit-status-row__value--success">
-        ✓ Verified
+        <ShieldCheck size={ROW_ICON} className="audit-status-row__icon" aria-hidden="true" />
+        Verified
         {verifyReport && (
           <span className="audit-status-row__detail">
             {verifyReport.verifiedEvents} events · chain intact
@@ -138,7 +177,8 @@ export function AuditStatusSection({
   } else {
     integrityContent = (
       <span className="audit-status-row__value audit-status-row__value--muted">
-        ⚠ Not verified
+        <ShieldQuestion size={ROW_ICON} className="audit-status-row__icon" aria-hidden="true" />
+        Not verified
         <span className="audit-status-row__detail">Run Verify Integrity to check</span>
       </span>
     );
@@ -151,41 +191,55 @@ export function AuditStatusSection({
       Live · {status.eventCount} events · {status.leafCount} leaves
     </span>
   ) : (
-    <span className="audit-status-row__value audit-status-row__value--muted">○ Not started</span>
+    <span className="audit-status-row__value audit-status-row__value--muted">
+      <CircleDashed size={ROW_ICON} className="audit-status-row__icon" aria-hidden="true" />
+      Not started
+    </span>
   );
 
   // Batch row
   let batchContent: React.ReactNode;
   if (!currentEpoch) {
-    batchContent = <span className="audit-status-row__value audit-status-row__value--muted">No batch yet</span>;
+    batchContent = (
+      <span className="audit-status-row__value audit-status-row__value--muted">
+        <CircleDashed size={ROW_ICON} className="audit-status-row__icon" aria-hidden="true" />
+        No batch yet
+      </span>
+    );
   } else if (currentEpoch.committed) {
     batchContent = (
       <span className="audit-status-row__value audit-status-row__value--success">
+        <CircleCheckBig size={ROW_ICON} className="audit-status-row__icon" aria-hidden="true" />
         Batch #{currentEpoch.epochNumber} · committed · {epochEventCount} events
       </span>
     );
   } else if (epochClosed) {
     batchContent = (
       <span className="audit-status-row__value">
+        <Lock size={ROW_ICON} className="audit-status-row__icon" aria-hidden="true" />
         Batch #{currentEpoch.epochNumber} · sealed · {epochEventCount}/{EPOCH_THRESHOLD}
       </span>
     );
   } else {
     batchContent = (
-      <div className="audit-status-row__batch">
-        <span className="audit-status-row__value">
-          Batch #{currentEpoch.epochNumber} · filling · {epochEventCount}/{EPOCH_THRESHOLD}
-        </span>
-        <div className="audit-status-mini-bar">
-          <div
-            className="audit-status-mini-bar__fill"
-            style={{ width: `${Math.max(epochPct, 1)}%` }}
-          />
+      <span className="audit-status-row__value audit-status-row__value--top">
+        <Layers size={ROW_ICON} className="audit-status-row__icon" aria-hidden="true" />
+        <div className="audit-status-row__batch">
+          <span className="audit-status-row__batch-line">
+            Batch #{currentEpoch.epochNumber} · filling
+            <span className="audit-status-row__batch-count">{epochEventCount}/{EPOCH_THRESHOLD}</span>
+          </span>
+          <div className="audit-status-mini-bar">
+            <div
+              className="audit-status-mini-bar__fill"
+              style={{ width: `${Math.max(epochPct, 1)}%` }}
+            />
+          </div>
+          {staleWarning && (
+            <span className="audit-status-row__detail audit-status-row__detail--warn">{staleWarning}</span>
+          )}
         </div>
-        {staleWarning && (
-          <span className="audit-status-row__detail audit-status-row__detail--warn">{staleWarning}</span>
-        )}
-      </div>
+      </span>
     );
   }
 
@@ -200,6 +254,7 @@ export function AuditStatusSection({
   } else if (onchainRoot) {
     onchainContent = (
       <span className="audit-status-row__value">
+        <Anchor size={ROW_ICON} className="audit-status-row__icon" aria-hidden="true" />
         Sequence #{onchainRoot.sequence} anchored
         <span className="audit-status-row__detail">
           {formatTs(onchainRoot.timestamp)} · <TxHashLink txHash={onchainRoot.rootHex.slice(0, 20)} network={network} showExternalIcon={false} />
@@ -208,41 +263,55 @@ export function AuditStatusSection({
     );
   } else {
     onchainContent = (
-      <span className="audit-status-row__value audit-status-row__value--muted">Nothing anchored yet</span>
+      <span className="audit-status-row__value audit-status-row__value--muted">
+        <CircleDashed size={ROW_ICON} className="audit-status-row__icon" aria-hidden="true" />
+        Nothing anchored yet
+      </span>
     );
   }
-
-  const tamperDetected = health === "tamper";
 
   return (
     <div className="audit-section">
       {tamperDetected && (
         <Alert tone="danger">
-          Tamper detected — the local audit log does not match the on-chain commitment.
-          Expand the Investigation section below to inspect the discrepancy.
+          {verifyReport?.summary
+            ? `${verifyReport.summary} Open the Investigation section below to inspect the discrepancy.`
+            : "The local audit log does not match the on-chain commitment. Open the Investigation section below to inspect the discrepancy."}
         </Alert>
       )}
+
+      {/* Workflow stepper — capture → seal → anchor */}
+      <div className="audit-status-workflow" aria-label="Audit workflow progress">
+        <div className={`audit-step ${writeDone ? "audit-step--done" : "audit-step--active"}`}>
+          <span className="audit-step__num">{writeDone ? <Check size={13} aria-hidden="true" /> : "1"}</span>
+          <span className="audit-step__label">Write Data</span>
+        </div>
+        <div className={`audit-step ${sealDone ? "audit-step--done" : sealActive ? "audit-step--active" : ""}`}>
+          <span className="audit-step__num">{sealDone ? <Check size={13} aria-hidden="true" /> : "2"}</span>
+          <span className="audit-step__label">Seal Batch</span>
+        </div>
+        <div className={`audit-step ${committed ? "audit-step--done" : commitActive ? "audit-step--active" : ""}`}>
+          <span className="audit-step__num">{committed ? <Check size={13} aria-hidden="true" /> : "3"}</span>
+          <span className="audit-step__label">Commit to Chain</span>
+        </div>
+      </div>
 
       {/* Four status rows */}
       <div className="audit-status-grid">
         <div className="audit-status-row">
-          <span className="audit-status-row__label">Integrity<InfoPopover label="Help: Audit integrity" title="Audit integrity">
-            <p>Compares the local audit log against the on-chain commitment.</p>
-            <p><strong>Verified</strong>: the log matches the blockchain record.</p>
-            <p><strong>Tamper detected</strong>: data was modified locally.</p>
-          </InfoPopover></span>
+          <span className="audit-status-row__label">Integrity</span>
           {integrityContent}
         </div>
         <div className="audit-status-row">
-          <span className="audit-status-row__label">Capture<InfoPopover label="Help: Event capture" title="Event capture"><p>Real-time monitoring of MongoDB insert, update, and delete operations via change streams. Events are cryptographically recorded into the audit log.</p></InfoPopover></span>
+          <span className="audit-status-row__label">Capture</span>
           {captureContent}
         </div>
         <div className="audit-status-row">
-          <span className="audit-status-row__label">Batch<InfoPopover label="Help: Audit batches" title="Audit batches"><p>Events are grouped into batches (epochs). Once a batch reaches its event threshold, it is sealed and committed to the blockchain for permanent verification.</p></InfoPopover></span>
+          <span className="audit-status-row__label">Batch</span>
           {batchContent}
         </div>
         <div className="audit-status-row">
-          <span className="audit-status-row__label">On-chain<InfoPopover label="Help: On-chain anchoring" title="On-chain anchoring"><p>Sealed batch fingerprints are anchored to the Stellar blockchain. This creates an immutable, timestamped record that can be independently verified.</p></InfoPopover></span>
+          <span className="audit-status-row__label">On-chain</span>
           {onchainContent}
         </div>
       </div>
@@ -292,6 +361,14 @@ export function AuditStatusSection({
         )}
       </div>
 
+      {/* Next-step guidance — one clear instruction, not an error */}
+      {nextStep && !commitLoading && (
+        <div className="audit-status-next">
+          <ArrowRight size={13} className="audit-status-next__icon" aria-hidden="true" />
+          <span><span className="audit-status-next__lead">Next:</span> {nextStep}</span>
+        </div>
+      )}
+
       {/* Commit progress feedback */}
       {commitLoading && commitStep && (
         <div className="audit-status-commit-step">
@@ -309,21 +386,40 @@ export function AuditStatusSection({
         </div>
       )}
 
-      {/* Verify result */}
-      {verifyReport && !verifyLoading && (
-        <Alert tone={!verifyReport.tamperDetected && verifyReport.chainIntact ? "success" : "danger"}>
-          {!verifyReport.tamperDetected && verifyReport.chainIntact
-            ? `✓ Integrity verified — ${verifyReport.verifiedEvents} events, chain intact.`
-            : `✗ Tamper detected — ${verifyReport.summary}`}
-        </Alert>
-      )}
-
-      {/* Disabled action hints */}
-      {closeEpochDisabledReason && !epochClosed && (
-        <div className="audit-status-hint">{closeEpochDisabledReason}</div>
-      )}
-      {commitDisabledReason && !lastClosedEpoch && (
-        <div className="audit-status-hint">{commitDisabledReason}</div>
+      {/* Independent on-chain K-of-N attestation verdict */}
+      {onchainAttestation && !commitLoading && (
+        <div className="audit-status-commit-result" style={{ animation: "audit-fade-in 0.2s ease" }}>
+          <Badge tone={onchainAttestation.verdict === "verified" ? "success" : "warning"} dot>
+            {onchainAttestation.verdict === "verified"
+              ? "Independently verified"
+              : onchainAttestation.verdict === "no_attestations"
+                ? "Awaiting attesters"
+                : onchainAttestation.verdict === "threshold_not_met"
+                  ? "Threshold not met"
+                  : "Attestation issue"}
+            {` · ${onchainAttestation.authorizedCount}/${onchainAttestation.threshold}`}
+          </Badge>
+          <span className="audit-status-row__detail">
+            {onchainAttestation.authorizedCount} of {onchainAttestation.attestationCount} attestation(s)
+            from authorized auditor(s) · K={onchainAttestation.threshold} required
+          </span>
+          <InfoPopover label="Help: On-chain attestation" title="On-chain attestation">
+            <p>
+              This verdict is computed by the Soroban contract, not by the operator's
+              app. The contract counts how many <strong>distinct, currently-authorized</strong>
+              auditors signed the exact oplog root with their own ed25519 key, and compares
+              that count against the on-chain K-of-N threshold. The operator cannot produce
+              a "verified" verdict alone.
+            </p>
+            <p>
+              {onchainAttestation.verdict === "verified"
+                ? "The threshold is met. The committed root is independently certified."
+                : onchainAttestation.verdict === "no_attestations"
+                  ? "No auditor has attested this batch yet. The commit is anchored but not independently certified."
+                  : "Not enough independent auditor signatures yet. Ask your auditor(s) to run attest_oplog for this sequence."}
+            </p>
+          </InfoPopover>
+        </div>
       )}
     </div>
   );

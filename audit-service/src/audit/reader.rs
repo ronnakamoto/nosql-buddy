@@ -247,11 +247,28 @@ fn find_root_in_log(jsonl: &str, root_hex: &str) -> Option<u64> {
     None
 }
 
-/// Verify the root chain in the JSONL log up to (and including) the
-/// given event index. Recomputes each leaf and checks the root_after
-/// chain. Returns `true` if the chain is intact.
+/// Verify the root chain in the JSONL log up to (and including) the given
+/// event index by REBUILDING the Poseidon Merkle tree.
+///
+/// For each event it (a) recomputes the leaf from the stored payload and
+/// checks it against `leaf_hex`, (b) inserts it into a fresh
+/// `AuditMerkleTree` and checks the insertion index matches the stored
+/// `index`, and (c) checks the tree root after the insert matches the
+/// stored `root_after`. This mirrors the authoritative `replay_file`
+/// verification, so it detects payload edits, reordering, insertion, and
+/// deletion — not just leaf mismatches. Returns `true` only when the chain
+/// is fully intact up to `up_to_index`.
 fn verify_root_chain(jsonl: &str, up_to_index: u64) -> bool {
     use crate::audit::leaf_from_payload;
+    use ark_ff::{BigInteger, PrimeField};
+    use zk_audit::merkle::AuditMerkleTree;
+
+    let fr_to_hex = |f: ark_bn254::Fr| hex::encode(f.into_bigint().to_bytes_be());
+
+    let mut tree = match AuditMerkleTree::new() {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
 
     for line in jsonl.lines() {
         let line = line.trim();
@@ -266,7 +283,14 @@ fn verify_root_chain(jsonl: &str, up_to_index: u64) -> bool {
 
         let index = match ev.get("index").and_then(|v| v.as_u64()) {
             Some(i) => i,
-            None => return false,
+            None => {
+                // Metadata lines (e.g. legal holds) carry no `index` — skip
+                // them rather than treating them as corruption.
+                if ev.get("meta").is_some() {
+                    continue;
+                }
+                return false;
+            }
         };
 
         if index > up_to_index {
@@ -286,24 +310,26 @@ fn verify_root_chain(jsonl: &str, up_to_index: u64) -> bool {
         let stored_leaf = event_str(&ev, "leaf_hex", "leafHex").unwrap_or("");
         let stored_root = event_str(&ev, "root_after", "rootAfter").unwrap_or("");
 
-        // Recompute the leaf and check it matches.
+        // (a) Recompute the leaf and check it matches the stored leaf_hex.
         let recomputed_leaf = leaf_from_payload(operation, database, collection, payload);
-        let recomputed_hex = {
-            use ark_ff::{BigInteger, PrimeField};
-            let bigint = recomputed_leaf.into_bigint();
-            hex::encode(bigint.to_bytes_be())
-        };
-
-        if recomputed_hex != stored_leaf {
+        if fr_to_hex(recomputed_leaf) != stored_leaf {
             return false;
         }
 
-        // We can't fully verify the root chain here without rebuilding
-        // the tree, but we can check that the root_after is non-empty
-        // and that the chain is monotonically progressing (each root
-        // is different from the previous one, since inserting a leaf
-        // always changes the root unless the tree is at capacity).
-        if stored_root.is_empty() {
+        // (b) Insert into the tree; the insertion index must match `index`
+        //     (catches reordering / gaps / deletions).
+        let inserted_idx = tree.insert(recomputed_leaf) as u64;
+        if inserted_idx != index {
+            return false;
+        }
+
+        // (c) The tree root after this insert must equal the stored
+        //     root_after (catches root forgery / silent tampering).
+        let recomputed_root = match tree.root() {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        if fr_to_hex(recomputed_root) != stored_root {
             return false;
         }
     }
@@ -344,6 +370,43 @@ mod tests {
             .join("\n")
     }
 
+    fn fr_hex(f: ark_bn254::Fr) -> String {
+        use ark_ff::{BigInteger, PrimeField};
+        hex::encode(f.into_bigint().to_bytes_be())
+    }
+
+    /// Build a JSONL log with REAL `root_after` values by replaying the
+    /// events through an `AuditMerkleTree`, exactly as the audit log is
+    /// written in production. Returns `(jsonl, roots)` where `roots[i]` is
+    /// the tree root after inserting event `i`.
+    fn make_jsonl_real(events: &[(u64, &str, &str, &str, &str)]) -> (String, Vec<String>) {
+        use zk_audit::merkle::AuditMerkleTree;
+        let mut tree = AuditMerkleTree::new().unwrap();
+        let mut roots = Vec::new();
+        let lines: Vec<String> = events
+            .iter()
+            .map(|(i, op, db, col, payload)| {
+                let leaf = leaf_from_payload(op, db, col, payload);
+                let leaf_hex = fr_hex(leaf);
+                tree.insert(leaf);
+                let root = fr_hex(tree.root().unwrap());
+                roots.push(root.clone());
+                serde_json::json!({
+                    "index": i,
+                    "operation": op,
+                    "database": db,
+                    "collection": col,
+                    "payload": payload,
+                    "leaf_hex": leaf_hex,
+                    "root_after": root,
+                    "timestamp": "2026-06-23T00:00:00Z"
+                })
+                .to_string()
+            })
+            .collect();
+        (lines.join("\n"), roots)
+    }
+
     #[test]
     fn reader_mode_no_onchain_root() {
         let jsonl = make_jsonl(&[
@@ -370,20 +433,20 @@ mod tests {
 
     #[test]
     fn reader_mode_onchain_root_found() {
-        let jsonl = make_jsonl(&[
-            (0, "insert", "db", "col", r#"{"a":1}"#, "root0"),
-            (1, "insert", "db", "col", r#"{"a":2}"#, "root1"),
-            (2, "insert", "db", "col", r#"{"a":3}"#, "root2"),
+        let (jsonl, roots) = make_jsonl_real(&[
+            (0, "insert", "db", "col", r#"{"a":1}"#),
+            (1, "insert", "db", "col", r#"{"a":2}"#),
+            (2, "insert", "db", "col", r#"{"a":3}"#),
         ]);
 
         let onchain = OnChainRoot {
             sequence: 1,
-            root_hex: "root1".to_string(),
+            root_hex: roots[1].clone(),
             timestamp: 1000,
             metadata: "events=2".to_string(),
         };
 
-        let report = verify_with_onchain_root(Some(onchain), &jsonl, "root2").unwrap();
+        let report = verify_with_onchain_root(Some(onchain), &jsonl, &roots[2]).unwrap();
 
         assert!(report.onchain_root_found);
         assert_eq!(report.commitment_event_index, Some(1));
@@ -419,19 +482,19 @@ mod tests {
 
     #[test]
     fn reader_mode_onchain_root_found_fully_committed() {
-        let jsonl = make_jsonl(&[
-            (0, "insert", "db", "col", r#"{"a":1}"#, "root0"),
-            (1, "insert", "db", "col", r#"{"a":2}"#, "root1"),
+        let (jsonl, roots) = make_jsonl_real(&[
+            (0, "insert", "db", "col", r#"{"a":1}"#),
+            (1, "insert", "db", "col", r#"{"a":2}"#),
         ]);
 
         let onchain = OnChainRoot {
             sequence: 1,
-            root_hex: "root1".to_string(),
+            root_hex: roots[1].clone(),
             timestamp: 1000,
             metadata: "events=2".to_string(),
         };
 
-        let report = verify_with_onchain_root(Some(onchain), &jsonl, "root1").unwrap();
+        let report = verify_with_onchain_root(Some(onchain), &jsonl, &roots[1]).unwrap();
 
         assert!(report.onchain_root_found);
         assert_eq!(report.events_after_commitment, 0);
@@ -464,11 +527,12 @@ mod tests {
 
     #[test]
     fn reader_mode_accepts_legacy_camel_case_events() {
+        use zk_audit::merkle::AuditMerkleTree;
         let leaf = leaf_from_payload("insert", "db", "col", r#"{"a":1}"#);
-        let leaf_hex = {
-            use ark_ff::{BigInteger, PrimeField};
-            hex::encode(leaf.into_bigint().to_bytes_be())
-        };
+        let leaf_hex = fr_hex(leaf);
+        let mut tree = AuditMerkleTree::new().unwrap();
+        tree.insert(leaf);
+        let root = fr_hex(tree.root().unwrap());
         let jsonl = serde_json::json!({
             "index": 0,
             "operation": "insert",
@@ -476,13 +540,34 @@ mod tests {
             "collection": "col",
             "payload": r#"{"a":1}"#,
             "leafHex": leaf_hex,
-            "rootAfter": "root0",
+            "rootAfter": root,
             "timestamp": "2026-06-23T00:00:00Z"
         })
         .to_string();
 
-        assert_eq!(find_root_in_log(&jsonl, "root0"), Some(0));
+        assert_eq!(find_root_in_log(&jsonl, &root), Some(0));
         assert!(verify_root_chain(&jsonl, 0));
+    }
+
+    #[test]
+    fn reader_mode_detects_forged_root_after() {
+        // The old leaf-only check would pass a forged root_after as long as
+        // the payload (and thus the leaf) was untouched. Rebuilding the tree
+        // catches it: the recomputed root no longer matches the stored one.
+        let (jsonl, roots) = make_jsonl_real(&[
+            (0, "insert", "db", "col", r#"{"a":1}"#),
+            (1, "insert", "db", "col", r#"{"a":2}"#),
+        ]);
+        // Forge the committed root_after at index 1 with a well-formed but
+        // wrong value. Leaves are unchanged.
+        let forged = jsonl.replace(&roots[1], &"f".repeat(64));
+        assert_ne!(forged, jsonl, "forge replacement must change the log");
+        assert!(
+            !verify_root_chain(&forged, 1),
+            "a forged root_after must be detected by rebuilding the tree"
+        );
+        // The honest log still verifies.
+        assert!(verify_root_chain(&jsonl, 1));
     }
 
     #[test]

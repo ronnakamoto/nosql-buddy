@@ -2,6 +2,7 @@ import { useMemo, useState, useEffect, useCallback, useRef, Fragment } from "rea
 import commands, {
   type DevPrerequisites,
   type DevStackStatus,
+  type DevStackIdentities,
   formatError,
 } from "../ipc/commands";
 import {
@@ -23,10 +24,11 @@ import {
   Modal,
 } from "./AuditUi";
 import type { ProofResult, DevSetupParams } from "../ipc/commands";
+import { InfoPopover } from "./InfoPopover";
+import { KeyRound, ShieldCheck, Users } from "lucide-react";
 import { onAuditSetupProgress } from "../ipc/events";
 import { useToast } from "../context/ToastContext";
 import { FlaskConical, CircleDashed, X, CheckCircle, ExternalLink, ChevronDown, Copy, Check } from "lucide-react";
-import { InfoPopover } from "./InfoPopover";
 
 /**
  * Dev Mode — a guided, step-based audit control surface.
@@ -626,6 +628,8 @@ function DevLiveViewInner() {
   const [committedEpochNum, setCommittedEpochNum] = useState<number | null>(null);
   // Track whether we should poll on-chain root until it appears.
   const [pollingOnchain, setPollingOnchain] = useState(false);
+  // Dev-stack public identities for the key-separation panel.
+  const [identities, setIdentities] = useState<DevStackIdentities | null>(null);
 
   const poll = useCallback(async () => {
     try {
@@ -716,6 +720,19 @@ function DevLiveViewInner() {
       clearInterval(id);
     };
   }, [pollingOnchain, refreshOnchain, refreshOplog]);
+
+  // Load dev-stack identities (publisher + attester public addresses) for the
+  // key-separation proof panel. Loaded whenever the stack is reachable.
+  useEffect(() => {
+    if (!status) {
+      setIdentities(null);
+      return;
+    }
+    commands
+      .auditDevStackIdentities()
+      .then((id) => setIdentities(id))
+      .catch(() => setIdentities(null));
+  }, [status]);
 
 
 
@@ -1065,6 +1082,62 @@ function DevLiveViewInner() {
           </div>
         </div>
       </Card>
+
+      {/* ─── Key separation proof ────────────────────────────────────── */}
+      {status && identities && (
+        <Card>
+          <CardHeader
+            title={<>Key separation<InfoPopover label="Help: Key separation" title="Key separation"><p>The operator (publisher) and the auditor (attester) run as separate processes with distinct Stellar keys. The attester independently recomputes the oplog root and signs on-chain only on an exact match. The operator cannot produce a valid attestation alone.</p></InfoPopover></>}
+            subtitle="Publisher and attester are distinct accounts on distinct infrastructure"
+            actions={
+              identities.publisherAddress && identities.attesterAddress ? (
+                <Badge tone="success" dot>Separated</Badge>
+              ) : (
+                <Badge tone="warning" dot>Same key</Badge>
+              )
+            }
+          />
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-4)" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-1)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", color: "var(--ink-muted)" }}>
+                <KeyRound size={14} />
+                <span style={{ fontSize: "var(--font-size-xs)", fontWeight: 600 }}>Publisher (operator)</span>
+              </div>
+              <code style={{ fontSize: "var(--font-size-xs)", color: "var(--ink)", fontFamily: "var(--font-mono)", wordBreak: "break-all" }}>
+                {identities.publisherAddress || "—"}
+              </code>
+              <span style={{ fontSize: "var(--font-size-xs)", color: "var(--ink-faint)" }}>
+                Commits batch roots on-chain. Contract admin.
+              </span>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-1)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", color: "var(--ink-muted)" }}>
+                <ShieldCheck size={14} />
+                <span style={{ fontSize: "var(--font-size-xs)", fontWeight: 600 }}>Attester (auditor)</span>
+              </div>
+              <code style={{ fontSize: "var(--font-size-xs)", color: "var(--ink)", fontFamily: "var(--font-mono)", wordBreak: "break-all" }}>
+                {identities.attesterAddress || "—"}
+              </code>
+              <span style={{ fontSize: "var(--font-size-xs)", color: "var(--ink-faint)" }}>
+                Independent process. Signs only on root match.
+              </span>
+            </div>
+          </div>
+          {identities.publisherAddress && identities.attesterAddress && (
+            identities.publisherAddress !== identities.attesterAddress ? (
+              <div style={{ marginTop: "var(--space-3)", display: "flex", alignItems: "center", gap: "var(--space-2)", fontSize: "var(--font-size-xs)", color: "var(--success-500)" }}>
+                <Users size={13} />
+                <span>Two distinct Stellar accounts. The operator cannot self-attest.</span>
+              </div>
+            ) : (
+              <div style={{ marginTop: "var(--space-3)", display: "flex", alignItems: "center", gap: "var(--space-2)", fontSize: "var(--font-size-xs)", color: "var(--danger-500)" }}>
+                <ShieldCheck size={13} />
+                <span>Warning: publisher and attester share the same key. Re-run setup to regenerate.</span>
+              </div>
+            )
+          )}
+        </Card>
+      )}
 
       {/* ─── Integrity row ──────────────────────────────────────────── */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "var(--space-4)" }}>

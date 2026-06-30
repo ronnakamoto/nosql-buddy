@@ -857,6 +857,7 @@ async fn cmd_start(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 deployment_id,
                 client.clone(),
                 audit_log.clone(),
+                None,
             )
             .await;
         log::info!("change stream listener started for connection {connection_id}");

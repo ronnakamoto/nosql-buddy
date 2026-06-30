@@ -23,6 +23,7 @@ use crate::error::{AppError, AppResult};
 const STORE_FILE: &str = "nosqlbuddy.settings.json";
 const AUDIT_MODE_KEY: &str = "auditMode";
 const AUDIT_NETWORK_KEY: &str = "auditNetwork";
+const AUDIT_TESTNET_CONTRACT_KEY: &str = "auditTestnetContractId";
 const AUDIT_MAINNET_CONTRACT_KEY: &str = "auditMainnetContractId";
 const AUDIT_MAINNET_RPC_KEY: &str = "auditMainnetRpcUrl";
 
@@ -65,6 +66,8 @@ impl Default for AuditNetwork {
 pub struct AuditModeConfig {
     pub mode: AuditMode,
     pub network: AuditNetwork,
+    /// Testnet Soroban contract ID. Empty means use the bundled demo contract.
+    pub testnet_contract_id: String,
     /// Mainnet Soroban contract ID (only used when network == Mainnet).
     pub mainnet_contract_id: String,
     /// Mainnet Soroban RPC URL (only used when network == Mainnet).
@@ -78,6 +81,7 @@ impl Default for AuditModeConfig {
         Self {
             mode: AuditMode::Dev,
             network: AuditNetwork::Testnet,
+            testnet_contract_id: String::new(),
             mainnet_contract_id: String::new(),
             mainnet_rpc_url: "https://rpc.mainnet.stellar.org".to_string(),
             has_production_keypair: false,
@@ -99,6 +103,10 @@ pub fn load_mode_config(app: &AppHandle) -> AppResult<AuditModeConfig> {
         Some(v) => serde_json::from_value(v).unwrap_or(AuditNetwork::Testnet),
         None => AuditNetwork::Testnet,
     };
+    let testnet_contract_id = store
+        .get(AUDIT_TESTNET_CONTRACT_KEY)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_default();
     let mainnet_contract_id = store
         .get(AUDIT_MAINNET_CONTRACT_KEY)
         .and_then(|v| v.as_str().map(|s| s.to_string()))
@@ -113,6 +121,7 @@ pub fn load_mode_config(app: &AppHandle) -> AppResult<AuditModeConfig> {
     Ok(AuditModeConfig {
         mode,
         network,
+        testnet_contract_id,
         mainnet_contract_id,
         mainnet_rpc_url,
         has_production_keypair,
@@ -131,7 +140,7 @@ pub fn save_mode(app: &AppHandle, mode: AuditMode) -> AppResult<()> {
     Ok(())
 }
 
-/// Persist the production network choice + mainnet contract/rpc.
+/// Persist the production network choice + contract/rpc.
 pub fn save_production_network(
     app: &AppHandle,
     network: AuditNetwork,
@@ -143,7 +152,14 @@ pub fn save_production_network(
         .map_err(|e| AppError::Internal(format!("settings store open: {e}")))?;
     store.set(AUDIT_NETWORK_KEY, serde_json::json!(network));
     if !contract_id.is_empty() {
-        store.set(AUDIT_MAINNET_CONTRACT_KEY, serde_json::json!(contract_id));
+        match network {
+            AuditNetwork::Testnet => {
+                store.set(AUDIT_TESTNET_CONTRACT_KEY, serde_json::json!(contract_id));
+            }
+            AuditNetwork::Mainnet => {
+                store.set(AUDIT_MAINNET_CONTRACT_KEY, serde_json::json!(contract_id));
+            }
+        }
     }
     if !rpc_url.is_empty() {
         store.set(AUDIT_MAINNET_RPC_KEY, serde_json::json!(rpc_url));

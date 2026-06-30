@@ -1121,9 +1121,20 @@ export type AuditNetwork = "testnet" | "mainnet";
 export interface AuditModeConfig {
   mode: AuditMode;
   network: AuditNetwork;
+  testnetContractId: string;
   mainnetContractId: string;
   mainnetRpcUrl: string;
   hasProductionKeypair: boolean;
+}
+
+/** Result of provisioning a per-user testnet commitment contract. */
+export interface AuditContractProvisionResult {
+  accountId: string;
+  contractId: string;
+  reused: boolean;
+  wasmHashHex: string | null;
+  uploadTxHash: string | null;
+  createTxHash: string | null;
 }
 
 /** Dev-mode prerequisite check result. */
@@ -1161,6 +1172,13 @@ export interface DevSetupResult {
   log: string;
   envAuditPresent: boolean;
   attesterKeyPresent: boolean;
+}
+
+/** Public Stellar addresses of the dev-stack publisher and attester. */
+export interface DevStackIdentities {
+  publisherAddress: string;
+  attesterAddress: string;
+  contractId: string;
 }
 
 /** One audit-stack container. */
@@ -1211,6 +1229,18 @@ export interface OnChainOplogCommitment {
   oplogStartTs: number;
   oplogEndTs: number;
   oplogEntryCount: number;
+}
+
+/** Independent on-chain attestation verdict from the Soroban contract. */
+export interface OnChainAttestationVerification {
+  sequence: number;
+  oplogRootHex: string;
+  attestationCount: number;
+  authorizedCount: number;
+  threshold: number;
+  allMatch: boolean;
+  /** "verified" | "threshold_not_met" | "unauthorized_attester" | "no_attestations" */
+  verdict: string;
 }
 
 /** Result of the oplog integrity three-way compare. */
@@ -1368,6 +1398,26 @@ const commands = {
       rootHex,
     }),
 
+  // --- On-chain (independent) attestation ---
+  auditAuthorizeOnchainAttester: (
+    stellarAddress: string,
+    ed25519PubkeyHex: string,
+  ) =>
+    invoke<void>("audit_authorize_onchain_attester", {
+      stellarAddress,
+      ed25519PubkeyHex,
+    }),
+  auditRevokeOnchainAttester: (stellarAddress: string) =>
+    invoke<void>("audit_revoke_onchain_attester", { stellarAddress }),
+  auditSetOnchainThreshold: (threshold: number) =>
+    invoke<void>("audit_set_onchain_threshold", { threshold }),
+  auditGetOnchainThreshold: () =>
+    invoke<number>("audit_get_onchain_threshold"),
+  auditVerifyOnchainAttestation: (sequence: number) =>
+    invoke<OnChainAttestationVerification>("audit_verify_onchain_attestation", {
+      sequence,
+    }),
+
   // --- ZK Audit: Oplog completeness verification ---
   auditVerifyOplogIntegrity: (connectionId: string, rpcUrl?: string) =>
     invoke<OplogIntegrityReport>("audit_verify_oplog_integrity", {
@@ -1388,6 +1438,8 @@ const commands = {
     invoke<boolean>("audit_test_pinata_connection", { apiKey, apiSecret }),
   auditGenerateStellarAccount: () =>
     invoke<string>("audit_generate_stellar_account"),
+  auditProvisionTestnetContract: () =>
+    invoke<AuditContractProvisionResult>("audit_provision_testnet_contract"),
   auditCheckReplicaSet: (connectionId: string) =>
     invoke<boolean>("audit_check_replica_set", { connectionId }),
   auditCommitRootNative: (metadata?: string, connectionId?: string) =>
@@ -1434,6 +1486,8 @@ const commands = {
     invoke<string>("audit_dev_stack_logs", { tail }),
   auditDevStackSetup: (params: DevSetupParams) =>
     invoke<DevSetupResult>("audit_dev_stack_setup", { params }),
+  auditDevStackIdentities: () =>
+    invoke<DevStackIdentities | null>("audit_dev_stack_identities"),
 
   // --- ZK Audit: Dev mode audit service HTTP proxy (to docker) ---
   auditDevProxyGet: (port: number, path: string) =>

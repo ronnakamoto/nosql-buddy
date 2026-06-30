@@ -13,6 +13,7 @@ import commands, {
   type VerificationRecord,
   type DomainRootInfo,
   type DomainSuperProofResult,
+  type OnChainAttestationVerification,
   formatError,
 } from "../ipc/commands";
 import { useToast } from "../context/ToastContext";
@@ -22,6 +23,7 @@ import { AuditChangeFeed } from "./AuditChangeFeed";
 import { AuditBatchHistory } from "./AuditBatchHistory";
 import { AuditInvestigation } from "./AuditInvestigation";
 import { InfoPopover } from "./InfoPopover";
+import { ChevronRight, RotateCcw } from "lucide-react";
 
 /**
  * AuditSurface — the unified, adaptive audit interface.
@@ -67,6 +69,9 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
   const [commitResult, setCommitResult] = useState<CommitResult | null>(null);
   const [pinataResult, setPinataResult] = useState<IpfsPublishResult | null>(null);
   const [commitStep, setCommitStep] = useState("");
+  const [onchainAttestation, setOnchainAttestation] =
+    useState<OnChainAttestationVerification | null>(null);
+  const [contractId, setContractId] = useState<string>(config.testnetContractId ?? "");
   const [pollingOnchain, setPollingOnchain] = useState(false);
   const [verifyLoading, setVerifyLoading] = useState(false);
   const [verifyReport, setVerifyReport] = useState<VerificationReport | null>(null);
@@ -274,9 +279,20 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
 
     setCommitResult(null);
     setPinataResult(null);
+    setOnchainAttestation(null);
     setCommitStep("Pinning batch to IPFS via Pinata…");
 
     try {
+      // On testnet, ensure a commitment contract owned by this app's key
+      // exists before committing. The bundled shared contract is admin-gated
+      // to a key we don't hold, so an unprovisioned commit traps on-chain.
+      // This call is idempotent: it reuses an already-deployed contract.
+      if (network === "testnet") {
+        setCommitStep("Provisioning your audit contract…");
+        const provision = await commands.auditProvisionTestnetContract();
+        setContractId(provision.contractId);
+        setCommitStep("Pinning batch to IPFS via Pinata…");
+      }
       const pinata = await commands.auditPublishEpochToPinata(lastClosedEpoch.epochNumber);
       setPinataResult(pinata);
       setCommitStep("Submitting transaction to Stellar…");
@@ -284,6 +300,17 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
       setCommitResult(result);
       setCommitStep("Confirmed!");
       await commands.auditMarkEpochCommitted(lastClosedEpoch.epochNumber, result.txHash);
+      // Query the contract's independent attestation verdict (no self-attest).
+      // The operator key commits but cannot produce a "verified" verdict on
+      // its own; that requires K-of-N distinct authorized attester signatures.
+      try {
+        const verification = await commands.auditVerifyOnchainAttestation(
+          result.sequence,
+        );
+        setOnchainAttestation(verification);
+      } catch {
+        // Non-fatal: contract may not support verify_attestation yet.
+      }
       setPollingOnchain(true);
       refreshOnchainRoot();
       refresh();
@@ -293,7 +320,7 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
     } finally {
       setCommitLoading(false);
     }
-  }, [lastClosedEpoch, commitFn, refresh, refreshOnchainRoot]);
+  }, [lastClosedEpoch, commitFn, network, refresh, refreshOnchainRoot, toast]);
 
   const handleVerify = useCallback(async () => {
     setVerifyLoading(true);
@@ -448,40 +475,6 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
       />
 
       <div className="audit-surface__body">
-        {/* ─── Reset audit data ──────────────────────────────────────────── */}
-        <div style={{ display: "flex", justifyContent: "flex-end" }}>
-          {confirmReset ? (
-            <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
-              <span style={{ fontSize: "var(--font-size-xs)", color: "var(--ink-muted)" }}>
-                Clear all local audit data? On-chain history is unaffected.
-              </span>
-              <button className="audit-mode-tab" onClick={() => setConfirmReset(false)} disabled={resetBusy}>
-                Cancel
-              </button>
-              <button
-                className="audit-mode-tab"
-                onClick={handleResetData}
-                disabled={resetBusy}
-                style={{ color: "var(--danger-500)" }}
-              >
-                {resetBusy ? "Resetting…" : "Confirm reset"}
-              </button>
-            </div>
-          ) : (
-            <>
-              <button
-                className="audit-mode-tab"
-                onClick={() => setConfirmReset(true)}
-                style={{ color: "var(--warning-500)" }}
-                title="Clear local events, batches, and verification history (on-chain history is unaffected)"
-              >
-                Reset audit data
-              </button>
-              <InfoPopover label="Help: Reset audit data" title="Reset audit data"><p>Clears all local audit events, batches, and verification history. On-chain commitments and IPFS data are unaffected and remain verifiable.</p></InfoPopover>
-            </>
-          )}
-        </div>
-
         {/* ─── 2. Status section ────────────────────────────────────────── */}
         <AuditStatusSection
           health={health}
@@ -500,6 +493,7 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
           commitResult={commitResult}
           pinataResult={pinataResult}
           onCommit={handleCommit}
+          onchainAttestation={onchainAttestation}
           canCloseEpoch={canCloseEpoch}
           closeEpochDisabledReason={closeEpochDisabledReason}
           canCommit={canCommit}
@@ -553,7 +547,6 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
           <div
             className="audit-section-header"
             onClick={() => setInvestigationCollapsed((v) => !v)}
-            style={{ cursor: "pointer" }}
           >
             <span className="audit-section-header__title">
               Investigation
@@ -564,7 +557,9 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
                 </span>
               )}
             </span>
-            <span className={`audit-section-header__chevron ${investigationCollapsed ? "" : "audit-section-header__chevron--open"}`}>▶</span>
+            <span className={`audit-section-header__chevron ${investigationCollapsed ? "" : "audit-section-header__chevron--open"}`}>
+              <ChevronRight size={15} aria-hidden="true" />
+            </span>
           </div>
 
           <div className={`audit-section-body ${investigationCollapsed ? "" : "audit-section-body--open"}`}>
@@ -589,10 +584,11 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
           <div
             className="audit-section-header"
             onClick={() => setAdvancedCollapsed((v) => !v)}
-            style={{ cursor: "pointer" }}
           >
             <span className="audit-section-header__title">Advanced<InfoPopover label="Help: Advanced" title="Advanced audit info"><p>Detailed technical data including the current Merkle root, tree height, on-chain root, transaction hashes, and IPFS CIDs.</p></InfoPopover></span>
-            <span className={`audit-section-header__chevron ${advancedCollapsed ? "" : "audit-section-header__chevron--open"}`}>▶</span>
+            <span className={`audit-section-header__chevron ${advancedCollapsed ? "" : "audit-section-header__chevron--open"}`}>
+              <ChevronRight size={15} aria-hidden="true" />
+            </span>
           </div>
 
           <div className={`audit-section-body ${advancedCollapsed ? "" : "audit-section-body--open"}`}>
@@ -606,6 +602,12 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
                 <span className="audit-advanced__label">Tree height</span>
                 <span className="audit-advanced__value">{status?.treeHeight ?? "—"}</span>
               </div>
+              {network === "testnet" && contractId && (
+                <div className="audit-advanced__row">
+                  <span className="audit-advanced__label">Your contract</span>
+                  <span className="audit-advanced__value audit-advanced__value--mono">{contractId}</span>
+                </div>
+              )}
               {onchainRoot && (
                 <>
                   <div className="audit-advanced__row">
@@ -626,7 +628,7 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
                       href={`https://stellar.expert/explorer/${network === "mainnet" ? "public" : "testnet"}/tx/${commitResult.txHash}`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      style={{ color: "var(--link)", fontFamily: "var(--font-mono)", fontSize: "var(--font-size-xs)" }}
+                      className="audit-advanced__link"
                     >
                       {commitResult.txHash}
                     </a>
@@ -642,6 +644,39 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
             </div>
             </div>
           </div>
+        </div>
+
+        {/* ─── Maintenance: reset local audit data (destructive, kept last) ── */}
+        <div className="audit-surface__maintenance">
+          {confirmReset ? (
+            <div className="audit-reset">
+              <span className="audit-reset__prompt">
+                Clear all local audit data? On-chain history is unaffected.
+              </span>
+              <button className="audit-mode-tab" onClick={() => setConfirmReset(false)} disabled={resetBusy}>
+                Cancel
+              </button>
+              <button
+                className="audit-mode-tab audit-reset__confirm"
+                onClick={handleResetData}
+                disabled={resetBusy}
+              >
+                {resetBusy ? "Resetting…" : "Confirm reset"}
+              </button>
+            </div>
+          ) : (
+            <div className="audit-reset">
+              <button
+                className="audit-mode-tab audit-reset__trigger"
+                onClick={() => setConfirmReset(true)}
+                title="Clear local events, batches, and verification history (on-chain history is unaffected)"
+              >
+                <RotateCcw size={13} aria-hidden="true" />
+                Reset audit data
+              </button>
+              <InfoPopover label="Help: Reset audit data" title="Reset audit data"><p>Clears all local audit events, batches, and verification history. On-chain commitments and IPFS data are unaffected and remain verifiable.</p></InfoPopover>
+            </div>
+          )}
         </div>
       </div>
     </div>

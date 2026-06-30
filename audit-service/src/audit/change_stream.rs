@@ -42,6 +42,7 @@ use mongodb::change_stream::event::{ChangeStreamEvent, OperationType};
 use mongodb::Client;
 use tokio::sync::Mutex;
 
+use crate::audit::epoch::EpochManager;
 use crate::audit::interceptor;
 use crate::audit::AuditLog;
 use crate::error::{AuditError, AuditResult};
@@ -174,6 +175,7 @@ pub fn start(
     deployment_id: String,
     client: Client,
     audit_log: Arc<AuditLog>,
+    epoch_manager: Option<Arc<EpochManager>>,
 ) -> ChangeStreamHandle {
     let cancel = Arc::new(tokio::sync::Notify::new());
     let cancel_clone = cancel.clone();
@@ -184,6 +186,7 @@ pub fn start(
             deployment_id,
             client,
             audit_log,
+            epoch_manager,
             cancel_clone,
         )
         .await;
@@ -199,6 +202,7 @@ async fn run_listener(
     deployment_id: String,
     client: Client,
     audit_log: Arc<AuditLog>,
+    epoch_manager: Option<Arc<EpochManager>>,
     cancel: Arc<tokio::sync::Notify>,
 ) {
     log::info!("audit change stream listener starting for connection {connection_id}");
@@ -227,7 +231,7 @@ async fn run_listener(
                 log::info!("audit change stream listener stopped");
                 return;
             }
-            result = watch_once(&client, &deployment_id, &audit_log, &cancel, &connection_id, resume_token) => {
+            result = watch_once(&client, &deployment_id, &audit_log, epoch_manager.as_ref(), &cancel, &connection_id, resume_token) => {
                 match result {
                     Ok(()) => {
                         // watch_once returned normally — this means the
@@ -258,6 +262,7 @@ async fn watch_once(
     client: &Client,
     deployment_id: &str,
     audit_log: &Arc<AuditLog>,
+    epoch_manager: Option<&Arc<EpochManager>>,
     cancel: &Arc<tokio::sync::Notify>,
     connection_id: &str,
     resume_token: Option<mongodb::change_stream::event::ResumeToken>,
@@ -282,7 +287,7 @@ async fn watch_once(
             result = stream.next() => {
                 match result {
                     Some(Ok(event)) => {
-                        process_event(event, deployment_id, audit_log);
+                        process_event(event, deployment_id, audit_log, epoch_manager);
 
                         // Persist the resume token after each event so
                         // we can resume gaplessly after a restart.
@@ -312,6 +317,7 @@ fn process_event(
     event: ChangeStreamEvent<bson::Document>,
     deployment_id: &str,
     audit_log: &Arc<AuditLog>,
+    epoch_manager: Option<&Arc<EpochManager>>,
 ) {
     let ns = match event.ns {
         Some(ns) => ns,
@@ -321,11 +327,31 @@ fn process_event(
     let db = &ns.db;
     let coll = ns.coll.as_deref().unwrap_or("");
 
+    // Advance the open epoch (batch) for each recorded leaf so the UI's
+    // "Batch · filling" counter and the Seal action track captured writes in
+    // real time. The change-stream listener is the authoritative capture path
+    // on replica sets / sharded clusters, so without this the open batch would
+    // only catch up on app restart or after a reset. `None` keeps the legacy
+    // behavior for callers (e.g. the daemon) that reconcile epochs elsewhere.
+    let advance = |res: AuditResult<u64>| {
+        if let (Ok(index), Some(em)) = (res, epoch_manager) {
+            if let Err(e) = em.record_event(index, audit_log) {
+                log::warn!("failed to advance epoch for change-stream event: {e}");
+            }
+        }
+    };
+
     match event.operation_type {
         OperationType::Insert => {
             if let Some(doc) = event.full_document {
                 if let Ok(json) = serde_json::to_string(&doc) {
-                    let _ = interceptor::record_insert(audit_log, deployment_id, db, coll, &json);
+                    advance(interceptor::record_insert(
+                        audit_log,
+                        deployment_id,
+                        db,
+                        coll,
+                        &json,
+                    ));
                 }
             }
         }
@@ -351,27 +377,42 @@ fn process_event(
             } else {
                 "{}".to_string()
             };
-            let _ = interceptor::record_update(
+            advance(interceptor::record_update(
                 audit_log,
                 deployment_id,
                 db,
                 coll,
                 &filter_json,
                 &update_json,
-            );
+            ));
         }
         OperationType::Delete => {
             let filter_json = match &event.document_key {
                 Some(key) => serde_json::to_string(key).unwrap_or_default(),
                 None => "{}".to_string(),
             };
-            let _ = interceptor::record_delete(audit_log, deployment_id, db, coll, &filter_json);
+            advance(interceptor::record_delete(
+                audit_log,
+                deployment_id,
+                db,
+                coll,
+                &filter_json,
+            ));
         }
         OperationType::Drop => {
-            let _ = interceptor::record_drop_collection(audit_log, deployment_id, db, coll);
+            advance(interceptor::record_drop_collection(
+                audit_log,
+                deployment_id,
+                db,
+                coll,
+            ));
         }
         OperationType::DropDatabase => {
-            let _ = interceptor::record_drop_database(audit_log, deployment_id, db);
+            advance(interceptor::record_drop_database(
+                audit_log,
+                deployment_id,
+                db,
+            ));
         }
         OperationType::Rename => {
             // The `to` field contains the new namespace.
@@ -380,8 +421,13 @@ fn process_event(
                 .as_ref()
                 .and_then(|t| t.coll.as_deref())
                 .unwrap_or("renamed");
-            let _ =
-                interceptor::record_rename_collection(audit_log, deployment_id, db, coll, new_name);
+            advance(interceptor::record_rename_collection(
+                audit_log,
+                deployment_id,
+                db,
+                coll,
+                new_name,
+            ));
         }
         OperationType::Invalidate => {
             // The namespace was invalidated (e.g. collection dropped).
@@ -401,14 +447,14 @@ fn process_event(
                             .unwrap_or_default(),
                         None => "{}".to_string(),
                     };
-                    let _ = interceptor::record_create_index(
+                    advance(interceptor::record_create_index(
                         audit_log,
                         deployment_id,
                         db,
                         coll,
                         &keys_json,
                         "{}",
-                    );
+                    ));
                 }
                 "dropIndexes" => {
                     let name = event
@@ -416,8 +462,13 @@ fn process_event(
                         .as_ref()
                         .and_then(|d| d.get_str("name").ok())
                         .unwrap_or("unknown");
-                    let _ =
-                        interceptor::record_drop_index(audit_log, deployment_id, db, coll, name);
+                    advance(interceptor::record_drop_index(
+                        audit_log,
+                        deployment_id,
+                        db,
+                        coll,
+                        name,
+                    ));
                 }
                 _ => {
                     // Unknown expanded event — log but don't audit.
@@ -455,12 +506,19 @@ impl ChangeStreamRegistry {
         deployment_id: String,
         client: Client,
         audit_log: Arc<AuditLog>,
+        epoch_manager: Option<Arc<EpochManager>>,
     ) {
         let mut handles = self.handles.lock().await;
         if let Some(old) = handles.remove(&connection_id) {
             old.stop();
         }
-        let handle = start(connection_id.clone(), deployment_id, client, audit_log);
+        let handle = start(
+            connection_id.clone(),
+            deployment_id,
+            client,
+            audit_log,
+            epoch_manager,
+        );
         handles.insert(connection_id, handle);
     }
 
@@ -492,6 +550,99 @@ impl Default for ChangeStreamRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::epoch::EpochConfig;
+
+    /// Build a synthetic insert change event for the given document, so the
+    /// capture path can be exercised without a live MongoDB.
+    fn insert_event(doc: bson::Document) -> ChangeStreamEvent<bson::Document> {
+        let event_doc = bson::doc! {
+            "_id": { "_data": "resume-token" },
+            "operationType": "insert",
+            "ns": { "db": "appdb", "coll": "events" },
+            "documentKey": { "_id": 1 },
+            "fullDocument": doc,
+        };
+        bson::from_document(event_doc).expect("construct change stream event")
+    }
+
+    // Regression guard for the capture→epoch seam: on replica sets the change
+    // stream is the authoritative capture path, so a captured write must
+    // advance BOTH the audit log and the open batch (epoch). Before this was
+    // wired, the batch counter stayed at 0 and "Seal Batch" never enabled.
+    #[test]
+    fn process_event_advances_open_epoch() {
+        let audit = Arc::new(AuditLog::new().unwrap());
+        let epoch_manager = Arc::new(EpochManager::new(EpochConfig {
+            event_threshold: 100,
+            time_threshold_secs: 0,
+        }));
+
+        process_event(
+            insert_event(bson::doc! { "x": 1 }),
+            "rs:rs0",
+            &audit,
+            Some(&epoch_manager),
+        );
+
+        assert_eq!(audit.event_count(), 1, "audit log must record the capture");
+        assert_eq!(
+            epoch_manager.current_epoch().event_count,
+            1,
+            "open batch must track the captured write"
+        );
+    }
+
+    // A captured write should auto-close the batch once the threshold is hit,
+    // exactly as the manual/IPC path does.
+    #[test]
+    fn process_event_auto_closes_batch_at_threshold() {
+        let audit = Arc::new(AuditLog::new().unwrap());
+        let epoch_manager = Arc::new(EpochManager::new(EpochConfig {
+            event_threshold: 2,
+            time_threshold_secs: 0,
+        }));
+
+        process_event(
+            insert_event(bson::doc! { "n": 0 }),
+            "rs:rs0",
+            &audit,
+            Some(&epoch_manager),
+        );
+        process_event(
+            insert_event(bson::doc! { "n": 1 }),
+            "rs:rs0",
+            &audit,
+            Some(&epoch_manager),
+        );
+
+        let epochs = epoch_manager.list_epochs();
+        assert_eq!(
+            epochs.len(),
+            2,
+            "threshold reached should open a fresh batch"
+        );
+        assert!(!epochs[0].is_open(), "first batch should have sealed");
+        assert_eq!(epochs[0].event_count, 2);
+        assert!(epochs[1].is_open());
+    }
+
+    // Backward-compat: callers that reconcile epochs elsewhere (e.g. the
+    // daemon's auto_commit_loop) pass None and must NOT have the epoch touched
+    // here, avoiding double-counting.
+    #[test]
+    fn process_event_without_epoch_manager_only_records_log() {
+        let audit = Arc::new(AuditLog::new().unwrap());
+        let epoch_manager = EpochManager::new(EpochConfig::default());
+
+        process_event(insert_event(bson::doc! { "x": 1 }), "rs:rs0", &audit, None);
+
+        assert_eq!(audit.event_count(), 1);
+        assert_eq!(
+            epoch_manager.current_epoch().event_count,
+            0,
+            "epoch must be left untouched when no manager is supplied"
+        );
+    }
 
     #[test]
     fn change_stream_registry_starts_empty() {

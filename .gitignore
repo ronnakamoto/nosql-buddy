@@ -60,6 +60,8 @@ attester.key
 # Generated Groth16 proving/verifying keys (regenerable from R1CS via zk-audit-ceremony)
 src-tauri/resources/circuits/*.pkey
 src-tauri/resources/circuits/*.vkey
+# Compiled Soroban contract WASM (regenerable: stellar contract build)
+src-tauri/resources/contract/
 
 
 # Editor

@@ -6,7 +6,7 @@ import type {
   DomainSuperProofResult,
 } from "../ipc/commands";
 import { Badge, Button, EmptyState, Spinner } from "./AuditUi";
-import { CircleDashed } from "lucide-react";
+import { CircleDashed, ChevronRight } from "lucide-react";
 import { InfoPopover } from "./InfoPopover";
 
 /**
@@ -292,7 +292,7 @@ export function AuditChangeFeed({
   return (
     <div className="audit-section audit-section--feed">
       {/* Section header */}
-      <div className="audit-section-header" onClick={onToggle} style={{ cursor: "pointer" }}>
+      <div className="audit-section-header" onClick={onToggle}>
         <span className="audit-section-header__title">
           Change Feed
           <InfoPopover label="Help: Change Feed" title="Change Feed"><p>Real-time stream of audited MongoDB operations. Click an event to generate a cryptographic proof, or use filters to narrow by operation type.</p></InfoPopover>
@@ -301,7 +301,7 @@ export function AuditChangeFeed({
           </span>
         </span>
         <span className={`audit-section-header__chevron ${collapsed ? "" : "audit-section-header__chevron--open"}`}>
-          ▶
+          <ChevronRight size={15} aria-hidden="true" />
         </span>
       </div>
 

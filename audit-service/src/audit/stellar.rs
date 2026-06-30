@@ -64,6 +64,33 @@ pub struct OnChainRoot {
     pub metadata: String,
 }
 
+/// The result of the contract's `verify_attestation(sequence)` query.
+///
+/// This is the **independent** attestation verdict: it counts how many
+/// distinct, currently-authorized attesters signed the exact oplog root the
+/// operator committed, and compares that against the on-chain K-of-N threshold.
+/// The operator cannot fabricate it, because attestations are ed25519-verified
+/// against keys the admin authorized.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnChainAttestationVerification {
+    /// The committed sequence this verdict is for.
+    pub sequence: u64,
+    /// The committed oplog root (hex), or empty if none was committed.
+    pub oplog_root_hex: String,
+    /// Total attestations on record for this sequence (authorized or not).
+    pub attestation_count: u32,
+    /// Attestations from currently-authorized attesters.
+    pub authorized_count: u32,
+    /// The on-chain K-of-N threshold required for a `verified` verdict.
+    pub threshold: u32,
+    /// True only when the threshold is met by distinct authorized attesters.
+    pub all_match: bool,
+    /// The contract's verdict string (verified / threshold_not_met /
+    /// unauthorized_attester / no_attestations).
+    pub verdict: String,
+}
+
 /// Commit a Merkle root to the Soroban contract on Stellar testnet.
 ///
 /// This calls `commit_root(root, metadata)` on the contract. The `root_hex`

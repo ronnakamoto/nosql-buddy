@@ -46,6 +46,7 @@
     "resources": {
       "resources/circuits/merkle_inclusion.r1cs": "resources/circuits/merkle_inclusion.r1cs",
       "resources/circuits/merkle_inclusion.wasm": "resources/circuits/merkle_inclusion.wasm",
+      "resources/contract/zk_audit_commitment.wasm": "resources/contract/zk_audit_commitment.wasm",
       "../docker-compose.audit.yml": "stack/docker-compose.audit.yml",
       "../docker-compose.audit-db.yml": "stack/docker-compose.audit-db.yml",
       "../scripts/rs-init-audit.js": "stack/scripts/rs-init-audit.js",

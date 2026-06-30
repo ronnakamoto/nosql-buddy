@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, useMemo } from "react";
-import type { AuditMode, AuditModeConfig } from "../ipc/commands";
+import type { AuditMode, AuditModeConfig, DevPrerequisites } from "../ipc/commands";
 import commands from "../ipc/commands";
 import { AuditModeChooser } from "./AuditModeChooser";
 import { AuditDevFlow } from "./AuditDevFlow";
@@ -41,6 +41,8 @@ export default function AuditPanel({
   // ─── Config loading ──────────────────────────────────────────────────
   const [config, setConfig] = useState<AuditModeConfig | null>(null);
   const [configLoading, setConfigLoading] = useState(true);
+  const [devPrereqs, setDevPrereqs] = useState<DevPrerequisites | null>(null);
+  const [devPrereqsLoading, setDevPrereqsLoading] = useState(false);
 
   const loadConfig = useCallback(async () => {
     try {
@@ -56,6 +58,25 @@ export default function AuditPanel({
   useEffect(() => {
     loadConfig();
   }, [loadConfig]);
+
+  const loadDevPrereqs = useCallback(async () => {
+    setDevPrereqsLoading(true);
+    try {
+      const p = await commands.auditCheckDevPrerequisites();
+      setDevPrereqs(p);
+    } catch {
+      setDevPrereqs(null);
+    } finally {
+      setDevPrereqsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (view !== "dev") return;
+    loadDevPrereqs();
+    const interval = window.setInterval(loadDevPrereqs, 2000);
+    return () => window.clearInterval(interval);
+  }, [view, loadDevPrereqs]);
 
   // Re-load config whenever we leave settings (mode may have changed).
   const handleBackFromSettings = useCallback(
@@ -88,19 +109,23 @@ export default function AuditPanel({
   const showSettings = useCallback(() => onViewChange("settings"), [onViewChange]);
 
   // ─── Is configured? ──────────────────────────────────────────────────
-  // Production mode needs a keypair. Dev mode is always "configured" (Docker setup
-  // is shown inside DevFlow, not as a blocker here — DevFlow shows the docker step
-  // inline). We route to AuditSurface once the user has been through the chooser.
+  // Production mode needs a keypair before it shows the in-app surface. Dev
+  // mode ALWAYS uses AuditDevFlow, which is the dashboard for the Dockerized
+  // audit service (publisher/attester/reader) — it must never fall through to
+  // the in-app AuditSurface, or the daemons would be bypassed entirely.
   const isConfigured = useMemo((): boolean => {
     if (!config) return false;
-    if (config.mode === "production") return config.hasProductionKeypair;
-    return true; // dev mode — docker onboarding is optional/inline
-  }, [config]);
+    if (view === "production") return config.hasProductionKeypair;
+    return false;
+  }, [config, view]);
+
+  const isUnifiedSurface =
+    view === "production" && isConfigured && !configLoading;
 
   // ─── Body ─────────────────────────────────────────────────────────────
   let body: React.ReactNode;
 
-  if (configLoading) {
+  if (configLoading || (view === "dev" && devPrereqsLoading && !devPrereqs)) {
     body = (
       <div style={{ display: "flex", justifyContent: "center", padding: "var(--space-8)" }}>
         <Spinner size={22} />
@@ -115,8 +140,8 @@ export default function AuditPanel({
         onModeChanged={switchMode}
       />
     );
-  } else if (view === "production" && config && isConfigured) {
-    // Configured production mode → unified surface
+  } else if (isUnifiedSurface && config) {
+    // Configured audit mode → unified surface
     body = (
       <AuditSurface
         config={config}
@@ -147,7 +172,6 @@ export default function AuditPanel({
   // When showing the unified surface, the AuditSurface itself renders its own
   // sticky header. We still show the pane chrome title so it's consistent with
   // other tabs — but we hide the mode tabs (they live in Settings now).
-  const isUnifiedSurface = view === "production" && isConfigured && !configLoading;
   const showModeTabs = view !== "chooser" && view !== "settings" && !isUnifiedSurface;
 
   return (
@@ -180,10 +204,13 @@ export default function AuditPanel({
                 Dev
               </button>
               <button
-                className={`audit-mode-tab ${view === "production" ? "is-active" : ""}`}
-                onClick={() => switchMode("production")}
+                className="audit-mode-tab"
+                disabled
+                aria-disabled="true"
+                title="Production mode is coming soon"
               >
                 Production
+                <span className="audit-mode-tab__soon">Soon</span>
               </button>
             </div>
           )}

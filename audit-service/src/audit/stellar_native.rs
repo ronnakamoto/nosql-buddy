@@ -21,13 +21,16 @@
 
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
+use rand::RngCore;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tokio::sync::Mutex as TokioMutex;
 use stellar_xdr::curr::{
-    AccountId, ContractId, DecoratedSignature, Hash, HostFunction, InvokeContractArgs,
+    AccountId, BytesM, ContractExecutable, ContractId, ContractIdPreimage,
+    ContractIdPreimageFromAddress, CreateContractArgs, DecoratedSignature, Hash, HashIdPreimage,
+    HashIdPreimageContractId, HostFunction, InvokeContractArgs,
     InvokeHostFunctionOp, LedgerEntryData, LedgerKey, LedgerKeyAccount, Limits, Memo, MuxedAccount,
     Operation, OperationBody, Preconditions,
     PublicKey, ReadXdr, ScAddress, ScBytes, ScMap, ScMapEntry, ScString, ScSymbol, ScVal, ScVec,
@@ -37,7 +40,8 @@ use stellar_xdr::curr::{
 };
 
 use crate::audit::stellar::{
-    CommitResult, OnChainOplogCommitment, OnChainRoot, VerifyInclusionResult,
+    CommitResult, OnChainAttestationVerification, OnChainOplogCommitment, OnChainRoot,
+    VerifyInclusionResult,
 };
 use crate::error::{AuditError, AuditResult};
 
@@ -104,6 +108,11 @@ impl StellarKeypair {
     /// Get the secret key as a Stellar strkey (S... format, 56 chars).
     pub fn secret_key_str(&self) -> String {
         encode_secret_key(&self.secret_bytes())
+    }
+
+    /// Sign arbitrary bytes with the keypair's ed25519 signing key.
+    pub fn sign_message(&self, message: &[u8]) -> [u8; 64] {
+        self.signing_key.sign(message).to_bytes()
     }
 }
 
@@ -258,9 +267,6 @@ fn build_invoke_transaction(
     args: Vec<ScVal>,
     fee: u32,
 ) -> AuditResult<Transaction> {
-    // Convert public key to MuxedAccount.
-    let muxed = MuxedAccount::Ed25519(Uint256(*source_public_key));
-
     // Convert contract_id to ScAddress::Contract.
     // Accepts both C... strkey and hex formats.
     let contract_arr = decode_contract_id(contract_id)?;
@@ -283,16 +289,31 @@ fn build_invoke_transaction(
         args: args_vecm,
     };
 
-    // Build Operation.
+    build_host_function_transaction(
+        source_public_key,
+        sequence,
+        HostFunction::InvokeContract(invoke_args),
+        fee,
+    )
+}
+
+fn build_host_function_transaction(
+    source_public_key: &[u8; 32],
+    sequence: i64,
+    host_function: HostFunction,
+    fee: u32,
+) -> AuditResult<Transaction> {
+    // Convert public key to MuxedAccount.
+    let muxed = MuxedAccount::Ed25519(Uint256(*source_public_key));
+
+    // Build operations VecM.
     let op = Operation {
         source_account: None,
         body: OperationBody::InvokeHostFunction(InvokeHostFunctionOp {
-            host_function: HostFunction::InvokeContract(invoke_args),
+            host_function,
             auth: VecM::default(),
         }),
     };
-
-    // Build operations VecM.
     let operations: VecM<Operation, 100> =
         vec![op].try_into().map_err(|e: stellar_xdr::curr::Error| {
             AuditError::Validation(format!("too many operations: {e}"))
@@ -628,6 +649,46 @@ fn tx_result_code_name(code: i32) -> &'static str {
     }
 }
 
+/// Decode a failed `TransactionResult` XDR into a human-readable summary,
+/// including the inner `InvokeHostFunction` result code when present.
+///
+/// The on-chain `TransactionResult` only carries the operation result code
+/// (e.g. `TRAPPED`); the specific contract error lives in diagnostic events,
+/// which the Soroban RPC does not return through `getTransaction`. So we name
+/// the codes and add an actionable hint for the common trap cause.
+fn describe_failed_result_xdr(b64: &str) -> String {
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) else {
+        return format!("undecodable result XDR ({b64})");
+    };
+    let tx_code = decode_tx_result_code(b64);
+    let tx_name = tx_code.map(tx_result_code_name).unwrap_or("unknown");
+
+    // For txFAILED, surface the first operation's InvokeHostFunction code.
+    // Layout after feeCharged(8) + txCode(4) + results-len(4):
+    //   opResultCode(4) opType(4) invokeHostFunctionResultCode(4)
+    if tx_code == Some(-1) && bytes.len() >= 28 {
+        let op_type = i32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+        if op_type == 24 {
+            let ihf = i32::from_be_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]);
+            let (name, hint): (&str, &str) = match ihf {
+                0 => ("INVOKE_HOST_FUNCTION_SUCCESS", ""),
+                -1 => ("INVOKE_HOST_FUNCTION_MALFORMED", ""),
+                -2 => (
+                    "INVOKE_HOST_FUNCTION_TRAPPED",
+                    " — the contract rejected the call; the most common cause is a failed admin.require_auth() (the signing key is not the contract admin), or the contract returned an error",
+                ),
+                -3 => ("INVOKE_HOST_FUNCTION_RESOURCE_LIMIT_EXCEEDED", ""),
+                -4 => ("INVOKE_HOST_FUNCTION_ENTRY_ARCHIVED", ""),
+                -5 => ("INVOKE_HOST_FUNCTION_INSUFFICIENT_REFUNDABLE_FEE", ""),
+                _ => ("unknown InvokeHostFunction result", ""),
+            };
+            return format!("{tx_name} / {name}{hint}");
+        }
+    }
+
+    format!("{tx_name} (raw {b64})")
+}
+
 /// True if the error is a `txBAD_SEQ` rejection (stale account sequence).
 fn is_bad_seq_error(err: &AuditError) -> bool {
     err.to_string().contains("txBAD_SEQ")
@@ -705,9 +766,13 @@ async fn submit_invoke_with_retry(
                 //    runs. A FAILED on-chain result is surfaced to the caller.
                 let confirmed = wait_for_transaction(rpc_url, &tx_hash).await?;
                 if confirmed.status == "FAILED" {
+                    let detail = confirmed
+                        .result_xdr
+                        .as_deref()
+                        .map(describe_failed_result_xdr)
+                        .unwrap_or_else(|| "no result XDR returned".to_string());
                     return Err(AuditError::Validation(format!(
-                        "transaction {tx_hash} failed on-chain: {}",
-                        confirmed.result_xdr.unwrap_or_default()
+                        "transaction {tx_hash} failed on-chain: {detail}"
                     )));
                 }
                 return Ok((tx_hash, sim_result));
@@ -717,6 +782,73 @@ async fn submit_invoke_with_retry(
                 tracing::warn!(
                     attempt,
                     function_name,
+                    "on-chain submission rejected with txBAD_SEQ; re-fetching account sequence and retrying"
+                );
+                tokio::time::sleep(tokio::time::Duration::from_millis(
+                    750 * attempt as u64,
+                ))
+                .await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+async fn submit_host_function_with_retry(
+    rpc_url: &str,
+    keypair: &StellarKeypair,
+    network_passphrase: &str,
+    host_function: HostFunction,
+    operation_label: &str,
+    base_fee: u32,
+) -> AuditResult<(String, SimulationResult)> {
+    let public_key = keypair.public_bytes();
+    let lock = submit_lock_for(&public_key);
+    let _guard = lock.lock().await;
+
+    let mut attempt: u32 = 0;
+    loop {
+        let sequence = get_account_sequence_from_rpc(rpc_url, &public_key).await?;
+        let tx = build_host_function_transaction(
+            &public_key,
+            sequence,
+            host_function.clone(),
+            base_fee,
+        )?;
+        let sim_result = simulate_transaction(rpc_url, &tx).await?;
+        let signed_tx = attach_soroban_data_and_auth(&tx, &sim_result)?;
+        let decorated_sig =
+            sign_transaction(&signed_tx, &keypair.signing_key, network_passphrase)?;
+        let signatures: VecM<DecoratedSignature, 20> = vec![decorated_sig]
+            .try_into()
+            .map_err(|e: stellar_xdr::curr::Error| {
+                AuditError::Validation(format!("too many signatures: {e}"))
+            })?;
+        let envelope = TransactionEnvelope::Tx(TransactionV1Envelope {
+            tx: signed_tx,
+            signatures,
+        });
+
+        match send_transaction(rpc_url, &envelope).await {
+            Ok(tx_hash) => {
+                let confirmed = wait_for_transaction(rpc_url, &tx_hash).await?;
+                if confirmed.status == "FAILED" {
+                    let detail = confirmed
+                        .result_xdr
+                        .as_deref()
+                        .map(describe_failed_result_xdr)
+                        .unwrap_or_else(|| "no result XDR returned".to_string());
+                    return Err(AuditError::Validation(format!(
+                        "transaction {tx_hash} failed on-chain: {detail}"
+                    )));
+                }
+                return Ok((tx_hash, sim_result));
+            }
+            Err(e) if is_bad_seq_error(&e) && attempt < MAX_BAD_SEQ_RETRIES => {
+                attempt += 1;
+                tracing::warn!(
+                    attempt,
+                    operation_label,
                     "on-chain submission rejected with txBAD_SEQ; re-fetching account sequence and retrying"
                 );
                 tokio::time::sleep(tokio::time::Duration::from_millis(
@@ -1177,6 +1309,61 @@ fn build_verifying_key_scval(
     ])
 }
 
+// ─── High-level: get_admin (read-only simulation) ─────────────────────
+
+/// Read the contract admin address via a read-only simulation.
+///
+/// Returns the admin as a Stellar account strkey (`G...`), or `None` if the
+/// contract is uninitialized or the admin can't be decoded. Used as a
+/// preflight before owner-only writes (`commit_root*`): those call
+/// `admin.require_auth()`, which passes simulation (recording auth does not
+/// verify signatures) but traps on-chain (`INVOKE_HOST_FUNCTION_TRAPPED`) when
+/// the signing key is not the admin. Checking up front lets callers fail with
+/// an actionable message instead of an opaque on-chain trap and a wasted fee.
+pub async fn get_admin_native(
+    source_keypair: &StellarKeypair,
+    rpc_url: &str,
+    contract_id: &str,
+) -> AuditResult<Option<String>> {
+    let tx = build_invoke_transaction(
+        &source_keypair.public_bytes(),
+        0,
+        contract_id,
+        "get_admin",
+        vec![],
+        100,
+    )?;
+
+    let sim_result = simulate_transaction(rpc_url, &tx).await?;
+    if sim_result.results.is_empty() {
+        return Ok(None);
+    }
+
+    let return_val_xdr = base64::engine::general_purpose::STANDARD
+        .decode(&sim_result.results[0].xdr)
+        .map_err(|e| AuditError::Validation(format!("base64 decode return value: {e}")))?;
+    let return_val = ScVal::from_xdr(&return_val_xdr, Limits::none())
+        .map_err(|e| AuditError::Validation(format!("decode return value: {e}")))?;
+
+    // `get_admin` returns `Result<Address, CommitmentError>`. Soroban encodes
+    // `Ok(addr)` as `Vec([Address])`; an uninitialized contract yields an
+    // error variant, which we treat as "no admin".
+    let inner = match &return_val {
+        ScVal::Vec(Some(vec)) if !vec.0.is_empty() => &vec.0[0],
+        ScVal::Address(_) => &return_val,
+        _ => return Ok(None),
+    };
+
+    if let ScVal::Address(ScAddress::Account(AccountId(PublicKey::PublicKeyTypeEd25519(
+        Uint256(bytes),
+    )))) = inner
+    {
+        Ok(Some(encode_account_id(bytes)))
+    } else {
+        Ok(None)
+    }
+}
+
 // ─── High-level: get_oplog_commitment (read-only simulation) ──────────
 
 /// Read an oplog commitment from the contract via a read-only simulation.
@@ -1617,6 +1804,100 @@ fn attach_soroban_data_and_auth(
     Ok(signed_tx)
 }
 
+#[derive(Debug, Clone)]
+pub struct DeployedContract {
+    pub contract_id: String,
+    pub wasm_hash_hex: String,
+    pub upload_tx_hash: String,
+    pub create_tx_hash: String,
+}
+
+/// Deploy the commitment contract using native Soroban host functions.
+///
+/// The same function works on testnet and mainnet; callers only swap the RPC
+/// URL and network passphrase. Testnet account funding is intentionally handled
+/// outside this function.
+pub async fn deploy_contract_native(
+    wasm_bytes: &[u8],
+    deployer_keypair: &StellarKeypair,
+    rpc_url: &str,
+    network_passphrase: &str,
+) -> AuditResult<DeployedContract> {
+    if wasm_bytes.is_empty() {
+        return Err(AuditError::Validation(
+            "contract WASM resource is empty".to_string(),
+        ));
+    }
+
+    let wasm_hash: [u8; 32] = Sha256::digest(wasm_bytes).into();
+    let wasm = BytesM::try_from(wasm_bytes.to_vec()).map_err(|e: stellar_xdr::curr::Error| {
+        AuditError::Validation(format!("invalid contract WASM bytes: {e}"))
+    })?;
+
+    let (upload_tx_hash, _) = submit_host_function_with_retry(
+        rpc_url,
+        deployer_keypair,
+        network_passphrase,
+        HostFunction::UploadContractWasm(wasm),
+        "upload_contract_wasm",
+        100,
+    )
+    .await?;
+
+    let mut salt = [0u8; 32];
+    let mut rng = rand::rngs::OsRng;
+    rng.fill_bytes(&mut salt);
+
+    let contract_id_preimage = ContractIdPreimage::Address(ContractIdPreimageFromAddress {
+        address: ScAddress::Account(AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(
+            deployer_keypair.public_bytes(),
+        )))),
+        salt: Uint256(salt),
+    });
+    let contract_id_bytes = derive_contract_id(network_passphrase, &contract_id_preimage)?;
+
+    let create_args = CreateContractArgs {
+        contract_id_preimage,
+        executable: ContractExecutable::Wasm(Hash(wasm_hash)),
+    };
+
+    let (create_tx_hash, _) = submit_host_function_with_retry(
+        rpc_url,
+        deployer_keypair,
+        network_passphrase,
+        HostFunction::CreateContract(create_args),
+        "create_contract",
+        100,
+    )
+    .await?;
+
+    Ok(DeployedContract {
+        contract_id: encode_contract_id(&contract_id_bytes),
+        wasm_hash_hex: hex::encode(wasm_hash),
+        upload_tx_hash,
+        create_tx_hash,
+    })
+}
+
+fn derive_contract_id(
+    network_passphrase: &str,
+    contract_id_preimage: &ContractIdPreimage,
+) -> AuditResult<[u8; 32]> {
+    let network_id = Sha256::digest(network_passphrase.as_bytes());
+    let preimage = HashIdPreimage::ContractId(HashIdPreimageContractId {
+        network_id: Hash(network_id.into()),
+        contract_id_preimage: contract_id_preimage.clone(),
+    });
+    let xdr = preimage
+        .to_xdr(Limits::none())
+        .map_err(|e| AuditError::Validation(format!("contract ID preimage XDR failed: {e}")))?;
+    Ok(Sha256::digest(&xdr).into())
+}
+
+fn encode_contract_id(contract_id: &[u8; 32]) -> String {
+    encode_strkey(2 << 3, contract_id)
+}
+
 /// Call `initialize(admin)` on the contract via native signing.
 ///
 /// Used by the setup wizard to initialize a newly deployed contract.
@@ -1693,6 +1974,205 @@ pub async fn authorize_attester_native(
     )
     .await?;
     Ok(())
+}
+
+/// Set the on-chain K-of-N attestation threshold (admin only).
+///
+/// The threshold is the minimum number of distinct currently-authorized
+/// attesters required before `verify_attestation` returns the `verified`
+/// verdict. `admin_keypair` must be the contract admin. Threshold must be >= 1.
+pub async fn set_threshold_native(
+    contract_id: &str,
+    admin_keypair: &StellarKeypair,
+    threshold: u32,
+    rpc_url: &str,
+    network_passphrase: &str,
+) -> AuditResult<()> {
+    if threshold < 1 {
+        return Err(AuditError::Validation(
+            "attestation threshold must be at least 1".to_string(),
+        ));
+    }
+    let args = vec![ScVal::U32(threshold)];
+    submit_invoke_with_retry(
+        rpc_url,
+        admin_keypair,
+        network_passphrase,
+        contract_id,
+        "set_threshold",
+        args,
+        100,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Read the on-chain K-of-N attestation threshold via simulation.
+///
+/// Defaults to 1 for contracts initialized before threshold support was added
+/// (the contract's `get_threshold` returns 1 in that case).
+pub async fn get_threshold_native(
+    source_keypair: &StellarKeypair,
+    rpc_url: &str,
+    contract_id: &str,
+) -> AuditResult<u32> {
+    let tx = build_invoke_transaction(
+        &source_keypair.public_bytes(),
+        0,
+        contract_id,
+        "get_threshold",
+        vec![],
+        100,
+    )?;
+
+    let sim_result = simulate_transaction(rpc_url, &tx).await?;
+    if sim_result.results.is_empty() {
+        return Ok(1);
+    }
+
+    let return_val_xdr = base64::engine::general_purpose::STANDARD
+        .decode(&sim_result.results[0].xdr)
+        .map_err(|e| AuditError::Validation(format!("base64 decode return value: {e}")))?;
+    let return_val = ScVal::from_xdr(&return_val_xdr, Limits::none())
+        .map_err(|e| AuditError::Validation(format!("decode return value: {e}")))?;
+
+    match return_val {
+        ScVal::U32(v) => Ok(v),
+        _ => Ok(1),
+    }
+}
+
+/// Revoke a previously-authorized attester (admin only).
+///
+/// After revocation the attester's on-record attestations no longer count
+/// toward the threshold, so `verify_attestation` will no longer treat them as
+/// authorized signatures.
+pub async fn revoke_attester_native(
+    contract_id: &str,
+    admin_keypair: &StellarKeypair,
+    attester_address: &str,
+    rpc_url: &str,
+    network_passphrase: &str,
+) -> AuditResult<()> {
+    let attester_pubkey_bytes = decode_account_id_strkey(attester_address).ok_or_else(|| {
+        AuditError::Validation(format!(
+            "invalid attester Stellar address (expected G... strkey): {attester_address}"
+        ))
+    })?;
+    let attester_addr_scval = ScVal::Address(ScAddress::Account(AccountId(
+        PublicKey::PublicKeyTypeEd25519(Uint256(attester_pubkey_bytes)),
+    )));
+    submit_invoke_with_retry(
+        rpc_url,
+        admin_keypair,
+        network_passphrase,
+        contract_id,
+        "revoke_attester",
+        vec![attester_addr_scval],
+        100,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Query the contract's independent attestation verdict for a sequence.
+///
+/// Calls `verify_attestation(sequence)` via simulation and decodes the full
+/// `AttestationVerification` struct. This is the trust anchor the UI should
+/// show: `verified` means K distinct authorized attesters each signed the exact
+/// committed oplog root.
+pub async fn verify_attestation_native(
+    source_keypair: &StellarKeypair,
+    rpc_url: &str,
+    contract_id: &str,
+    sequence: u64,
+) -> AuditResult<OnChainAttestationVerification> {
+    let tx = build_invoke_transaction(
+        &source_keypair.public_bytes(),
+        0,
+        contract_id,
+        "verify_attestation",
+        vec![ScVal::U64(sequence)],
+        100,
+    )?;
+
+    let sim_result = simulate_transaction(rpc_url, &tx).await?;
+    if sim_result.results.is_empty() {
+        return Err(AuditError::Validation(
+            "verify_attestation returned no result".to_string(),
+        ));
+    }
+
+    let return_val_xdr = base64::engine::general_purpose::STANDARD
+        .decode(&sim_result.results[0].xdr)
+        .map_err(|e| AuditError::Validation(format!("base64 decode return value: {e}")))?;
+    let return_val = ScVal::from_xdr(&return_val_xdr, Limits::none())
+        .map_err(|e| AuditError::Validation(format!("decode return value: {e}")))?;
+
+    let map = match &return_val {
+        ScVal::Map(Some(map)) => map,
+        _ => {
+            return Err(AuditError::Validation(
+                "verify_attestation did not return a struct".to_string(),
+            ))
+        }
+    };
+
+    let mut out = OnChainAttestationVerification {
+        sequence,
+        oplog_root_hex: String::new(),
+        attestation_count: 0,
+        authorized_count: 0,
+        threshold: 1,
+        all_match: false,
+        verdict: String::new(),
+    };
+
+    for entry in map.0.iter() {
+        if let ScVal::Symbol(s) = &entry.key {
+            let name = String::from_utf8_lossy(s.0.as_slice());
+            match name.as_ref() {
+                "sequence" => {
+                    if let ScVal::U64(v) = &entry.val {
+                        out.sequence = *v;
+                    }
+                }
+                "oplog_root" => {
+                    if let ScVal::Bytes(b) = &entry.val {
+                        out.oplog_root_hex = hex::encode(b.0.as_slice());
+                    }
+                }
+                "attestation_count" => {
+                    if let ScVal::U32(v) = &entry.val {
+                        out.attestation_count = *v;
+                    }
+                }
+                "authorized_count" => {
+                    if let ScVal::U32(v) = &entry.val {
+                        out.authorized_count = *v;
+                    }
+                }
+                "threshold" => {
+                    if let ScVal::U32(v) = &entry.val {
+                        out.threshold = *v;
+                    }
+                }
+                "all_match" => {
+                    if let ScVal::Bool(v) = &entry.val {
+                        out.all_match = *v;
+                    }
+                }
+                "verdict" => {
+                    if let ScVal::String(s) = &entry.val {
+                        out.verdict = String::from_utf8_lossy(s.0.as_slice()).to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 /// Decode a Stellar account ID strkey (G...) to 32 raw bytes.
@@ -1895,6 +2375,28 @@ mod tests {
     fn test_decode_tx_result_code_rejects_malformed() {
         assert_eq!(decode_tx_result_code("not-base64!!"), None);
         assert_eq!(decode_tx_result_code("AAAA"), None); // too short
+    }
+
+    #[test]
+    fn describe_failed_result_xdr_names_invoke_host_function_trap() {
+        // The exact TransactionResult XDR from a real commit_root failure:
+        // txFAILED with one InvokeHostFunction op that TRAPPED (-2). This is
+        // the signature of a failed admin.require_auth() — passes simulation,
+        // traps on apply.
+        let detail = describe_failed_result_xdr("AAAAAAAAT1b/////AAAAAQAAAAAAAAAY/////gAAAAA=");
+        assert!(detail.contains("txFAILED"), "got: {detail}");
+        assert!(
+            detail.contains("INVOKE_HOST_FUNCTION_TRAPPED"),
+            "got: {detail}"
+        );
+        assert!(detail.contains("require_auth"), "got: {detail}");
+    }
+
+    #[test]
+    fn describe_failed_result_xdr_falls_back_to_code_name() {
+        // txBAD_SEQ has no inner InvokeHostFunction result to expand.
+        let detail = describe_failed_result_xdr("AAAAAAAAk9H////7AAAAAA==");
+        assert!(detail.contains("txBAD_SEQ"), "got: {detail}");
     }
 
     #[test]
@@ -2179,5 +2681,146 @@ mod tests {
             }
             Err(e) => panic!("got Err: {e}"),
         }
+    }
+
+    /// Live end-to-end smoke test for the in-app per-user contract flow.
+    ///
+    /// Mirrors `audit_provision_testnet_contract` + a Production-mode commit:
+    /// fund a key, deploy the bundled WASM, initialize (admin = key), confirm
+    /// the on-chain admin equals the deployer, then commit a root signed by the
+    /// SAME key. The commit must succeed — a key that is not the admin would
+    /// trap on apply (`INVOKE_HOST_FUNCTION_TRAPPED`), which is the exact bug
+    /// the mode-aware provisioning fix prevents.
+    ///
+    /// Run with:
+    ///   cargo test -p nosqlbuddy-audit-service deploy_commit_same_key_live \
+    ///     -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn deploy_commit_same_key_live() {
+        let rpc = "https://soroban-testnet.stellar.org:443";
+        let wasm_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src-tauri/resources/contract/zk_audit_commitment.wasm"
+        );
+        let wasm = std::fs::read(wasm_path).expect("read bundled contract WASM");
+        assert!(!wasm.is_empty(), "bundled WASM is empty");
+
+        let kp = generate_keypair();
+        println!("deployer account: {}", kp.account_id());
+        fund_account(&kp.account_id())
+            .await
+            .expect("friendbot fund deployer");
+
+        let deployed = deploy_contract_native(&wasm, &kp, rpc, TESTNET_PASSPHRASE)
+            .await
+            .expect("deploy contract");
+        println!(
+            "deployed contract={} wasm_hash={} upload_tx={} create_tx={}",
+            deployed.contract_id,
+            deployed.wasm_hash_hex,
+            deployed.upload_tx_hash,
+            deployed.create_tx_hash
+        );
+
+        initialize_contract_native(&deployed.contract_id, &kp, rpc, TESTNET_PASSPHRASE)
+            .await
+            .expect("initialize contract");
+
+        let admin = get_admin_native(&kp, rpc, &deployed.contract_id)
+            .await
+            .expect("read admin")
+            .expect("admin should be set after initialize");
+        println!("on-chain admin: {admin}");
+        assert_eq!(
+            admin,
+            kp.account_id(),
+            "deployer key must be the contract admin so its commits are authorized"
+        );
+
+        // 32-byte root, signed by the same key. Before the fix the commit key
+        // differed from the admin and this trapped on apply.
+        let mut root = [0u8; 32];
+        let mut rng = rand::rngs::OsRng;
+        rng.fill_bytes(&mut root);
+        let root_hex = hex::encode(root);
+
+        let result = commit_root_native(
+            &root_hex,
+            "smoke-test deploy_commit_same_key_live",
+            &kp,
+            rpc,
+            &deployed.contract_id,
+            TESTNET_PASSPHRASE,
+        )
+        .await
+        .expect("commit must succeed when signed by the admin key (no trap)");
+        println!(
+            "commit ok: seq={} tx={} root={}",
+            result.sequence, result.tx_hash, result.root_hex
+        );
+        assert_eq!(result.root_hex, root_hex);
+    }
+
+    /// Live testnet smoke test for the on-chain K-of-N threshold (F3).
+    ///
+    /// Deploys the freshly built contract, initializes it, confirms the default
+    /// threshold is 1, raises it to 2 via `set_threshold` (admin-signed), reads
+    /// it back, and verifies that a sub-1 threshold is rejected on-chain.
+    ///
+    /// Run with:
+    ///   cargo test -p nosqlbuddy-audit-service deploy_set_threshold_live \
+    ///     -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn deploy_set_threshold_live() {
+        let rpc = "https://soroban-testnet.stellar.org:443";
+        let wasm_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src-tauri/resources/contract/zk_audit_commitment.wasm"
+        );
+        let wasm = std::fs::read(wasm_path).expect("read bundled contract WASM");
+        assert!(!wasm.is_empty(), "bundled WASM is empty");
+
+        let kp = generate_keypair();
+        println!("deployer account: {}", kp.account_id());
+        fund_account(&kp.account_id())
+            .await
+            .expect("friendbot fund deployer");
+
+        let deployed = deploy_contract_native(&wasm, &kp, rpc, TESTNET_PASSPHRASE)
+            .await
+            .expect("deploy contract");
+        println!(
+            "deployed contract={} wasm_hash={}",
+            deployed.contract_id, deployed.wasm_hash_hex
+        );
+
+        initialize_contract_native(&deployed.contract_id, &kp, rpc, TESTNET_PASSPHRASE)
+            .await
+            .expect("initialize contract");
+
+        // Default threshold is 1.
+        let default_threshold = get_threshold_native(&kp, rpc, &deployed.contract_id)
+            .await
+            .expect("read default threshold");
+        println!("default on-chain threshold: {default_threshold}");
+        assert_eq!(default_threshold, 1, "default threshold must be 1");
+
+        // Raise to 2 (admin-signed).
+        set_threshold_native(&deployed.contract_id, &kp, 2, rpc, TESTNET_PASSPHRASE)
+            .await
+            .expect("set threshold to 2");
+
+        let raised = get_threshold_native(&kp, rpc, &deployed.contract_id)
+            .await
+            .expect("read raised threshold");
+        println!("raised on-chain threshold: {raised}");
+        assert_eq!(raised, 2, "threshold must be 2 after set_threshold(2)");
+
+        // A sub-1 threshold is rejected client-side before submission.
+        let err = set_threshold_native(&deployed.contract_id, &kp, 0, rpc, TESTNET_PASSPHRASE)
+            .await;
+        assert!(err.is_err(), "threshold of 0 must be rejected");
     }
 }
