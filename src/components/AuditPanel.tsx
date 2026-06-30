@@ -30,7 +30,6 @@ export interface AuditPanelProps {
 }
 
 export default function AuditPanel({
-  mode,
   view,
   connectionId,
   onModeChange,
@@ -78,15 +77,14 @@ export default function AuditPanel({
     return () => window.clearInterval(interval);
   }, [view, loadDevPrereqs]);
 
-  // Re-load config whenever we leave settings (mode may have changed).
-  const handleBackFromSettings = useCallback(
-    (updatedMode?: AuditMode) => {
-      const m = updatedMode ?? mode;
-      onViewChange(m === "dev" ? "dev" : "production");
-      loadConfig();
-    },
-    [mode, onViewChange, loadConfig],
-  );
+  const showSettings = useCallback(() => onViewChange("settings"), [onViewChange]);
+
+  // Back from settings returns to the active mode's view.
+  const handleBackFromSettings = useCallback(() => {
+    const m = config?.mode ?? "dev";
+    onViewChange(m === "dev" ? "dev" : "production");
+    loadConfig();
+  }, [config, onViewChange, loadConfig]);
 
   const handleChoose = useCallback(
     (m: AuditMode) => {
@@ -105,8 +103,6 @@ export default function AuditPanel({
     },
     [onModeChange, onViewChange, loadConfig],
   );
-
-  const showSettings = useCallback(() => onViewChange("settings"), [onViewChange]);
 
   // ─── Is configured? ──────────────────────────────────────────────────
   // Production mode needs a keypair before it shows the in-app surface. Dev
