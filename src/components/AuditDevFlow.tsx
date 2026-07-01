@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect, useCallback, useRef, Fragment } from "react";
+import { useMemo, useState, useEffect, useCallback, Fragment } from "react";
 import commands, {
   type DevPrerequisites,
   type DevStackStatus,
@@ -23,6 +23,7 @@ import {
   LogsModal,
   Modal,
 } from "./AuditUi";
+import { LogViewer } from "./LogViewer";
 import type { ProofResult, DevSetupParams } from "../ipc/commands";
 import { InfoPopover } from "./InfoPopover";
 import { KeyRound, ShieldCheck, Users } from "lucide-react";
@@ -440,37 +441,6 @@ function DevLiveView({ auditedMongoUri }: { auditedMongoUri: string }) {
   return <DevLiveViewInner auditedMongoUri={auditedMongoUri} />;
 }
 
-/** Auto-scrolling monospace log for streamed setup progress lines. */
-function ProgressLog({ lines, placeholder }: { lines: string[]; placeholder: string }) {
-  const ref = useRef<HTMLPreElement>(null);
-  useEffect(() => {
-    const el = ref.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [lines]);
-  return (
-    <pre
-      ref={ref}
-      style={{
-        maxHeight: "240px",
-        minHeight: "120px",
-        overflow: "auto",
-        background: "var(--surface-2)",
-        border: "1px solid var(--border)",
-        borderRadius: "var(--radius-md)",
-        padding: "var(--space-3)",
-        fontSize: "var(--font-size-xs)",
-        fontFamily: "var(--font-mono)",
-        color: lines.length > 0 ? "var(--ink-muted)" : "var(--ink-faint)",
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-word",
-        margin: 0,
-      }}
-    >
-      {lines.length > 0 ? lines.join("\n") : placeholder}
-    </pre>
-  );
-}
-
 function SetupWizardModal({
   open,
   onClose,
@@ -529,23 +499,12 @@ function SetupWizardModal({
           <Alert tone="success">
             Setup complete. Credentials were written locally. You can now start the stack.
           </Alert>
-          <pre
-            style={{
-              maxHeight: "320px",
-              overflow: "auto",
-              background: "var(--surface-2)",
-              border: "1px solid var(--border)",
-              borderRadius: "var(--radius-md)",
-              padding: "var(--space-3)",
-              fontSize: "var(--font-size-xs)",
-              fontFamily: "var(--font-mono)",
-              color: "var(--ink-muted)",
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-word",
-            }}
-          >
-            {resultLog}
-          </pre>
+          <LogViewer
+            lines={resultLog}
+            copyable
+            showLineNumbers={false}
+            maxHeight={320}
+          />
         </div>
       ) : busy ? (
         <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)" }}>
@@ -556,9 +515,14 @@ function SetupWizardModal({
               attester… this can take a minute or two.
             </span>
           </div>
-          <ProgressLog
+          <LogViewer
             lines={progress}
-            placeholder="Waiting for the setup wizard to start…"
+            loading={progress.length === 0}
+            loadingLabel="Waiting for the setup wizard to start…"
+            live
+            showLineNumbers={false}
+            minHeight={120}
+            maxHeight={240}
           />
         </div>
       ) : (

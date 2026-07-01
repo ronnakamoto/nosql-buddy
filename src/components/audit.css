@@ -1440,26 +1440,42 @@
   line-height: var(--line-height-tight);
 }
 
-/* ─── Logs Modal ───────────────────────────────────────────────── */
+/* ─── LogViewer ──────────────────────────────────────────────────
+   Shared log/terminal surface (components/LogViewer.tsx). Backs the
+   dev-stack "View Logs" modal, the setup-wizard progress feed, and the
+   completed-setup transcript, so all three share one severity palette,
+   copy affordance, and auto-follow behavior. */
 
-.audit-logs-search {
+.audit-logviewer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.audit-logviewer__toolbar {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
+  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
+  min-height: 34px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  margin-bottom: var(--space-3);
   transition: border-color 0.12s ease;
 }
 
-.audit-logs-search:focus-within {
+.audit-logviewer__toolbar:focus-within {
   border-color: var(--accent-500);
 }
 
-.audit-logs-search__input {
+.audit-logviewer__search-icon {
+  color: var(--ink-faint);
+  flex-shrink: 0;
+}
+
+.audit-logviewer__search-input {
   flex: 1;
+  min-width: 0;
   border: none;
   background: transparent;
   color: var(--ink);
@@ -1468,11 +1484,18 @@
   font-family: var(--font-sans);
 }
 
-.audit-logs-search__input::placeholder {
+.audit-logviewer__search-input::placeholder {
   color: var(--ink-faint);
 }
 
-.audit-logs-search__clear {
+.audit-logviewer__count {
+  flex: 1;
+  color: var(--ink-faint);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.audit-logviewer__clear {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1484,20 +1507,66 @@
   cursor: pointer;
   border-radius: var(--radius-sm);
   padding: 0;
+  flex-shrink: 0;
   transition: background 0.12s ease, color 0.12s ease;
 }
 
-.audit-logs-search__clear:hover {
+.audit-logviewer__clear:hover {
   background: var(--surface-2);
   color: var(--ink);
 }
 
-.audit-logs-viewport {
+.audit-logviewer__live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 0 2px;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--success-500);
+}
+
+.audit-logviewer__copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 var(--space-2);
+  flex-shrink: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.audit-logviewer__copy:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--ink);
+  border-color: var(--border);
+}
+
+.audit-logviewer__copy:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.audit-logviewer__copy--done {
+  color: var(--success-500);
+}
+
+.audit-logviewer__frame {
+  position: relative;
+}
+
+.audit-logviewer__viewport {
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  max-height: 48vh;
-  min-height: 200px;
   overflow: auto;
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
@@ -1505,19 +1574,24 @@
   scrollbar-width: thin;
 }
 
-.audit-logs-loading,
-.audit-logs-empty {
+.audit-logviewer__viewport--fade {
+  mask-image: linear-gradient(to bottom, transparent, black 14px, black calc(100% - 14px), transparent);
+}
+
+.audit-logviewer__status {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: var(--space-2);
-  height: 200px;
+  min-height: 88px;
+  padding: var(--space-4);
   color: var(--ink-faint);
   font-family: var(--font-sans);
   font-size: var(--font-size-sm);
+  text-align: center;
 }
 
-.audit-log-line {
+.audit-logviewer__line {
   display: grid;
   grid-template-columns: 52px 1fr;
   padding: 0 var(--space-2);
@@ -1525,11 +1599,16 @@
   transition: background 0.08s ease;
 }
 
-.audit-log-line:hover {
+.audit-logviewer__line--no-numbers {
+  grid-template-columns: 1fr;
+  padding: 0 var(--space-3);
+}
+
+.audit-logviewer__line:hover {
   background: var(--surface);
 }
 
-.audit-log-line__num {
+.audit-logviewer__num {
   color: var(--ink-faint);
   text-align: right;
   padding-right: var(--space-2);
@@ -1538,43 +1617,99 @@
   opacity: 0.6;
 }
 
-.audit-log-line__text {
+.audit-logviewer__text {
   color: var(--ink-muted);
   white-space: pre-wrap;
   word-break: break-word;
   min-width: 0;
 }
 
-.audit-log-line--error {
+.audit-logviewer__line--error {
   border-left-color: var(--danger-500);
   background: color-mix(in oklch, var(--danger-500) 4%, transparent);
 }
 
-.audit-log-line--error .audit-log-line__text {
+.audit-logviewer__line--error .audit-logviewer__text {
   color: var(--danger-500);
 }
 
-.audit-log-line--warn {
+.audit-logviewer__line--warn {
   border-left-color: var(--warning-500);
 }
 
-.audit-log-line--warn .audit-log-line__text {
+.audit-logviewer__line--warn .audit-logviewer__text {
   color: var(--warning-500);
 }
 
-.audit-log-line--info .audit-log-line__text {
-  color: var(--ink-muted);
+.audit-logviewer__line--success {
+  border-left-color: var(--success-500);
 }
 
-.audit-log-line--default .audit-log-line__text {
-  color: var(--ink-muted);
+.audit-logviewer__line--success .audit-logviewer__text {
+  color: var(--success-500);
+}
+
+.audit-logviewer__line--current .audit-logviewer__text {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.audit-logviewer__caret {
+  display: inline-block;
+  width: 6px;
+  height: 12px;
+  margin-left: 4px;
+  background: var(--accent-500);
+  vertical-align: -2px;
+  animation: audit-caret-blink 1s step-end infinite;
+}
+
+@keyframes audit-caret-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.audit-logviewer__jump {
+  position: absolute;
+  left: 50%;
+  bottom: var(--space-2);
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  animation: audit-fade-in 0.15s ease-out;
+}
+
+.audit-logviewer__jump:hover {
+  background: var(--surface-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .audit-logviewer__caret {
+    animation: none;
+  }
+  .audit-logviewer__jump {
+    animation: none;
+  }
+  .audit-status-dot--live {
+    animation: none;
+  }
 }
 
 /* ─── Modal (audit-specific overrides) ─────────────────────────── */
 /* The audit modal reuses the global .modal classes from styles.css.
    Only overrides that differ go here. */
 
-.modal__body .audit-logs-search {
+.modal__body .audit-logviewer__toolbar {
   margin-bottom: 0;
 }
 

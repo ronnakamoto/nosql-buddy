@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { X } from "lucide-react";
 import { formatShortcut, isMac, parseShortcut } from "../lib/shortcutUtils";
+import { LogViewer, type LogViewerStats } from "./LogViewer";
 import "./audit.css";
 
 /**
@@ -524,111 +525,42 @@ export function LogsModal({
   loading?: boolean;
   title?: string;
 }) {
-  const [query, setQuery] = useState("");
-
-  const lines = useMemo(() => (logs ? logs.split("\n") : []), [logs]);
-
-  const filtered = useMemo(() => {
-    if (!query.trim()) return lines.map((line, i) => ({ line, index: i }));
-    const q = query.toLowerCase();
-    return lines
-      .map((line, i) => ({ line, index: i }))
-      .filter((entry) => entry.line.toLowerCase().includes(q));
-  }, [lines, query]);
-
-  const errorCount = useMemo(
-    () => lines.filter((l) => logLevel(l) === "error").length,
-    [lines],
-  );
-  const warnCount = useMemo(
-    () => lines.filter((l) => logLevel(l) === "warn").length,
-    [lines],
-  );
+  const [stats, setStats] = useState<LogViewerStats>({ total: 0, visible: 0, errors: 0, warnings: 0 });
 
   return (
     <Modal
       open={open}
       onClose={onClose}
       title={title}
-      subtitle={loading ? "Loading…" : `${lines.length} lines${errorCount > 0 ? ` · ${errorCount} errors` : ""}${warnCount > 0 ? ` · ${warnCount} warnings` : ""}`}
+      subtitle={
+        loading
+          ? "Loading…"
+          : `${stats.total} lines${stats.errors > 0 ? ` · ${stats.errors} errors` : ""}${stats.warnings > 0 ? ` · ${stats.warnings} warnings` : ""}`
+      }
       maxWidth={780}
       footer={
         <>
           <div className="modal__footer-hint">
-            {filtered.length !== lines.length
-              ? `${filtered.length} of ${lines.length} lines match`
+            {stats.visible !== stats.total
+              ? `${stats.visible} of ${stats.total} lines match`
               : "Most recent 120 lines"}
           </div>
           <Button variant="secondary" shortcut="Escape" onClick={onClose}>Close</Button>
         </>
       }
     >
-      {/* Search filter */}
-      <div className="audit-logs-search">
-        <svg
-          width="14"
-          height="14"
-          viewBox="0 0 16 16"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth={1.5}
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          style={{ color: "var(--ink-faint)", flexShrink: 0 }}
-        >
-          <circle cx="7" cy="7" r="4.5" />
-          <path d="M10.5 10.5L14 14" />
-        </svg>
-        <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Filter logs…"
-          className="audit-logs-search__input"
-        />
-        {query && (
-          <button
-            className="audit-logs-search__clear"
-            onClick={() => setQuery("")}
-            aria-label="Clear filter"
-          >
-            <X size={12} />
-          </button>
-        )}
-      </div>
-
-      {/* Log viewport */}
-      <div className="audit-logs-viewport">
-        {loading ? (
-          <div className="audit-logs-loading">
-            <Spinner size={18} />
-            <span>Fetching logs…</span>
-          </div>
-        ) : filtered.length === 0 ? (
-          <div className="audit-logs-empty">
-            {query ? "No lines match your filter." : "No logs available."}
-          </div>
-        ) : (
-          filtered.map(({ line, index }) => {
-            const level = logLevel(line);
-            return (
-              <div key={index} className={`audit-log-line audit-log-line--${level}`}>
-                <span className="audit-log-line__num">{index + 1}</span>
-                <span className="audit-log-line__text">{line || " "}</span>
-              </div>
-            );
-          })
-        )}
-      </div>
+      <LogViewer
+        lines={logs}
+        loading={loading}
+        loadingLabel="Fetching logs…"
+        searchable
+        copyable
+        maxHeight="48vh"
+        minHeight={200}
+        onStats={setStats}
+      />
     </Modal>
   );
-}
-
-function logLevel(line: string): "error" | "warn" | "info" | "default" {
-  const l = line.toLowerCase();
-  if (/\b(error|err|fatal|panic|traceback|exception)\b/.test(l)) return "error";
-  if (/\b(warn|warning|deprecat)\b/.test(l)) return "warn";
-  if (/\b(info|listen|ready|started|connected)\b/.test(l)) return "info";
-  return "default";
 }
 
 /**
