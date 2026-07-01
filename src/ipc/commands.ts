@@ -1236,6 +1236,19 @@ export interface DevSetupParams {
   attesterSecretKey?: string;
   contractId?: string;
   overwrite?: boolean;
+  /**
+   * MongoDB deployment the publisher should watch (change stream). When set,
+   * it is persisted into `.env.audit`. Must be a replica set or sharded
+   * cluster. Leave empty to watch the bundled demo replica set.
+   */
+  publisherMongoUri?: string;
+  /**
+   * Independent MongoDB member the attester/reader read from for oplog
+   * verification. For a real trust anchor this should be a replica member the
+   * operator does not control. Leave empty to fall back to the publisher URI
+   * (functional but not independent).
+   */
+  attesterMongoUri?: string;
   /** Setup role: "all" (Dev Mode), "publisher", or "attester". */
   role?: string;
 }
@@ -1266,6 +1279,11 @@ export interface DevStackService {
 export interface DevStackStatus {
   running: boolean;
   services: DevStackService[];
+  /**
+   * The publisher's configured MongoDB URI (from `.env.audit`), or null when
+   * the bundled demo replica set default is in effect.
+   */
+  publisherMongoUri?: string | null;
 }
 
 /** A registered publisher for threshold attestation. */

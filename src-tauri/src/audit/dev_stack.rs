@@ -539,6 +539,9 @@ pub struct DevStackStatus {
     pub running: bool,
     /// Raw `docker compose ps` output (parsed loosely into service lines).
     pub services: Vec<DevStackService>,
+    /// The publisher's configured MongoDB URI, read from `.env.audit` when set.
+    /// `None` means the bundled demo replica set default is in effect.
+    pub publisher_mongo_uri: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -556,7 +559,27 @@ pub fn stack_status(app: &AppHandle) -> AppResult<DevStackStatus> {
     let running = services.iter().any(|s| {
         s.state.to_lowercase().contains("running") || s.state.to_lowercase().contains("up")
     });
-    Ok(DevStackStatus { running, services })
+    let publisher_mongo_uri = stack_ctx(app)
+        .ok()
+        .and_then(|ctx| read_env_var(&ctx.dir.join(".env.audit"), "PUBLISHER_MONGO_URI"));
+    Ok(DevStackStatus {
+        running,
+        services,
+        publisher_mongo_uri,
+    })
+}
+
+/// Read a single non-empty value for `key` from an env file (`KEY=value`).
+/// Returns `None` if the file is missing or the key is unset/empty.
+fn read_env_var(path: &Path, key: &str) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let prefix = format!("{key}=");
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// Parse `docker compose ps --format json` (one JSON object per line) into
@@ -659,6 +682,18 @@ pub struct DevSetupParams {
     pub contract_id: Option<String>,
     /// Re-run even if `.env.audit` already exists (regenerates keys).
     pub overwrite: Option<bool>,
+    /// The MongoDB deployment the publisher should watch (change stream).
+    /// Persisted into `.env.audit` as `PUBLISHER_MONGO_URI`. Left empty, the
+    /// stack watches the bundled demo 3-node replica set. Must be a replica set
+    /// or sharded cluster.
+    pub publisher_mongo_uri: Option<String>,
+    /// The independent MongoDB member the attester/reader read from to verify
+    /// oplog completeness. Persisted as `ATTESTER_MONGO_URI` + `READER_MONGO_URI`.
+    /// For a real trust anchor this should be a replica member the operator does
+    /// not control. Left empty, it falls back to the publisher URI (functional
+    /// but not independent); if both are empty, the demo independent member
+    /// (mongo3) is used.
+    pub attester_mongo_uri: Option<String>,
     /// Setup role: `all` (Dev Mode), `publisher`, or `attester`.
     /// Dev Mode desktop always uses `all`; the flag exists so the same
     /// wizard binary supports separated production deployments.
@@ -709,6 +744,48 @@ fn redact_secrets(input: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn upsert_env_var(content: &mut String, key: &str, value: &str) {
+    let prefix = format!("{key}=");
+    let mut replaced = false;
+    let lines = content
+        .lines()
+        .map(|line| {
+            if line.starts_with(&prefix) {
+                replaced = true;
+                format!("{prefix}{value}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>();
+
+    *content = lines.join("\n");
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    if !replaced {
+        content.push_str(&format!("{prefix}{value}\n"));
+    }
+}
+
+fn persist_dev_mongo_uris(
+    env_path: &Path,
+    publisher_uri: Option<&str>,
+    attester_uri: Option<&str>,
+) -> AppResult<()> {
+    let mut content = std::fs::read_to_string(env_path)
+        .map_err(|e| AppError::Internal(format!("read .env.audit: {e}")))?;
+    if let Some(uri) = publisher_uri {
+        upsert_env_var(&mut content, "PUBLISHER_MONGO_URI", uri);
+    }
+    if let Some(uri) = attester_uri {
+        upsert_env_var(&mut content, "ATTESTER_MONGO_URI", uri);
+        upsert_env_var(&mut content, "READER_MONGO_URI", uri);
+    }
+    std::fs::write(env_path, content)
+        .map_err(|e| AppError::Internal(format!("write .env.audit Mongo URI: {e}")))
 }
 
 /// Run the non-interactive setup wizard inside the one-off `setup` Compose
@@ -786,6 +863,23 @@ pub fn setup_audit_config(app: &AppHandle, params: DevSetupParams) -> AppResult<
     // `run_compose` already returns a concise, secret-free message (and logs
     // the raw error), so propagate it as-is rather than re-wrapping it.
     let log = run_result?;
+
+    let publisher_uri = params
+        .publisher_mongo_uri
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    // The attester/reader use the independent-member URI when provided; else
+    // they fall back to the publisher URI so the stack stays reachable.
+    let attester_uri = params
+        .attester_mongo_uri
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or(publisher_uri);
+    if publisher_uri.is_some() || attester_uri.is_some() {
+        persist_dev_mongo_uris(&env_audit, publisher_uri, attester_uri)?;
+    }
 
     Ok(DevSetupResult {
         success: true,
@@ -965,5 +1059,64 @@ mod tests {
     fn test_port_free_high_port() {
         // An ephemeral high port should almost always be free.
         assert!(port_free(53917) || !port_free(53917)); // non-deterministic, just exercise
+    }
+
+    #[test]
+    fn test_upsert_env_var_appends_when_missing() {
+        let mut content = "STELLAR_SECRET_KEY=abc\n".to_string();
+        upsert_env_var(&mut content, "PUBLISHER_MONGO_URI", "mongodb://x:27017");
+        assert!(content.contains("STELLAR_SECRET_KEY=abc"));
+        assert!(content.contains("PUBLISHER_MONGO_URI=mongodb://x:27017"));
+        assert!(content.ends_with('\n'));
+    }
+
+    #[test]
+    fn test_upsert_env_var_replaces_existing() {
+        let mut content = "PUBLISHER_MONGO_URI=old\nCONTRACT_ID=c\n".to_string();
+        upsert_env_var(&mut content, "PUBLISHER_MONGO_URI", "new");
+        assert!(content.contains("PUBLISHER_MONGO_URI=new"));
+        assert!(!content.contains("PUBLISHER_MONGO_URI=old"));
+        assert!(content.contains("CONTRACT_ID=c"));
+    }
+
+    #[test]
+    fn test_read_env_var_missing_and_present() {
+        let dir = std::env::temp_dir().join(format!("nb-env-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".env.audit");
+        std::fs::write(&path, "PUBLISHER_MONGO_URI=mongodb://y:27017\nEMPTY=\n").unwrap();
+        assert_eq!(
+            read_env_var(&path, "PUBLISHER_MONGO_URI").as_deref(),
+            Some("mongodb://y:27017")
+        );
+        assert_eq!(read_env_var(&path, "EMPTY"), None);
+        assert_eq!(read_env_var(&path, "ABSENT"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_persist_dev_mongo_uris_independent_attester() {
+        let dir = std::env::temp_dir().join(format!("nb-uri-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".env.audit");
+        std::fs::write(&path, "CONTRACT_ID=c\n").unwrap();
+
+        persist_dev_mongo_uris(&path, Some("mongodb://pub:27017"), Some("mongodb://att:27019"))
+            .unwrap();
+
+        assert_eq!(
+            read_env_var(&path, "PUBLISHER_MONGO_URI").as_deref(),
+            Some("mongodb://pub:27017")
+        );
+        assert_eq!(
+            read_env_var(&path, "ATTESTER_MONGO_URI").as_deref(),
+            Some("mongodb://att:27019")
+        );
+        assert_eq!(
+            read_env_var(&path, "READER_MONGO_URI").as_deref(),
+            Some("mongodb://att:27019")
+        );
+        assert_eq!(read_env_var(&path, "CONTRACT_ID").as_deref(), Some("c"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -258,7 +258,7 @@ export function AuditDevFlow(_: { onShowSettings: () => void; onSwitchMode: () =
 
         {/* ─── Live view or empty state ──────────────────────────────── */}
         {ready ? (
-          <DevLiveView />
+          <DevLiveView auditedMongoUri={stack?.publisherMongoUri || AUDITED_MONGO_URI} />
         ) : (
           <Card>
             <EmptyState
@@ -332,6 +332,7 @@ function StackStatusBar({
 
   const configured = prereqs.auditConfigured;
   const canStart = !missingPrereq && !ready && configured;
+  const auditedMongoUri = stack?.publisherMongoUri || AUDITED_MONGO_URI;
 
   return (
     <Card compact>
@@ -427,15 +428,16 @@ function StackStatusBar({
             color: "var(--ink-muted)",
           }}
         >
-          Use <code>{AUDITED_MONGO_URI}</code> for collection changes you want captured. Port 27017 is the separate single-node dev DB.
+          Use <code>{auditedMongoUri}</code> for collection changes you want captured. If this
+          points at the bundled demo DB, port 27017 is the separate single-node dev DB.
         </div>
       )}
     </Card>
   );
 }
 
-function DevLiveView() {
-  return <DevLiveViewInner />;
+function DevLiveView({ auditedMongoUri }: { auditedMongoUri: string }) {
+  return <DevLiveViewInner auditedMongoUri={auditedMongoUri} />;
 }
 
 /** Auto-scrolling monospace log for streamed setup progress lines. */
@@ -487,6 +489,8 @@ function SetupWizardModal({
   const [pinataApiKey, setPinataApiKey] = useState("");
   const [pinataApiSecret, setPinataApiSecret] = useState("");
   const [pinataGatewayUrl, setPinataGatewayUrl] = useState("");
+  const [publisherMongoUri, setPublisherMongoUri] = useState("");
+  const [attesterMongoUri, setAttesterMongoUri] = useState("");
 
   const submit = () => {
     onSetup({
@@ -494,6 +498,8 @@ function SetupWizardModal({
       pinataApiKey: pinataApiKey.trim() || undefined,
       pinataApiSecret: pinataApiSecret.trim() || undefined,
       pinataGatewayUrl: pinataGatewayUrl.trim() || undefined,
+      publisherMongoUri: publisherMongoUri.trim() || undefined,
+      attesterMongoUri: attesterMongoUri.trim() || undefined,
     });
   };
 
@@ -565,6 +571,39 @@ function SetupWizardModal({
           </Alert>
           <div>
             <div style={{ fontSize: "var(--font-size-sm)", fontWeight: 600, marginBottom: "var(--space-2)" }}>
+              MongoDB URI to audit
+            </div>
+            <p style={{ fontSize: "var(--font-size-xs)", color: "var(--ink-faint)", marginTop: 0, marginBottom: "var(--space-2)" }}>
+              Point this at the DBA/operator-maintained replica set you want the publisher to
+              watch. Leave blank to use the bundled demo replica set. If MongoDB runs on your
+              host, use <code>host.docker.internal</code> because the publisher runs in Docker.
+            </p>
+            <label className="field__label">Publisher MongoDB URI</label>
+            <input
+              className="field__input"
+              type="text"
+              value={publisherMongoUri}
+              onChange={(e) => setPublisherMongoUri(e.target.value)}
+              placeholder="mongodb://host.docker.internal:27017/?directConnection=true"
+            />
+            <label className="field__label" style={{ marginTop: "var(--space-2)" }}>
+              Attester MongoDB URI (independent member)
+            </label>
+            <input
+              className="field__input"
+              type="text"
+              value={attesterMongoUri}
+              onChange={(e) => setAttesterMongoUri(e.target.value)}
+              placeholder="mongodb://host.docker.internal:27019/?directConnection=true"
+            />
+            <p style={{ fontSize: "var(--font-size-xs)", color: "var(--ink-faint)", marginTop: "var(--space-2)", marginBottom: 0 }}>
+              Use a replica member controlled by the audit team for a real trust anchor. Leave
+              blank to reuse the publisher URI, which captures events but does not prove
+              independent oplog completeness.
+            </p>
+          </div>
+          <div>
+            <div style={{ fontSize: "var(--font-size-sm)", fontWeight: 600, marginBottom: "var(--space-2)" }}>
               Pinata IPFS credentials (optional)
             </div>
             <p style={{ fontSize: "var(--font-size-xs)", color: "var(--ink-faint)", marginTop: 0, marginBottom: "var(--space-2)" }}>
@@ -602,7 +641,7 @@ function SetupWizardModal({
   );
 }
 
-function DevLiveViewInner() {
+function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
   const [status, setStatus] = useState<DaemonStatus | null>(null);
   const [events, setEvents] = useState<DevEvent[]>([]);
   const [epochs, setEpochs] = useState<DevEpoch[]>([]);
@@ -1001,12 +1040,12 @@ function DevLiveViewInner() {
 
               <div className="audit-stage__meta">
                 <span>{hasSealedBatch ? "Sealed and ready" : "Recording MongoDB changes"}</span>
-                <span>{activeStep === 1 ? AUDITED_MONGO_URI : `fingerprint ${current?.rootHex ? shortHash(current.rootHex) : "—"}`}</span>
+                <span>{activeStep === 1 ? auditedMongoUri : `fingerprint ${current?.rootHex ? shortHash(current.rootHex) : "—"}`}</span>
               </div>
 
               {epochEvents === 0 && !closed && activeStep === 1 && (
                 <Alert tone="info">
-                  Insert, update, or delete a document through <code>{AUDITED_MONGO_URI}</code>. The audit stack watches that replica set, not the single-node dev DB on port 27017.
+                  Insert, update, or delete a document through <code>{auditedMongoUri}</code>. The audit stack watches that deployment's change stream.
                 </Alert>
               )}
 
