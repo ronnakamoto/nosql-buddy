@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import commands from "../ipc/commands";
+import commands, { formatError } from "../ipc/commands";
 import { detectKind, displayValue, getByPath, kindClassName, toFilterId } from "./resultsDisplay";
 
 export interface EditableCellProps {
@@ -210,9 +210,5 @@ function readId(row: Record<string, unknown>): unknown {
 }
 
 function describeError(e: unknown): string {
-  if (typeof e === "string") return e;
-  if (e && typeof e === "object" && "message" in e) {
-    return String((e as { message: unknown }).message);
-  }
-  return String(e);
+  return formatError(e);
 }

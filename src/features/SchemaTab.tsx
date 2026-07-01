@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import commands, { type SchemaField, type SchemaReport } from "../ipc/commands";
+import commands, { formatError, type SchemaField, type SchemaReport } from "../ipc/commands";
 import { useToast } from "../context/ToastContext";
 import {
   DateHistogramChart,
@@ -190,9 +190,5 @@ function SchemaFieldRow({
 }
 
 function describeError(e: unknown): string {
-  if (typeof e === "string") return e;
-  if (e && typeof e === "object" && "message" in e) {
-    return String((e as { message: unknown }).message);
-  }
-  return "Unexpected error";
+  return formatError(e);
 }

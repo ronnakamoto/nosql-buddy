@@ -10,7 +10,7 @@ export interface ModalProps {
 }
 
 export function Modal({ open, title, onClose, children, footer, width }: ModalProps) {
-  const ref = useRef<HTMLDivElement | null>(null);
+  const backdropRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -21,20 +21,29 @@ export function Modal({ open, title, onClose, children, footer, width }: ModalPr
     return () => window.removeEventListener("keydown", handler);
   }, [open, onClose]);
 
+  // Close when the user clicks directly on the backdrop (not on a child).
+  // Use mousedown + a target check so that interactions that start inside the
+  // modal (e.g. an input's autocomplete popup landing outside the modal DOM)
+  // do not cause a spurious close.
+  const handleBackdropMouseDown = (e: React.MouseEvent) => {
+    if (e.target === backdropRef.current) {
+      e.preventDefault();
+      onClose();
+    }
+  };
+
   if (!open) return null;
   return (
     <div
       className="modal-backdrop"
+      ref={backdropRef}
       role="dialog"
       aria-modal="true"
       aria-label={title}
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
+      onMouseDown={handleBackdropMouseDown}
     >
       <div
         className="modal"
-        ref={ref}
         style={width ? { width: `min(${width}px, 92vw)` } : undefined}
       >
         <div className="modal__header">

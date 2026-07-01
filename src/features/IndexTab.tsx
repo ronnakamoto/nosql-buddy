@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import commands, {
+  formatError,
   type CollationDto,
   type CreateIndexRequest,
   type IndexInfo,
@@ -942,9 +943,5 @@ function IndexForm({ draft, setDraft, editing }: IndexFormProps) {
 }
 
 function describeError(e: unknown): string {
-  if (typeof e === "string") return e;
-  if (e && typeof e === "object" && "message" in e) {
-    return String((e as { message: unknown }).message);
-  }
-  return "Unexpected error";
+  return formatError(e);
 }

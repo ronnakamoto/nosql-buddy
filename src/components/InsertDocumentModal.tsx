@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Modal } from "./Modal";
 import { useToast } from "../context/ToastContext";
-import commands from "../ipc/commands";
+import commands, { formatError } from "../ipc/commands";
 
 export interface InsertDocumentModalProps {
   open: boolean;
@@ -152,9 +152,5 @@ export function InsertDocumentModal({
 }
 
 function describeError(e: unknown): string {
-  if (typeof e === "string") return e;
-  if (e && typeof e === "object" && "message" in e) {
-    return String((e as { message: unknown }).message);
-  }
-  return String(e);
+  return formatError(e);
 }

@@ -442,8 +442,11 @@ export function ExportWizard({
       role="dialog"
       aria-modal="true"
       aria-label="Export documents"
-      onClick={(e) => {
-        if (e.target === e.currentTarget && phase !== "running") onClose();
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget && phase !== "running") {
+          e.preventDefault();
+          onClose();
+        }
       }}
     >
       <div className="modal" style={{ width: "min(620px, 94vw)" }}>

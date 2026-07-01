@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import commands, {
+  formatError,
   type AppInfo,
   type AppSettings,
   type AuditMode,
@@ -1602,11 +1603,7 @@ function applyTheme(theme: "system" | "light" | "dark") {
 }
 
 function describeError(e: unknown): string {
-  if (typeof e === "string") return e;
-  if (e && typeof e === "object" && "message" in e) {
-    return String((e as { message: unknown }).message);
-  }
-  return "Unexpected error";
+  return formatError(e);
 }
 
 function formatNumber(n: number): string {

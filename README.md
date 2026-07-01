@@ -10,11 +10,12 @@ NoSQLBuddy connects to MongoDB, lets you browse data, run queries, build aggrega
 - [No MongoDB yet?](#no-mongodb-yet-run-the-seeded-demo-database) — run a seeded local database
 - [Features](#features)
 - [Using NoSQLBuddy](#using-nosqlbuddy) — how to use the core features
-- [ZK Audit Log](#zk-audit-log) — [Dev Mode](#dev-mode-full-stack-locally) · [Production Mode](#production-mode-in-app-your-keys)
-- [Audit domains and selective disclosure](#audit-domains-and-selective-disclosure-desktop-app)
-- [Standalone audit service](#standalone-audit-service-nosqlbuddy-audit) (advanced / reference)
-- [Deploying the audit service to a server](#deploying-the-audit-service-to-a-server)
-- [Security](#security)
+- [ZK Audit Log](#zk-audit-log) — how the audit system works, roles, and modes
+  - [Dev Mode](#dev-mode-full-stack-locally) · [Production Mode](#production-mode-in-app-your-keys)
+  - [Audit domains and selective disclosure](#audit-domains-and-selective-disclosure-desktop-app)
+- [Standalone audit service](#standalone-audit-service-nosqlbuddy-audit) — CLI, HTTP API, and protocol reference
+- [Deploying the audit service to a server](#deploying-the-audit-service-to-a-server) — separated publisher/attester deployment
+- [Security](#security) — oplog completeness protocol, threat model, and privacy tiers
 - [Testing](#testing)
 
 ## Quickstart
@@ -101,7 +102,7 @@ docker compose run --rm seeder   # re-seed the demo data
 - **Schema and index analysis** — Infer schema shape, cardinality, and index usage from sampled documents.
 - **Explain plan visualization** — Parse `explain` output into a navigable tree to diagnose slow queries.
 - **Driver code generation** — Export queries and pipelines to Node.js, Python, Java, C#, Ruby, Rust, and the MongoDB shell.
-- **ZK audit log** — Tamper-evident Poseidon Merkle tree, Groth16 inclusion proofs, epoch batching with IPFS publishing and Stellar on-chain commitments (testnet or mainnet), multi-publisher K-of-N threshold attestation, and reader-mode verification against on-chain roots. Two modes: **Dev Mode** (full stack locally via Docker) and **Production Mode** (in-app pipeline with your own keys).
+- **ZK audit log** — Tamper-evident Poseidon Merkle tree, Groth16 inclusion proofs, epoch batching with IPFS publishing and Stellar on-chain commitments (testnet or mainnet), multi-publisher K-of-N threshold attestation, and reader-mode verification against on-chain roots. Two modes: **Dev Mode** (full stack locally via Docker, available now) and **Production Mode** (in-app pipeline with your own keys, coming soon).
 - **Audit domains & selective disclosure** — Events are segmented per `(deployment, database)` domain, each with its own secondary Merkle root, so you can prove one tenant's record without revealing any other domain's data. An aggregation **super-root** over all domain roots (anchored in the on-chain commit metadata) lets you prove a domain is part of the committed state, and per-domain **legal hold** and **retention/pruning** manage lifecycle while keeping the anchored history intact and verifiable.
 - **Oplog completeness** — Deterministic SHA-256 Merkle tree over MongoDB's oplog (`local.oplog.rs`), binding the audit log to the same ground truth that MongoDB's replication protocol uses. An independent replica member (run by the auditor/regulator) provides a trust anchor that detects any omitted writes. The on-chain commitment stores both the audit log root and the oplog root, and independent attesters submit ed25519 attestations over the oplog root for durable, post-rollover verification.
 - **Standalone audit service** — `nosqlbuddy-audit` runs independently of the desktop app, capturing MongoDB change stream events, batching into epochs, publishing to IPFS, and committing Merkle roots on-chain via an HTTP API. Signs transactions natively (ed25519 + Soroban RPC) — no `stellar` CLI required. Includes an interactive `setup` wizard for one-command key generation, contract deployment, and attester authorization.
@@ -136,7 +137,7 @@ docker compose run --rm seeder   # re-seed the demo data
 #### Dev Mode Docker stack (optional)
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) with the Compose plugin
-- The 3-node MongoDB replica set running (`docker compose -f docker-compose.audit-db.yml up -d` from the project root). The default `docker compose up -d` starts the single-node dev database instead; the audit features need the 3-node set for the independent attester member.
+- The 3-node MongoDB replica set is started automatically by the in-app **Start Stack** button (which runs `docker-compose.audit-db.yml` + `docker-compose.audit.yml` together). You can also start it manually (`docker compose -f docker-compose.audit-db.yml up -d`) if you want to inspect it before launching the audit services.
 
 ### Installation
 
@@ -183,24 +184,49 @@ Connection profiles are saved with their secrets in your OS keychain; URIs and c
 
 ## ZK Audit Log
 
-NoSQLBuddy can produce a tamper-evident, independently verifiable audit log of every database write: Merkle-tree proofs committed on-chain (Stellar), batches stored on IPFS, and an independent attester that detects omitted writes.
+NoSQLBuddy can produce a tamper-evident, independently verifiable audit log of every database write: every insert, update, and delete is captured into a cryptographic Merkle tree, sealed into batches, and anchored on the Stellar blockchain so no one can alter history undetected.
 
-There are two ways to run it (the Audit tab shows both as cards). Pick based on what you're trying to do:
+### How it works (the short version)
+
+1. **Capture.** Every MongoDB write (insert, update, delete) is recorded into a tamper-evident Poseidon Merkle tree.
+2. **Seal.** Writes are grouped into an "epoch" (batch). Sealing the epoch freezes its Merkle root, a single fingerprint that commits to every event in the batch.
+3. **Anchor.** The Merkle root is committed on-chain (Stellar blockchain) and the full batch is stored on IPFS. This makes the fingerprint public and permanent.
+4. **Prove.** For any individual record, you can generate a zero-knowledge inclusion proof that it is part of a sealed batch, without revealing any other record.
+5. **Verify.** Anyone can independently verify that a record is in the on-chain log, and that no writes were omitted.
+
+### Roles: publisher vs attester
+
+The trust model requires two independent parties. No single party should hold both roles:
+
+| Role | Run by | What it does |
+|---|---|---|
+| **Publisher** (operator) | The company being audited | Captures writes, builds the Merkle tree, seals batches, anchors roots on-chain |
+| **Attester** (auditor/regulator) | An independent third party | Independently verifies the oplog (MongoDB's replication log) and signs an on-chain attestation that no writes were omitted |
+| **Reader** | Either party | Verifies on-chain roots against a local copy of the audit log |
+
+> **Why separate keys?** If the publisher could also submit attestations, they could omit writes and self-attest the doctored log. Separating the keys across organizations makes this impossible. Dev Mode generates both keys on one machine for convenience; production deployments separate them across servers (see [Deploying the audit service to a server](#deploying-the-audit-service-to-a-server)).
+
+### Two ways to run it
+
+The Audit tab offers two modes:
 
 | | Dev Mode | Production Mode |
 |---|---|---|
+| **Status** | Available | Coming soon |
 | **Runs where** | Full stack in Docker on your machine | In-app pipeline — no Docker, no daemons |
 | **Stellar keys** | Two testnet keys you generate (publisher + attester) | Your own keypair |
-| **Contract** | Bundled testnet contract | Auto-deployed per-user contract on testnet (owned by your key), or your own on mainnet |
+| **Contract** | Auto-deployed per-user contract on testnet (owned by your publisher key) | Auto-deployed per-user contract on testnet (owned by your key), or your own on mainnet |
 | **Network** | Testnet | Testnet or mainnet |
 | **MongoDB** | 3-node replica set (`docker-compose.audit-db.yml`) | Your own replica set / cluster |
-| **Best for** | Learning and demoing the full system (publisher + independent attester + reader, K-of-N, oplog completeness) | Auditing your real data with keys and a contract you control |
+| **Best for** | Learning and demoing the full system end to end | Auditing your real data with keys and a contract you control |
 
-**New to this?** Start with **Dev Mode** to watch the whole system work end to end, then move to **Production Mode** with your own keys.
+**New to this?** Start with **Dev Mode** to watch the whole system work end to end. (Production Mode is not yet available in the UI.)
 
 ### Dev Mode (full stack locally)
 
 Runs the **complete audit system** on your machine via Docker — publisher, independent attester, and reader daemons — with K-of-N attestation, oplog completeness verification, and on-chain commitments to Stellar testnet.
+
+> **Dev Mode convenience:** Both the publisher and attester keys are generated on your machine for demonstration purposes. In production, these run on separate servers controlled by separate parties (see [Deploying the audit service to a server](#deploying-the-audit-service-to-a-server)).
 
 **Use this when:** you want to see or demo the entire audit system working end to end, without deploying anything of your own.
 
@@ -218,21 +244,67 @@ Runs the **complete audit system** on your machine via Docker — publisher, ind
 
 3. Click **Start Stack**. This brings up the 3-node MongoDB replica set and the publisher, attester, and reader containers using the `.env.audit` and `attester.key` that setup produced.
 
-4. The live view shows: event feed, epoch progress, on-chain root, K-of-N attestation status, oplog completeness verification, and epoch history — all querying the Docker daemons in real time.
+4. Write data to the audited MongoDB endpoint (`mongodb://127.0.0.1:27020/?directConnection=true`) to populate the audit log. The live view shows:
+   - **Event feed** — real-time stream of captured inserts, updates, and deletes
+   - **Epoch progress** — how many events are in the current batch (fills up to 100 by default)
+   - **On-chain root** — the last Merkle root committed to Stellar
+   - **Multi-party sign-off** (K-of-N) — how many independent attesters have signed the batch
+   - **Oplog completeness** — verifies no writes were omitted by comparing against MongoDB's replication log
+   - **Epoch history** — list of all sealed and committed batches
 
-5. Click **Commit Now** to close the epoch, pin to IPFS, and commit the root on-chain.
+5. Click **Seal Batch** to close the current epoch and freeze its Merkle root.
+
+6. Click **Commit Batch** to pin the batch to IPFS and commit the root on-chain (Stellar testnet).
 
 > **Installed (packaged) app:** everything above works the same in an installed build (dmg/msi/etc.). The **Set up** and **Start Stack** buttons pull the published audit image automatically — no source tree and no local `--build`.
 
 **Manual Docker commands** (alternative to the in-app Start Stack button):
 ```bash
-docker compose -f docker-compose.audit.yml up -d    # start the audit stack (add --build on first run)
-docker compose -f docker-compose.audit.yml ps       # check status
-docker compose -f docker-compose.audit.yml logs -f  # tail logs
-docker compose -f docker-compose.audit.yml down     # stop the stack
+docker compose -f docker-compose.audit-db.yml up -d  # start the 3-node replica set first
+docker compose -f docker-compose.audit.yml up -d      # then the audit stack (add --build on first run)
+docker compose -f docker-compose.audit.yml ps         # check status
+docker compose -f docker-compose.audit.yml logs -f    # tail logs
+docker compose -f docker-compose.audit.yml down       # stop the stack
 ```
 
+#### Clean restart (reset everything and start fresh)
+
+There are two levels of reset. Use the first if you just want to clear audit data and re-run; use the second for a completely clean slate (new keys, new contract, new database).
+
+**Option A: Reset audit data only (keep keys and contract).** This wipes the audit log, Merkle tree, and attester state, but preserves your Stellar keypairs, contract, and on-chain history. The 3-node MongoDB replica set keeps its data too.
+
+In the app, click **Reset Data** (next to **Stop** in the stack status bar). Or from the terminal:
+```bash
+docker compose -f docker-compose.audit.yml down -v     # stop audit stack + wipe daemon volumes
+docker compose -f docker-compose.audit.yml up -d        # restart with the same .env.audit
+```
+
+**Option B: Full clean restart (new keys, new contract, new database).** This tears down everything, including the MongoDB replica set and credentials. After this, re-run setup as if starting from scratch.
+
+```bash
+# 1. Stop and remove everything (audit stack + 3-node replica set + all volumes)
+docker compose -f docker-compose.audit.yml down -v
+docker compose -f docker-compose.audit-db.yml down -v
+
+# 2. Delete credentials so the setup wizard generates fresh ones
+rm -f .env.audit attester.key
+
+# 3. Start the replica set fresh
+docker compose -f docker-compose.audit-db.yml up -d
+
+# 4. Re-run setup (deploys a new contract with new keys)
+docker compose -f docker-compose.audit.yml run --rm setup
+# Non-interactive: docker compose -f docker-compose.audit.yml run --rm -e DEPLOY_CHOICE=deploy setup setup --non-interactive
+
+# 5. Start the audit stack
+docker compose -f docker-compose.audit.yml up -d
+```
+
+> **What survives a full reset?** On-chain Stellar history is permanent and cannot be undone. Previous testnet commits remain visible on Stellar Explorer, but the new setup creates a fresh contract so they are not referenced by the new audit log.
+
 ### Production Mode (in-app, your keys)
+
+> **Not yet available.** Production Mode is implemented but disabled in the UI ("Coming soon"). The following documents the intended workflow for when it ships.
 
 Runs the in-app audit pipeline with **your own Stellar keypair** and contract. Choose testnet or mainnet — this is the "double check" that an audit system you deployed elsewhere works end to end. No daemon, no Docker.
 
@@ -254,9 +326,9 @@ Runs the in-app audit pipeline with **your own Stellar keypair** and contract. C
 
 5. The live view shows: event feed, epoch progress, on-chain root, verify integrity, per-event proofs, and advanced details — committing via your keypair on your chosen network.
 
-6. Click **Commit Now** to commit a sealed batch. On testnet the first commit also provisions your contract (see below); pin to IPFS, commit the root on-chain via native signing, then self-attest the root. The batch shows **Verified 1/1** once attested.
+6. Click **Commit Batch** to commit a sealed batch. On testnet the first commit also provisions your contract (see below); pin to IPFS, commit the root on-chain via native signing, then self-attest the root. The batch shows **Verified 1/1** once attested.
 
-**Switching modes:** Click **Settings** in the audit panel, then toggle between Dev and Production. The panel re-routes immediately.
+**Switching modes:** Production Mode is not yet available in the UI. When it ships, you'll click **Settings** in the audit panel to toggle between Dev and Production.
 
 #### Testnet contract provisioning, persistence, and demo attestation
 
@@ -292,9 +364,11 @@ These features live in the **Audit tab → Change Feed**: domain filter chips, a
 
 ## Standalone audit service (`nosqlbuddy-audit`)
 
-> **Advanced / reference.** Most users don't need this — [Dev Mode](#dev-mode-full-stack-locally) and [Production Mode](#production-mode-in-app-your-keys) above cover the common workflows. This section documents running the audit daemon directly (CLI flags, HTTP API, and the end-to-end protocol).
+> **Advanced / reference.** Most users don't need this — [Dev Mode](#dev-mode-full-stack-locally) above covers the common workflow. This section documents running the audit daemon directly (CLI flags, HTTP API, and the end-to-end protocol).
 
 The audit service runs as a separate process from the desktop app. It captures MongoDB writes via change streams, builds a tamper-evident Poseidon Merkle tree, batches events into epochs, publishes batches to IPFS, and commits Merkle roots to a Soroban contract on Stellar.
+
+> **Role separation.** As described in [Roles: publisher vs attester](#roles-publisher-vs-attester) above, production deployments split the publisher and attester across separate servers. This section documents the standalone binary that each party runs independently.
 
 ### Build
 
@@ -303,7 +377,9 @@ cd src-tauri
 cargo build --bin nosqlbuddy-audit
 ```
 
-### Run via Docker Compose (alternative to building from source)
+### Run via Docker Compose (single-machine demo)
+
+> This runs the publisher, attester, and reader together on one machine. This is fine for demos and Dev Mode, but **not for production** -- see [Deploying the audit service to a server](#deploying-the-audit-service-to-a-server) for the separated deployment model.
 
 If you don't want to install the Rust toolchain, you can run the full audit stack (publisher + attester + reader) via Docker. This uses the same binary, containerized with the Dockerfile at `audit-service/Dockerfile.audit`.
 
@@ -318,7 +394,12 @@ If you don't want to install the Rust toolchain, you can run the full audit stac
    ```bash
    docker compose -f docker-compose.audit.yml run --build --rm setup
    ```
-   Accept the defaults and enter your Pinata API key/secret when prompted. See [Dev Mode](#dev-mode-full-stack-locally) for more detail.
+   Accept the defaults (choose **deploy** when asked about the contract) and enter your Pinata API key/secret when prompted. See [Dev Mode](#dev-mode-full-stack-locally) for more detail.
+
+   > **Non-interactive (CI / scripted):** Pass `DEPLOY_CHOICE=deploy` as an env var so the wizard deploys a fresh contract instead of falling back to the shared bundled one:
+   > ```bash
+   > docker compose -f docker-compose.audit.yml run --rm -e DEPLOY_CHOICE=deploy setup setup --non-interactive
+   > ```
 
 3. Start the full audit stack:
    ```bash
@@ -347,7 +428,17 @@ If you don't want to install the Rust toolchain, you can run the full audit stac
 
 ### Setup wizard (one-time)
 
-The `setup` subcommand is an interactive wizard that generates Stellar keypairs, optionally deploys the contract, initializes it, authorizes the attester, and writes `.env.audit`. Run it in Docker (recommended — no Rust toolchain required) from the project root, so the project directory is mounted and the generated `./attester.key` + `.env.audit` land where the audit stack reads them:
+The `setup` subcommand is a role-aware wizard that generates Stellar keypairs, optionally deploys the contract, and writes `.env.audit`.
+
+> **Dev Mode vs production.** For Dev Mode, run the full wizard once (`--role all`, the default) to generate both keys. For production, the **operator** runs `--role publisher` to generate their publisher key and deploy the contract, then the **auditor** runs `--role attester` independently on their own server. No single party holds both keys.
+
+| Role | Who runs it | What it generates | On which server |
+|---|---|---|---|
+| `--role all` (default) | Developer | Both keys, contract deploy, attester authorization | One machine (Dev Mode) |
+| `--role publisher` | Operator | Publisher key, contract deploy | Company server |
+| `--role attester` | Auditor | Attester Stellar key + ed25519 oplog key | Auditor's server |
+
+**Dev Mode (both keys, one machine):**
 
 ```bash
 docker compose -f docker-compose.audit.yml run --build --rm setup
@@ -362,15 +453,46 @@ cargo run --bin nosqlbuddy-audit -- setup
 ```
 </details>
 
-The wizard walks you through:
+**Production — operator (publisher key + contract deploy):**
+
+```bash
+cargo run --bin nosqlbuddy-audit -- setup --role publisher
+# Writes .env.audit with STELLAR_SECRET_KEY + CONTRACT_ID. No attester key.
+# Prints the contract ID — share it with the auditor.
+```
+
+**Production — auditor (attester keys, independently):**
+
+```bash
+cargo run --bin nosqlbuddy-audit -- setup --role attester
+# Prompts for the contract ID (from the operator).
+# Generates the attester Stellar key + ed25519 oplog key.
+# Prints the attester public address + ed25519 pubkey — send to the operator.
+```
+
+**Attester authorization (operator, after receiving auditor's public keys):**
+
+```bash
+cargo run --bin nosqlbuddy-audit -- authorize-attester \
+  --contract-id <C...> \
+  --secret-key <publisher S...> \
+  --attester-address <auditor G...> \
+  --attester-pubkey <auditor ed25519 hex>
+```
+
+The `--role all` wizard (Dev Mode) walks through:
 1. Choosing a network (testnet or mainnet)
-2. Generating (or importing) publisher + attester Stellar keypairs
-3. Deploying a new contract or using an existing one
-4. Initializing the contract (sets the admin = publisher)
-5. Generating the attester's ed25519 oplog signing key
-6. Authorizing the attester on the contract
-7. Entering Pinata IPFS credentials (optional)
-8. Writing `.env.audit` with all values
+2. Generating (or importing) the publisher Stellar keypair
+3. Generating (or importing) the attester Stellar keypair
+4. Deploying a new contract or using an existing one
+5. Initializing the contract (sets the admin = publisher)
+6. Generating the attester's ed25519 oplog signing key
+7. Authorizing the attester on the contract
+8. Entering Pinata IPFS credentials (optional)
+9. Writing `.env.audit` with all values
+
+The `--role publisher` wizard does steps 1, 2, 4-5, 8-9 (skips attester key + ed25519 key + authorization).
+The `--role attester` wizard does steps 1, 3, 6, 9 (skips publisher key + contract deploy + authorization). It prompts for the contract ID instead.
 
 > **Contract deployment.** The audit Docker image bundles the `stellar` CLI and a prebuilt contract WASM, so the wizard deploys a fresh per-user contract by default (your publisher becomes its admin). Pass an existing `CONTRACT_ID` only if you want to reuse a contract you already control. Running the wizard from a full source checkout works too and additionally lets it build the WASM from source.
 >
@@ -378,7 +500,9 @@ The wizard walks you through:
 
 ### Start the service
 
-**Publisher mode** — captures writes, manages epochs, publishes to IPFS, commits roots on-chain:
+In production, each role runs on a separate server, run by a separate party. Each party only has access to their own secret key.
+
+**Publisher mode** (run by the operator on the company server) — captures writes, manages epochs, publishes to IPFS, commits roots on-chain:
 
 ```bash
 # All commands run from src-tauri/
@@ -411,7 +535,7 @@ cargo run --bin nosqlbuddy-audit -- start \
   --data-dir ~/.local/share/nosqlbuddy-audit
 ```
 
-**Attester mode** — independent attester that connects to the independent replica member, watches for new epoch commitments on-chain, independently computes the oplog hash, and submits attestations to the contract:
+**Attester mode** (run by the auditor on the auditor's server) — independent attester that connects to the independent replica member, watches for new epoch commitments on-chain, independently computes the oplog hash, and submits attestations to the contract:
 
 ```bash
 cd src-tauri
@@ -447,6 +571,7 @@ cargo run --bin nosqlbuddy-audit -- stop --data-dir /path/to/data --port 9174
 | `--data-dir <dir>` | OS data dir | Data directory for audit log + sled |
 | `--port <port>` | `9173` | HTTP API port |
 | `--circuit-dir <dir>` | — | Circuit artifacts dir (for `/proof/:index`) |
+| `--proving-key <path>` | — | Pre-generated proving key (from trusted setup ceremony; speeds up proof generation) |
 | `--ipfs-api <url>` | `http://127.0.0.1:5001` | IPFS Kubo HTTP API URL |
 | `--rpc-url <url>` | Stellar testnet | Soroban RPC URL |
 | `--network <testnet\|mainnet>` | `testnet` | Stellar network (sets passphrase + Horizon URL) |
@@ -460,6 +585,10 @@ cargo run --bin nosqlbuddy-audit -- stop --data-dir /path/to/data --port 9174
 | `--attester-key-file <path>` | `<data-dir>/audit/attester.key` | Attester ed25519 oplog signing key (attest mode; generated if missing) |
 | `--attester-identity <name>` | — | **Deprecated.** Stellar CLI identity for attester transactions. Use `--attester-secret-key` instead |
 | `--attester-address <addr>` | — | Stellar address of the attester (attest mode; derived from keypair if not set) |
+| `--role <all\|publisher\|attester>` | `all` | Setup wizard role (see [Setup wizard](#setup-wizard-one-time)). Also reads `SETUP_ROLE` env var |
+| `--pinata-api-key <key>` | — | Pinata API key for cloud IPFS pinning |
+| `--pinata-api-secret <secret>` | — | Pinata API secret for cloud IPFS pinning |
+| `--pinata-gateway-url <url>` | `https://gateway.pinata.cloud` | Pinata gateway URL |
 | `--help` | — | Show help |
 
 ### HTTP API
@@ -546,33 +675,79 @@ curl -X POST http://localhost:9173/proof/0
 
 ## Deploying the audit service to a server
 
-For production, run the audit daemon from the **published Docker image** — no source checkout and no Rust toolchain required. Release builds publish `ghcr.io/ronnakamoto/nosqlbuddy-audit` (tagged per release) and attach `deploy/docker-compose.audit.yml` + `audit-stack.env.example` as release assets.
+For production, the publisher and attester run on **separate servers, run by separate parties**. The operator (company being audited) runs the publisher; the auditor/regulator runs the attester. Nobody should hold both keys.
 
-MongoDB is yours to operate — this stack does **not** start a database. The publisher connects to your primary; the attester/reader connect to an independent replica member you control.
+Both use the **published Docker image** (`ghcr.io/ronnakamoto/nosqlbuddy-audit`, tagged per release) with `deploy/docker-compose.audit.yml` as the release asset. The Compose file uses Docker profiles (`--profile publisher`, `--profile attester`, `--profile all`) so each party brings up only their own containers.
 
-1. On the server, create a working directory and get the deploy assets (from the release, or the repo's `deploy/` directory):
+> **MongoDB is yours to operate.** This stack does not start a database. The publisher connects to the primary; the attester/reader connect to an independent replica member the auditor controls.
+
+### Operator setup (publisher)
+
+1. On the company server, create a working directory and get the deploy assets:
    ```bash
    sudo mkdir -p /opt/nosqlbuddy-audit && cd /opt/nosqlbuddy-audit
-   # place docker-compose.audit.yml + audit-stack.env.example here, then:
-   cp audit-stack.env.example .env.audit
+   # place docker-compose.audit.yml + audit-stack.env.publisher.example here
+   cp audit-stack.env.publisher.example .env.audit
    ```
 
-2. Generate keys and authorize the attester (writes `./attester.key` and fills in `.env.audit`). This runs the setup wizard from the published image:
+2. Run the role-aware setup wizard to generate the publisher keypair, deploy the contract, and write `.env.audit`:
    ```bash
-   docker compose --env-file .env.audit run --rm setup
+   docker compose --env-file .env.audit run --rm setup -- --role publisher
    ```
+   This writes `STELLAR_SECRET_KEY` and `CONTRACT_ID` into `.env.audit`. The wizard prints the contract ID -- share it with the auditor.
 
-3. Edit `.env.audit`: set `PUBLISHER_MONGO_URI` / `ATTESTER_MONGO_URI` to your replica set, pin `AUDIT_IMAGE_TAG` to a release, and fill in IPFS/Pinata credentials. (If MongoDB runs on the same host, use `host.docker.internal` in the URIs.)
+3. Edit `.env.audit`: set `PUBLISHER_MONGO_URI` to your replica set and pin `AUDIT_IMAGE_TAG` to a release.
 
-4. Start and manage the stack:
+4. Start the publisher and reader:
    ```bash
-   docker compose --env-file .env.audit up -d
-   docker compose --env-file .env.audit ps
-   docker compose --env-file .env.audit logs -f
-   docker compose --env-file .env.audit down
+   docker compose --env-file .env.audit --profile publisher up -d
    ```
 
-> **Run every command with `--env-file .env.audit`** so the `${VAR}` placeholders resolve. Daemon state persists in named volumes (`audit-publisher-data`, `audit-attester-data`, `audit-reader-data`); secrets are injected via `environment:` and are never baked into the image.
+5. After the auditor sends their public keys (from their setup), authorize the attester on-chain:
+   ```bash
+   docker compose --env-file .env.audit run --rm setup -- authorize-attester \
+     --contract-id <C...> \
+     --secret-key <publisher S...> \
+     --attester-address <auditor G...> \
+     --attester-pubkey <auditor ed25519 hex> \
+     --network testnet
+   ```
+
+### Auditor setup (attester)
+
+1. On the auditor's server, create a working directory with the same deploy assets:
+   ```bash
+   sudo mkdir -p /opt/nosqlbuddy-audit && cd /opt/nosqlbuddy-audit
+   # place docker-compose.audit.yml + audit-stack.env.attester.example here
+   cp audit-stack.env.attester.example .env.audit
+   ```
+
+2. Run the role-aware setup wizard to generate the attester keys independently:
+   ```bash
+   docker compose --env-file .env.audit run --rm setup -- --role attester
+   ```
+   Enter the contract ID provided by the operator. This writes `ATTESTER_SECRET_KEY` into `.env.audit` and generates `./attester.key` (ed25519 oplog key).
+
+3. The wizard prints the attester public address and ed25519 pubkey. Send these to the operator for on-chain authorization.
+
+4. Once authorized, edit `.env.audit`: set `ATTESTER_MONGO_URI` to the independent replica member.
+
+5. Start the attester and reader:
+   ```bash
+   docker compose --env-file .env.audit --profile attester up -d
+   ```
+
+### Managing the stack
+
+Each party manages their own containers independently:
+
+```bash
+docker compose --env-file .env.audit --profile publisher ps   # or --profile attester
+docker compose --env-file .env.audit --profile publisher logs -f
+docker compose --env-file .env.audit --profile publisher down
+```
+
+> **Run every command with `--env-file .env.audit`** and the appropriate `--profile` flag. The `publisher` profile starts publisher + reader; `attester` starts attester + reader; `all` starts everything (Dev Mode only). Daemon state persists in named volumes; secrets are injected via `environment:` and are never baked into the image.
 
 ## Testing
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import commands, { type DocumentPage, type ExplainResult } from "../ipc/commands";
+import commands, { formatError, type DocumentPage, type ExplainResult } from "../ipc/commands";
 import { ResultsTable } from "../components/ResultsTable";
 import { ExplainTree } from "../components/ExplainTree";
 import { InfoPopover } from "../components/InfoPopover";
@@ -78,11 +78,7 @@ function parseStageBody(body: string): { value: unknown; error: string | null } 
 }
 
 function describeError(e: unknown): string {
-  if (typeof e === "string") return e;
-  if (e && typeof e === "object" && "message" in e) {
-    return String((e as { message: unknown }).message);
-  }
-  return "Unexpected error";
+  return formatError(e);
 }
 
 function inferStageOperator(stageValue: unknown): string | null {
@@ -496,8 +492,11 @@ export function AggregationEditor({
           role="dialog"
           aria-modal="true"
           aria-label="Driver code"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setShowCodeModal(false);
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) {
+              e.preventDefault();
+              setShowCodeModal(false);
+            }
           }}
         >
           <div className="modal modal--code" style={{ width: "min(760px, 92vw)" }}>
@@ -543,8 +542,11 @@ export function AggregationEditor({
           role="dialog"
           aria-modal="true"
           aria-label="Explain plan"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setShowExplainModal(false);
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) {
+              e.preventDefault();
+              setShowExplainModal(false);
+            }
           }}
         >
           <div className="modal modal--explain" style={{ width: "min(760px, 92vw)" }}>

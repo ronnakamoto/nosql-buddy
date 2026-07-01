@@ -1,13 +1,17 @@
 //! nosqlbuddy-audit — standalone ZK audit service for NoSQLBuddy.
 //!
 //! One binary, subcommands:
-//!   setup   Interactive wizard: generate keys, deploy contract, authorize attester
-//!   start   Start the audit service (publisher / reader / attester mode)
-//!   stop    Stop a running service
-//!   status  Check if the service is running
+//!   setup              Interactive wizard: generate keys, deploy contract, authorize attester
+//!   authorize-attester On-chain attester authorization (operator only, after auditor sends keys)
+//!   start              Start the audit service (publisher / reader / attester mode)
+//!   stop               Stop a running service
+//!   status             Check if the service is running
 //!
 //! Usage:
-//!   nosqlbuddy-audit setup
+//!   nosqlbuddy-audit setup --role all           # Dev Mode: generate everything on one machine
+//!   nosqlbuddy-audit setup --role publisher      # Operator: generate publisher key + deploy contract
+//!   nosqlbuddy-audit setup --role attester       # Auditor: generate attester keys independently
+//!   nosqlbuddy-audit authorize-attester          # Operator: authorize the auditor's attester on-chain
 //!   nosqlbuddy-audit start --mode publish --mongo-uri mongodb://localhost:27017
 //!   nosqlbuddy-audit start --mode attest --mongo-uri mongodb://localhost:27019
 //!   nosqlbuddy-audit start --mode read
@@ -50,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match subcommand.as_str() {
         "setup" => cmd_setup(&rest).await,
+        "authorize-attester" => cmd_authorize_attester(&rest).await,
         "start" => cmd_start(&rest).await,
         "stop" => cmd_stop(&rest),
         "status" => cmd_status(&rest).await,
@@ -68,6 +73,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 // ─── Subcommand: setup ────────────────────────────────────────────────
 
+/// Which keys to generate during setup.
+enum SetupRole {
+    /// Dev Mode: generate both keys, deploy contract, authorize attester.
+    All,
+    /// Operator: generate publisher key, deploy contract. No attester key.
+    Publisher,
+    /// Auditor: generate attester keys. No publisher key, no contract deploy.
+    Attester,
+}
+
+impl SetupRole {
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.to_ascii_lowercase().as_str() {
+            "all" | "" => Ok(Self::All),
+            "publisher" => Ok(Self::Publisher),
+            "attester" => Ok(Self::Attester),
+            other => Err(format!(
+                "invalid role '{other}'. Expected: all, publisher, or attester"
+            )),
+        }
+    }
+}
+
+/// Parse `--role <role>` from args, falling back to the `SETUP_ROLE` env var.
+fn parse_role(args: &[String], non_interactive: bool) -> SetupRole {
+    for (i, a) in args.iter().enumerate() {
+        if a == "--role" {
+            if let Some(val) = args.get(i + 1) {
+                return SetupRole::from_str(val).unwrap_or(SetupRole::All);
+            }
+        } else if let Some(val) = a.strip_prefix("--role=") {
+            return SetupRole::from_str(val).unwrap_or(SetupRole::All);
+        }
+    }
+    if non_interactive {
+        if let Ok(val) = std::env::var("SETUP_ROLE") {
+            return SetupRole::from_str(&val).unwrap_or(SetupRole::All);
+        }
+    }
+    SetupRole::All
+}
+
 /// Interactive setup wizard.
 ///
 /// Generates Stellar keypairs, optionally deploys the contract, initializes
@@ -75,16 +122,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use audit_service::audit::stellar_native;
 
-    println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║  nosqlbuddy-audit setup                                      ║");
-    println!("║  Interactive wizard — get the full audit stack running       ║");
-    println!("╚══════════════════════════════════════════════════════════════╝");
-    println!();
-
     // Non-interactive mode (used by the desktop app's "Set up" button): take
     // sensible defaults and read any operator-provided values from the
     // environment instead of prompting on stdin.
     let non_interactive = args.iter().any(|a| a == "--non-interactive" || a == "-y");
+    let role = parse_role(args, non_interactive);
+
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    match role {
+        SetupRole::All => {
+            println!("║  nosqlbuddy-audit setup — role: all (Dev Mode)               ║");
+            println!("║  Generates both keys on this machine                         ║");
+        }
+        SetupRole::Publisher => {
+            println!("║  nosqlbuddy-audit setup — role: publisher (operator)         ║");
+            println!("║  Generates publisher key + deploys contract                 ║");
+        }
+        SetupRole::Attester => {
+            println!("║  nosqlbuddy-audit setup — role: attester (auditor)           ║");
+            println!("║  Generates attester keys independently                       ║");
+        }
+    }
+    println!("╚══════════════════════════════════════════════════════════════╝");
+    println!();
+
     let ask = |question: &str, default: &str| -> String {
         if non_interactive {
             default.to_string()
@@ -97,7 +158,7 @@ async fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         println!();
     }
 
-    // 1. Choose network.
+    // ── 1. Network ──────────────────────────────────────────────────
     let network = ask(
         "Stellar network [testnet/mainnet] (default: testnet)",
         &env_default(non_interactive, "STELLAR_NETWORK", "testnet"),
@@ -120,90 +181,133 @@ async fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         )
     };
 
-    // 2. Publisher keypair.
-    println!();
-    println!("── Publisher key (controlled by the operator) ──");
-    let publisher_secret = ask(
-        "Paste publisher Stellar secret key (S...), or press Enter to generate one",
-        &env_default(non_interactive, "STELLAR_SECRET_KEY", ""),
-    );
-    let publisher_kp = if publisher_secret.is_empty() {
-        let kp = stellar_native::generate_keypair();
-        println!("  Generated publisher keypair:");
-        println!("    Account: {}", kp.account_id());
-        println!("    Secret:  {}", kp.secret_key_str());
-        println!("    ⚠ Save this secret key — it won't be shown again.");
-        kp
-    } else {
-        audit_service::auditd::load_keypair_from_secret_key(&publisher_secret)
-            .map_err(|e| format!("invalid publisher secret key: {e}"))?
+    // ── 2. Publisher keypair (all / publisher roles) ────────────────
+    let (publisher_kp, publisher_secret) = match role {
+        SetupRole::Attester => (None, String::new()),
+        _ => {
+            println!();
+            println!("── Publisher key (controlled by the operator) ──");
+            let publisher_secret_input = ask(
+                "Paste publisher Stellar secret key (S...), or press Enter to generate one",
+                &env_default(non_interactive, "STELLAR_SECRET_KEY", ""),
+            );
+            let kp = if publisher_secret_input.is_empty() {
+                let kp = stellar_native::generate_keypair();
+                println!("  Generated publisher keypair:");
+                println!("    Account: {}", kp.account_id());
+                println!("    Secret:  {}", kp.secret_key_str());
+                println!("    ⚠ Save this secret key — it won't be shown again.");
+                kp
+            } else {
+                audit_service::auditd::load_keypair_from_secret_key(&publisher_secret_input)
+                    .map_err(|e| format!("invalid publisher secret key: {e}"))?
+            };
+            let secret = kp.secret_key_str();
+            (Some(kp), secret)
+        }
     };
 
-    // 3. Attester keypair.
-    println!();
-    println!("── Attester key (controlled by the auditor/regulator) ──");
-    println!("  This is a SEPARATE key from the publisher. The trust model requires");
-    println!("  the attester to be independent from the operator.");
-    let attester_secret = ask(
-        "Paste attester Stellar secret key (S...), or press Enter to generate one",
-        &env_default(non_interactive, "ATTESTER_SECRET_KEY", ""),
-    );
-    let attester_kp = if attester_secret.is_empty() {
-        let kp = stellar_native::generate_keypair();
-        println!("  Generated attester keypair:");
-        println!("    Account: {}", kp.account_id());
-        println!("    Secret:  {}", kp.secret_key_str());
-        println!("    ⚠ Save this secret key — it won't be shown again.");
-        kp
-    } else {
-        audit_service::auditd::load_keypair_from_secret_key(&attester_secret)
-            .map_err(|e| format!("invalid attester secret key: {e}"))?
+    // ── 3. Attester Stellar keypair (all / attester roles) ─────────
+    let (attester_kp, attester_secret) = match role {
+        SetupRole::Publisher => (None, String::new()),
+        _ => {
+            println!();
+            println!("── Attester key (controlled by the auditor/regulator) ──");
+            if matches!(role, SetupRole::All) {
+                println!("  This is a SEPARATE key from the publisher. The trust model requires");
+                println!("  the attester to be independent from the operator.");
+            } else {
+                println!("  You are setting up the attester. This key should NOT be on the");
+                println!("  operator's machine — run this on the auditor's server.");
+            }
+            let attester_secret_input = ask(
+                "Paste attester Stellar secret key (S...), or press Enter to generate one",
+                &env_default(non_interactive, "ATTESTER_SECRET_KEY", ""),
+            );
+            let kp = if attester_secret_input.is_empty() {
+                let kp = stellar_native::generate_keypair();
+                println!("  Generated attester keypair:");
+                println!("    Account: {}", kp.account_id());
+                println!("    Secret:  {}", kp.secret_key_str());
+                println!("    ⚠ Save this secret key — it won't be shown again.");
+                kp
+            } else {
+                audit_service::auditd::load_keypair_from_secret_key(&attester_secret_input)
+                    .map_err(|e| format!("invalid attester secret key: {e}"))?
+            };
+            let secret = kp.secret_key_str();
+            (Some(kp), secret)
+        }
     };
 
-    // 4. Contract: deploy new or use existing?
-    println!();
-    println!("── Soroban contract ──");
-    let deploy_choice = ask(
-        if is_mainnet {
-            "Deploy a new contract or use existing? [deploy/existing] (default: existing)"
-        } else {
-            "Deploy a new contract or use the bundled testnet contract? [deploy/existing] (default: existing)"
-        },
-        &env_default(non_interactive, "DEPLOY_CHOICE", "existing"),
-    );
+    // ── 4. Contract: deploy new or use existing? (all / publisher) ─
+    let deploy_choice = match role {
+        SetupRole::Attester => {
+            // Attester never deploys; they use an existing contract ID.
+            "existing".to_string()
+        }
+        _ => {
+            println!();
+            println!("── Soroban contract ──");
+            ask(
+                if is_mainnet {
+                    "Deploy a new contract or use existing? [deploy/existing] (default: existing)"
+                } else {
+                    "Deploy a new contract or use the bundled testnet contract? [deploy/existing] (default: existing)"
+                },
+                &env_default(non_interactive, "DEPLOY_CHOICE", "existing"),
+            )
+        }
+    };
 
-    // 5. Fund accounts on testnet via Friendbot (auto-fund for testnet only).
-    // This must happen BEFORE contract deployment, since deployment requires
-    // the publisher account to exist and have XLM for fees.
+    // ── 5. Fund accounts on testnet ────────────────────────────────
     if !is_mainnet {
         println!();
         println!("── Funding accounts on testnet (Friendbot) ──");
-        fund_and_wait_for_testnet_account("publisher", &publisher_kp.account_id(), &horizon_url)
-            .await?;
-        fund_and_wait_for_testnet_account("attester", &attester_kp.account_id(), &horizon_url)
-            .await?;
-        // Give Soroban RPC/account sequence caches a short settling window
-        // after Horizon confirms both funded accounts exist.
+        if let Some(ref pk) = publisher_kp {
+            fund_and_wait_for_testnet_account("publisher", &pk.account_id(), &horizon_url)
+                .await?;
+        }
+        if let Some(ref ak) = attester_kp {
+            fund_and_wait_for_testnet_account("attester", &ak.account_id(), &horizon_url)
+                .await?;
+        }
         println!("  Funding confirmed; waiting 3s for RPC propagation...");
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
 
-    // 6. Deploy or select the contract.
+    // ── 6. Deploy or select the contract ───────────────────────────
     let contract_id = if deploy_choice == "deploy" {
         // Deploy via stellar CLI (one-time operation).
+        let publisher = publisher_kp.as_ref().ok_or_else(|| {
+            "contract deployment requires the publisher keypair. \
+             Run setup --role all or --role publisher"
+                .to_string()
+        })?;
         println!();
         println!("  Deploying contract via stellar CLI...");
-        println!("  (This requires the stellar CLI installed: https://docs.stellar.org/tools/developer-tools/cli/install)");
         eprintln!("  Building WASM...");
         let wasm_path = build_contract_wasm()?;
         eprintln!("  Deploying to {network}...");
-        let cid = deploy_contract(&wasm_path, &network, &publisher_kp.secret_key_str())?;
+        let cid = deploy_contract(&wasm_path, &network, &publisher.secret_key_str())?;
         println!("  Contract deployed: {cid}");
-        // Give the freshly created contract instance time to propagate to the
-        // RPC node before we invoke `initialize` on it — otherwise the
-        // simulation can fail because the contract isn't visible yet.
         println!("  Waiting 12s for the contract to be visible on RPC...");
         tokio::time::sleep(std::time::Duration::from_secs(12)).await;
+        cid
+    } else if matches!(role, SetupRole::Attester) {
+        // Attester must provide the contract ID (deployed by the operator).
+        let cid = ask(
+            "Enter the contract ID deployed by the operator (C...)",
+            &env_default(non_interactive, "CONTRACT_ID", ""),
+        );
+        if cid.is_empty() {
+            return Err(
+                "contract ID is required for attester setup. \
+                 Ask the operator for the contract ID they deployed."
+                    .into(),
+            );
+        }
+        println!("  Using contract: {cid}");
         cid
     } else if is_mainnet {
         ask(
@@ -219,83 +323,96 @@ async fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Err("contract ID is required".into());
     }
 
-    // 7. Initialize the contract (if deploying new).
+    // ── 7. Initialize the contract (if deploying new) ──────────────
     if deploy_choice == "deploy" {
+        let publisher = publisher_kp.as_ref().unwrap();
         println!();
         println!("  Initializing contract (set admin = publisher)...");
-        initialize_contract(&contract_id, &publisher_kp, &rpc_url, &passphrase).await?;
+        initialize_contract(&contract_id, publisher, &rpc_url, &passphrase).await?;
         println!(
             "  Contract initialized. Admin: {}",
-            publisher_kp.account_id()
+            publisher.account_id()
         );
     }
 
-    // 8. Generate attester ed25519 oplog signing key.
-    println!();
-    println!("── Attester ed25519 oplog signing key ──");
-    println!("  This is a separate key from the Stellar key. It signs the oplog hash.");
-    let attester_key_file = ask(
-        "Path to save the attester ed25519 key (default: ./attester.key)",
-        &env_default(non_interactive, "ATTESTER_KEY_FILE", "./attester.key"),
-    );
-    let attester_key_path = PathBuf::from(&attester_key_file);
-    let ed25519_key =
-        audit_service::auditd::attester::load_or_generate_attester_key(&attester_key_path)
-            .map_err(|e| format!("failed to generate attester key: {e}"))?;
-    let abs_attester_key_path = absolute_path(&attester_key_path);
-    let ed25519_pubkey_hex = hex::encode(ed25519_key.verifying_key().to_bytes());
-    println!("  Attester ed25519 public key: {ed25519_pubkey_hex}");
-    println!(
-        "  Attester ed25519 key written to: {}",
-        abs_attester_key_path.display()
-    );
+    // ── 8. Attester ed25519 oplog signing key (all / attester) ─────
+    let (ed25519_pubkey_hex, abs_attester_key_path) = match role {
+        SetupRole::Publisher => (String::new(), PathBuf::new()),
+        _ => {
+            println!();
+            println!("── Attester ed25519 oplog signing key ──");
+            println!("  This is a separate key from the Stellar key. It signs the oplog hash.");
+            let attester_key_file = ask(
+                "Path to save the attester ed25519 key (default: ./attester.key)",
+                &env_default(non_interactive, "ATTESTER_KEY_FILE", "./attester.key"),
+            );
+            let attester_key_path = PathBuf::from(&attester_key_file);
+            let ed25519_key =
+                audit_service::auditd::attester::load_or_generate_attester_key(&attester_key_path)
+                    .map_err(|e| format!("failed to generate attester key: {e}"))?;
+            let abs = absolute_path(&attester_key_path);
+            let pubkey_hex = hex::encode(ed25519_key.verifying_key().to_bytes());
+            println!("  Attester ed25519 public key: {pubkey_hex}");
+            println!("  Attester ed25519 key written to: {}", abs.display());
+            (pubkey_hex, abs)
+        }
+    };
 
-    // Wait for the initialize transaction to be processed by the network.
-    if deploy_choice == "deploy" {
+    // ── 9. Authorize the attester on the contract (all role only) ──
+    // For separate roles, authorization is done later via `authorize-attester`.
+    if matches!(role, SetupRole::All) {
+        let publisher = publisher_kp.as_ref().unwrap();
+        let attester = attester_kp.as_ref().unwrap();
+        if deploy_choice == "deploy" {
+            println!();
+            println!("  Waiting 10s for initialize transaction to be confirmed...");
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        }
         println!();
-        println!("  Waiting 10s for initialize transaction to be confirmed...");
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        println!("  Authorizing attester on the contract...");
+        authorize_attester(
+            &contract_id,
+            publisher,
+            &attester.account_id(),
+            &ed25519_pubkey_hex,
+            &rpc_url,
+            &passphrase,
+        )
+        .await?;
+        println!(
+            "  Attester authorized: {} (pubkey: {})",
+            attester.account_id(),
+            &ed25519_pubkey_hex[..16]
+        );
     }
 
-    // 9. Authorize the attester on the contract.
-    println!();
-    println!("  Authorizing attester on the contract...");
-    authorize_attester(
-        &contract_id,
-        &publisher_kp,
-        &attester_kp.account_id(),
-        &ed25519_pubkey_hex,
-        &rpc_url,
-        &passphrase,
-    )
-    .await?;
-    println!(
-        "  Attester authorized: {} (pubkey: {})",
-        attester_kp.account_id(),
-        &ed25519_pubkey_hex[..16]
-    );
+    // ── 10. Pinata credentials (publisher / all) ───────────────────
+    let (pinata_api_key, pinata_api_secret, pinata_gateway) = match role {
+        SetupRole::Attester => (String::new(), String::new(), "https://gateway.pinata.cloud".to_string()),
+        _ => {
+            println!();
+            println!("── Pinata IPFS credentials (optional) ──");
+            let key = ask(
+                "Pinata API key (press Enter to skip)",
+                &env_default(non_interactive, "PINATA_API_KEY", ""),
+            );
+            let secret = ask(
+                "Pinata API secret (press Enter to skip)",
+                &env_default(non_interactive, "PINATA_API_SECRET", ""),
+            );
+            let gateway = ask(
+                "Pinata gateway URL (default: https://gateway.pinata.cloud)",
+                &env_default(
+                    non_interactive,
+                    "PINATA_GATEWAY_URL",
+                    "https://gateway.pinata.cloud",
+                ),
+            );
+            (key, secret, gateway)
+        }
+    };
 
-    // 10. Pinata credentials (optional).
-    println!();
-    println!("── Pinata IPFS credentials (optional) ──");
-    let pinata_api_key = ask(
-        "Pinata API key (press Enter to skip)",
-        &env_default(non_interactive, "PINATA_API_KEY", ""),
-    );
-    let pinata_api_secret = ask(
-        "Pinata API secret (press Enter to skip)",
-        &env_default(non_interactive, "PINATA_API_SECRET", ""),
-    );
-    let pinata_gateway = ask(
-        "Pinata gateway URL (default: https://gateway.pinata.cloud)",
-        &env_default(
-            non_interactive,
-            "PINATA_GATEWAY_URL",
-            "https://gateway.pinata.cloud",
-        ),
-    );
-
-    // 11. Write .env.audit.
+    // ── 11. Write .env.audit ───────────────────────────────────────
     println!();
     let env_path = ask(
         "Write .env.audit to (default: .env.audit)",
@@ -304,8 +421,8 @@ async fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     write_env_file(
         &env_path,
         &contract_id,
-        &publisher_kp.secret_key_str(),
-        &attester_kp.secret_key_str(),
+        &publisher_secret,
+        &attester_secret,
         &pinata_api_key,
         &pinata_api_secret,
         &pinata_gateway,
@@ -313,48 +430,155 @@ async fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let abs_env_path = absolute_path(&PathBuf::from(&env_path));
     println!("  Wrote {}", abs_env_path.display());
 
-    // 12. Summary.
+    // ── 12. Summary + next steps ───────────────────────────────────
     println!();
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║  Setup complete!                                             ║");
     println!("╠══════════════════════════════════════════════════════════════╣");
     println!("║  Network:      {network:<47}║");
     println!("║  Contract:     {contract_id:<47}║");
-    println!("║  Publisher:    {pub:<47}║", pub = publisher_kp.account_id());
-    println!(
-        "║  Attester:     {att:<47}║",
-        att = attester_kp.account_id()
-    );
-    println!(
-        "║  Ed25519 key:  {abs_attester:<47}║",
-        abs_attester = abs_attester_key_path.display()
-    );
-    println!(
-        "║  Env file:     {abs_env:<47}║",
-        abs_env = abs_env_path.display()
-    );
+    if let Some(ref pk) = publisher_kp {
+        println!("║  Publisher:    {pub:<47}║", pub = pk.account_id());
+    }
+    if let Some(ref ak) = attester_kp {
+        println!("║  Attester:     {att:<47}║", att = ak.account_id());
+    }
+    if !ed25519_pubkey_hex.is_empty() {
+        println!("║  Ed25519 key:  {abs_attester:<47}║", abs_attester = abs_attester_key_path.display());
+    }
+    println!("║  Env file:     {abs_env:<47}║", abs_env = abs_env_path.display());
     println!("╚══════════════════════════════════════════════════════════════╝");
     println!();
-    println!("Next steps:");
-    if is_mainnet {
-        println!(
-            "  1. Fund the publisher and attester accounts on mainnet (XLM required for tx fees)"
-        );
-        println!("     Publisher: {}", publisher_kp.account_id());
-        println!("     Attester:  {}", attester_kp.account_id());
-    } else {
-        println!("  1. Accounts funded on testnet via Friendbot (10,000 XLM each)");
+
+    // Role-specific next steps
+    match role {
+        SetupRole::All => {
+            println!("Next steps:");
+            if is_mainnet {
+                println!("  1. Fund the publisher and attester accounts on mainnet (XLM required for tx fees)");
+            } else {
+                println!("  1. Accounts funded on testnet via Friendbot (10,000 XLM each)");
+            }
+            println!("  2. Start the audit stack:");
+            println!("     docker compose -f docker-compose.audit.yml up -d");
+        }
+        SetupRole::Publisher => {
+            println!("Next steps for the operator:");
+            println!("  1. Share this contract ID with your auditor: {contract_id}");
+            println!("  2. The auditor runs: nosqlbuddy-audit setup --role attester");
+            println!("  3. After the auditor sends their public address + ed25519 pubkey,");
+            println!("     authorize them on-chain:");
+            println!("     nosqlbuddy-audit authorize-attester \\");
+            println!("       --contract-id {contract_id} \\");
+            println!("       --secret-key <publisher S...> \\");
+            println!("       --attester-address <auditor G...> \\");
+            println!("       --attester-pubkey <auditor ed25519 hex>");
+            println!("  4. Start the publisher:");
+            println!("     docker compose --profile publisher up -d");
+        }
+        SetupRole::Attester => {
+            let attester_addr = attester_kp.as_ref().map(|k| k.account_id()).unwrap_or_default();
+            println!("Send these to the operator for on-chain authorization:");
+            println!("  Attester Stellar address: {attester_addr}");
+            println!("  Attester ed25519 pubkey:  {ed25519_pubkey_hex}");
+            println!();
+            println!("The operator will run:");
+            println!("  nosqlbuddy-audit authorize-attester \\");
+            println!("    --contract-id {contract_id} \\");
+            println!("    --secret-key <publisher S...> \\");
+            println!("    --attester-address {attester_addr} \\");
+            println!("    --attester-pubkey {ed25519_pubkey_hex}");
+            println!();
+            println!("Once authorized, start the attester:");
+            println!("  docker compose --profile attester up -d");
+        }
     }
-    println!("  2. Start the audit stack:");
-    println!("     docker compose -f docker-compose.audit.yml up -d");
-    println!("  3. Or start individual services:");
-    println!("     nosqlbuddy-audit start --mode publish --mongo-uri mongodb://localhost:27017");
-    println!("     nosqlbuddy-audit start --mode attest --mongo-uri mongodb://localhost:27019");
 
     Ok(())
 }
 
-/// Resolve a (possibly relative) path to an absolute, normalized path for
+// ─── Subcommand: authorize-attester ───────────────────────────────────
+
+/// On-chain attester authorization (operator only).
+///
+/// Run by the operator (publisher/admin) after the auditor sends their
+/// public Stellar address and ed25519 oplog public key.
+async fn cmd_authorize_attester(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut contract_id = String::new();
+    let mut secret_key = String::new();
+    let mut attester_address = String::new();
+    let mut attester_pubkey = String::new();
+    let mut rpc_url = "https://soroban-testnet.stellar.org:443".to_string();
+    let mut passphrase = audit_service::audit::stellar_native::TESTNET_PASSPHRASE.to_string();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--contract-id" => { i += 1; contract_id = args.get(i).cloned().unwrap_or_default(); }
+            "--secret-key" => { i += 1; secret_key = args.get(i).cloned().unwrap_or_default(); }
+            "--attester-address" => { i += 1; attester_address = args.get(i).cloned().unwrap_or_default(); }
+            "--attester-pubkey" => { i += 1; attester_pubkey = args.get(i).cloned().unwrap_or_default(); }
+            "--rpc-url" => { i += 1; rpc_url = args.get(i).cloned().unwrap_or_default(); }
+            "--network" => {
+                i += 1;
+                let network = args.get(i).map(|s| s.as_str()).unwrap_or("testnet");
+                if network == "mainnet" {
+                    rpc_url = "https://soroban.stellar.org:443".to_string();
+                    passphrase = audit_service::audit::stellar_native::MAINNET_PASSPHRASE.to_string();
+                }
+            }
+            "--help" | "-h" => {
+                eprintln!(
+                    "nosqlbuddy-audit authorize-attester — authorize the attester on-chain\n\
+                    \n\
+                    Usage:\n\
+                      nosqlbuddy-audit authorize-attester \\\n\
+                        --contract-id <C...> \\\n\
+                        --secret-key <publisher S...> \\\n\
+                        --attester-address <auditor G...> \\\n\
+                        --attester-pubkey <ed25519 hex> \\\n\
+                        [--network testnet|mainnet] [--rpc-url <url>]\n\
+                    \n\
+                    Run by the operator after the auditor sends their public keys."
+                );
+                return Ok(());
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    if contract_id.is_empty() || secret_key.is_empty() || attester_address.is_empty() || attester_pubkey.is_empty() {
+        return Err(
+            "missing required arguments. \
+             Need: --contract-id, --secret-key, --attester-address, --attester-pubkey"
+                .into(),
+        );
+    }
+
+    let publisher_kp = audit_service::auditd::load_keypair_from_secret_key(&secret_key)
+        .map_err(|e| format!("invalid publisher secret key: {e}"))?;
+
+    println!("Authorizing attester on contract {contract_id}...");
+    println!("  Attester address: {attester_address}");
+    println!("  Attester pubkey:  {attester_pubkey}");
+
+    authorize_attester(
+        &contract_id,
+        &publisher_kp,
+        &attester_address,
+        &attester_pubkey,
+        &rpc_url,
+        &passphrase,
+    )
+    .await?;
+
+    println!("Attester authorized successfully.");
+
+    Ok(())
+}
+
+// ─── Helpers used by setup ────────────────────────────────────────────
 /// display, so users see exactly where files were written. Falls back to a
 /// best-effort `current_dir`-joined path if the file can't be canonicalized.
 fn absolute_path(path: &PathBuf) -> PathBuf {
@@ -1442,15 +1666,21 @@ fn print_help() {
           nosqlbuddy-audit <subcommand> [options]\n\
         \n\
         Subcommands:\n\
-          setup    Interactive wizard: generate keys, deploy contract, authorize attester\n\
-          start    Start the audit service (publisher / reader / attester mode)\n\
-          stop     Stop a running service\n\
-          status   Check if the service is running\n\
+          setup              Generate keys, deploy contract, authorize attester\n\
+                             --role all (Dev Mode, default), publisher, or attester\n\
+          authorize-attester On-chain attester authorization (operator only)\n\
+          start              Start the audit service (publisher / reader / attester mode)\n\
+          stop               Stop a running service\n\
+          status             Check if the service is running\n\
         \n\
         Run 'nosqlbuddy-audit <subcommand> --help' for subcommand-specific options.\n\
         \n\
         Examples:\n\
-          nosqlbuddy-audit setup\n\
+          nosqlbuddy-audit setup --role all\n\
+          nosqlbuddy-audit setup --role publisher\n\
+          nosqlbuddy-audit setup --role attester\n\
+          nosqlbuddy-audit authorize-attester --contract-id C... --secret-key S... \\\n\
+            --attester-address G... --attester-pubkey <hex>\n\
           nosqlbuddy-audit start --mode publish --mongo-uri mongodb://localhost:27017\n\
           nosqlbuddy-audit start --mode attest --mongo-uri mongodb://localhost:27019\n\
           nosqlbuddy-audit start --mode read\n\

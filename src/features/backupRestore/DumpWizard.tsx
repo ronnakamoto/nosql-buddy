@@ -129,8 +129,8 @@ export function DumpWizard({ connectionId, database: initialDatabase = "", colle
   const isReady = database && !loadingColl && collections.length > 0;
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" style={{ width: 560 }} onClick={(e) => e.stopPropagation()}>
+    <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) { e.preventDefault(); onClose(); } }}>
+      <div className="modal" style={{ width: 560 }} onMouseDown={(e) => e.stopPropagation()}>
         <div className="modal__header">
           <h3 className="modal__title">Dump database</h3>
           <button className="modal__close" onClick={onClose} aria-label="Close">

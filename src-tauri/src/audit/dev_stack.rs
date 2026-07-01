@@ -659,6 +659,10 @@ pub struct DevSetupParams {
     pub contract_id: Option<String>,
     /// Re-run even if `.env.audit` already exists (regenerates keys).
     pub overwrite: Option<bool>,
+    /// Setup role: `all` (Dev Mode), `publisher`, or `attester`.
+    /// Dev Mode desktop always uses `all`; the flag exists so the same
+    /// wizard binary supports separated production deployments.
+    pub role: Option<String>,
 }
 
 /// Result of running the setup wizard. The `log` is redacted of any Stellar
@@ -745,6 +749,7 @@ pub fn setup_audit_config(app: &AppHandle, params: DevSetupParams) -> AppResult<
     push("PINATA_API_KEY", &params.pinata_api_key);
     push("PINATA_API_SECRET", &params.pinata_api_secret);
     push("PINATA_GATEWAY_URL", &params.pinata_gateway_url);
+    push("SETUP_ROLE", &Some("all".to_string())); // Dev Mode always uses all
     drop(push);
 
     // Deploy a fresh per-user contract by default so the generated publisher

@@ -7,6 +7,16 @@ import { invoke } from "@tauri-apps/api/core";
 
 /** Format a Tauri/Rust error for display. Errors are serialized as `{ kind, message }`. */
 export function formatError(err: unknown): string {
+  const raw = extractRawMessage(err);
+  const friendly = humanizeError(raw);
+  if (friendly && friendly !== raw) {
+    console.error("[nosqlbuddy] error detail:", raw);
+  }
+  return friendly;
+}
+
+/** Extract the raw error string from various error shapes. */
+function extractRawMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (typeof err === "string") return err;
   if (err && typeof err === "object") {
@@ -19,6 +29,68 @@ export function formatError(err: unknown): string {
     return JSON.stringify(err);
   }
   return String(err);
+}
+
+/** Convert a raw driver/internal error into a short, human-friendly message. */
+function humanizeError(raw: string): string {
+  // MongoDB driver: server selection timeout (host unreachable / wrong port / firewall)
+  if (raw.includes("Server selection timeout") || raw.includes("No available servers")) {
+    const addrMatch = raw.match(/Address:\s*([\d.]+:\d+)/);
+    const addr = addrMatch ? addrMatch[1] : "the server";
+    if (raw.includes("Connection refused")) {
+      return `Could not connect to ${addr}. The server is not reachable (connection refused). Check that MongoDB is running and the port is correct.`;
+    }
+    if (raw.includes("timed out")) {
+      return `Connection to ${addr} timed out. The server may be behind a firewall or unreachable from your network.`;
+    }
+    return `Could not connect to ${addr}. Check that the host and port are correct, and that MongoDB is running.`;
+  }
+
+  // MongoDB driver: authentication failed
+  if (raw.includes("Authentication failed") || raw.includes("auth fail")) {
+    return "Authentication failed. Check your username, password, and auth mechanism.";
+  }
+
+  // MongoDB driver: not writable primary
+  if (raw.includes("NotWritablePrimary") || raw.includes("not master")) {
+    return "The connected server is not the primary. Use a replica set URI or wait for an election to complete.";
+  }
+
+  // MongoDB driver: bad auth mechanism
+  if (raw.includes("Unsupported OP_MSG") || raw.includes("SASL")) {
+    return "The server rejected the authentication mechanism. Try a different auth method (e.g. SCRAM-SHA-256).";
+  }
+
+  // DNS / SRV resolution
+  if (raw.includes("Failed to lookup") || raw.includes("DNS") || raw.includes("nodename nor servname provided")) {
+    return "Could not resolve the hostname. Check the connection URI for typos.";
+  }
+
+  // TLS / SSL
+  if (raw.includes("TLS") || raw.includes("SSL") || raw.includes("certificate")) {
+    return "TLS/SSL error. If using a self-signed certificate, you may need to allow invalid certificates in the URI.";
+  }
+
+  // Network: connection reset
+  if (raw.includes("Connection reset") || raw.includes("broken pipe")) {
+    return "The connection was unexpectedly closed by the server. Try again.";
+  }
+
+  // Tauri command invocation error
+  if (raw.startsWith("Internal: ")) {
+    return raw.replace("Internal: ", "").trim();
+  }
+
+  // Validation errors from the Rust side
+  if (raw.startsWith("Validation: ")) {
+    return raw.replace("Validation: ", "").trim();
+  }
+
+  // Fallback: return as-is if short, truncate if very long
+  if (raw.length > 300) {
+    return raw.slice(0, 300) + "...";
+  }
+  return raw;
 }
 
 /** Profile summary as shown in the connection tree. */
@@ -1164,6 +1236,8 @@ export interface DevSetupParams {
   attesterSecretKey?: string;
   contractId?: string;
   overwrite?: boolean;
+  /** Setup role: "all" (Dev Mode), "publisher", or "attester". */
+  role?: string;
 }
 
 /** Result of the non-interactive setup wizard (log is secret-redacted). */

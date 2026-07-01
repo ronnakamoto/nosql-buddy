@@ -59,8 +59,11 @@ export function ConfirmDialog({
       aria-modal="true"
       aria-labelledby="confirm-dialog-title"
       aria-describedby="confirm-dialog-desc"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onCancel();
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) {
+          e.preventDefault();
+          onCancel();
+        }
       }}
     >
       <div className="modal confirm-dialog" style={{ width: "min(400px, 92vw)" }}>

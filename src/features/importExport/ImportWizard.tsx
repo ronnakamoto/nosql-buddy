@@ -326,8 +326,11 @@ export function ImportWizard({
       role="dialog"
       aria-modal="true"
       aria-label="Import documents"
-      onClick={(e) => {
-        if (e.target === e.currentTarget && phase !== "running") onClose();
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget && phase !== "running") {
+          e.preventDefault();
+          onClose();
+        }
       }}
     >
       <div className="modal" style={{ width: "min(720px, 94vw)" }}>

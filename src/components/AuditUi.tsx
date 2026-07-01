@@ -483,11 +483,11 @@ export function Modal({
   if (!open) return null;
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) { e.preventDefault(); onClose(); } }}>
       <div
         className="modal"
         style={{ width: `min(${maxWidth}px, 92vw)` }}
-        onClick={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="modal__header">
           <div className="modal__heading">

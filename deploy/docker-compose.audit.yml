@@ -35,11 +35,15 @@ x-secrets: &secrets
   PINATA_GATEWAY_URL: ${PINATA_GATEWAY_URL:-https://gateway.pinata.cloud}
 
 services:
-  # ─── Publisher ────────────────────────────────────────────────────────
+  # ─── Publisher (operator) ───────────────────────────────────────────
   # Watches the change stream, builds the Merkle tree, manages epochs,
   # publishes batches to IPFS (Pinata), and commits roots on-chain.
+  #
+  # In production, run only on the operator's server:
+  #   docker compose --env-file .env.audit --profile publisher up -d
   publisher:
     image: *image
+    profiles: ["publisher", "all"]
     ports:
       - "${PUBLISHER_PORT:-9173}:9173"
     command:
@@ -71,12 +75,15 @@ services:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
-  # ─── Independent attester ─────────────────────────────────────────────
+  # ─── Independent attester (auditor) ─────────────────────────────────
   # Connects to the INDEPENDENT replica member, independently computes the
-  # oplog hash, and submits ed25519 attestations on-chain. The ed25519 key
-  # is read from ./attester.key (produced + authorized by the setup wizard).
+  # oplog hash, and submits ed25519 attestations on-chain.
+  #
+  # In production, run only on the auditor's server:
+  #   docker compose --env-file .env.audit --profile attester up -d
   attester:
     image: *image
+    profiles: ["attester", "all"]
     ports:
       - "${ATTESTER_PORT:-9174}:9174"
     command:
@@ -101,10 +108,16 @@ services:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
-  # ─── Reader ───────────────────────────────────────────────────────────
+  # ─── Reader (either party) ──────────────────────────────────────────
   # Reads on-chain commitments, rebuilds locally, and verifies roots match.
+  # Useful for both operator and auditor for independent verification.
+  #
+  # Start alongside either role:
+  #   docker compose --env-file .env.audit --profile publisher up -d  # includes reader
+  #   docker compose --env-file .env.audit --profile attester up -d   # includes reader
   reader:
     image: *image
+    profiles: ["reader", "publisher", "attester", "all"]
     ports:
       - "${READER_PORT:-9175}:9175"
     command:
@@ -129,11 +142,18 @@ services:
     restart: unless-stopped
 
   # ─── One-off setup wizard ─────────────────────────────────────────────
-  # Interactive: generates keypairs, funds testnet accounts, authorizes the
-  # attester, and writes ./attester.key + .env.audit into the current dir
-  # (mounted at /work). Gated behind the "setup" profile so it never starts
-  # with `up`. Run it with:
+  # Role-aware wizard that generates keys, (optionally) deploys the contract,
+  # and writes ./attester.key + .env.audit into the current dir.
+  # Gated behind the "setup" profile so it never starts with `up`.
+  #
+  # Dev Mode (both keys, one machine):
   #   docker compose --env-file .env.audit run --rm setup
+  #
+  # Operator (publisher key + contract deploy):
+  #   docker compose --env-file .env.audit run --rm setup --role publisher
+  #
+  # Auditor (attester keys independently):
+  #   docker compose --env-file .env.audit run --rm setup --role attester
   setup:
     image: *image
     profiles: ["setup"]

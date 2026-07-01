@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { formatError } from "../ipc/commands";
 import {
   type BookmarkEntry,
   type BookmarkSummary,
@@ -310,9 +311,5 @@ function summarizeRun(h: HistoryEntry): string {
 }
 
 function describeError(e: unknown): string {
-  if (typeof e === "string") return e;
-  if (e && typeof e === "object" && "message" in e) {
-    return String((e as { message: unknown }).message);
-  }
-  return String(e);
+  return formatError(e);
 }

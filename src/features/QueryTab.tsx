@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import commands, { type DocumentPage, type SqlLanguage } from "../ipc/commands";
+import commands, { formatError, type DocumentPage, type SqlLanguage } from "../ipc/commands";
 import { ResultsTable, type ResultsViewMode } from "../components/ResultsTable";
 import { toFilterId } from "../components/resultsDisplay";
 import { InsertDocumentModal } from "../components/InsertDocumentModal";
@@ -551,7 +551,9 @@ export function QueryTab({
       });
       setScPreview(preview);
     } catch (e) {
-      setScError(describeError(e));
+      const msg = describeError(e);
+      setScError(msg);
+      toast.push(msg, "error");
     } finally {
       setScLoading(false);
     }
@@ -2066,11 +2068,7 @@ function restoreDisplayBson(value: unknown): unknown {
 }
 
 function describeError(e: unknown): string {
-  if (typeof e === "string") return e;
-  if (e && typeof e === "object" && "message" in e) {
-    return String((e as { message: unknown }).message);
-  }
-  return "Unexpected error";
+  return formatError(e);
 }
 
 function safeParse<T>(text: string, fallback: T): T {

@@ -303,8 +303,11 @@ export function SafeChangeModal({
       role="dialog"
       aria-modal="true"
       aria-labelledby="scm-title"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onCancel();
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) {
+          e.preventDefault();
+          onCancel();
+        }
       }}
     >
       <div

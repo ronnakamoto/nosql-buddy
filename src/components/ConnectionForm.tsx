@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import commands, { type SaveProfileRequest, type TestResult } from "../ipc/commands";
+import commands, { formatError, type SaveProfileRequest, type TestResult } from "../ipc/commands";
 import { Modal } from "./Modal";
 import { InfoPopover } from "./InfoPopover";
 import { ShortcutButton } from "./ShortcutButton";
@@ -248,9 +248,5 @@ export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFo
 }
 
 function describeError(e: unknown): string {
-  if (typeof e === "string") return e;
-  if (e && typeof e === "object" && "message" in e) {
-    return String((e as { message: unknown }).message);
-  }
-  return "Unexpected error";
+  return formatError(e);
 }
