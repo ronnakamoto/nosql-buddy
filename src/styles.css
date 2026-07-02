@@ -2445,6 +2445,19 @@ input[type="checkbox"]:disabled {
   cursor: row-resize;
 }
 
+.find-sections__handle {
+  height: 6px;
+  background: var(--surface-2);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  cursor: row-resize;
+  flex-shrink: 0;
+}
+.find-sections__handle:hover {
+  background: var(--accent-500);
+  border-color: var(--accent-500);
+}
+
 .diff {
   display: grid;
   grid-template-columns: 1fr 1fr;

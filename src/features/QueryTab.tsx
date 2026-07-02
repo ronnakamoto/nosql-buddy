@@ -484,6 +484,106 @@ export function QueryTab({
     window.addEventListener("mouseup", onUp);
   }, [editorFr]);
 
+  // ─── Find mode section resize ───────────────────────────────────────
+  const findResizeRef = useRef<HTMLDivElement>(null);
+  const [findFrs, setFindFrs] = useState([33, 33, 34]);
+
+  const startFindResize = useCallback((e: React.MouseEvent, handleIndex: number) => {
+    const container = findResizeRef.current;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+    const handleHeight = 6;
+    const contentHeight = rect.height - 2 * handleHeight;
+    const state = {
+      startY: e.clientY,
+      contentHeight,
+      initialFrs: [...findFrs],
+      handleIndex,
+    };
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    const onMove = (ev: MouseEvent) => {
+      const dy = ev.clientY - state.startY;
+      const deltaFr = Math.round((dy / state.contentHeight) * 100);
+      const minFr = 10;
+      setFindFrs(() => {
+        const next = [...state.initialFrs];
+        if (state.handleIndex === 0) {
+          next[0] = Math.min(
+            state.initialFrs[0] + state.initialFrs[1] - minFr,
+            Math.max(minFr, state.initialFrs[0] + deltaFr)
+          );
+          next[1] = state.initialFrs[0] + state.initialFrs[1] - next[0];
+        } else {
+          next[1] = Math.min(
+            state.initialFrs[1] + state.initialFrs[2] - minFr,
+            Math.max(minFr, state.initialFrs[1] + deltaFr)
+          );
+          next[2] = state.initialFrs[1] + state.initialFrs[2] - next[1];
+        }
+        return next;
+      });
+    };
+    const onUp = () => {
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [findFrs]);
+
+  // ─── Update mode section resize ─────────────────────────────────────
+  const updateResizeRef = useRef<HTMLDivElement>(null);
+  const [updateFrs, setUpdateFrs] = useState([33, 33, 34]);
+
+  const startUpdateResize = useCallback((e: React.MouseEvent, handleIndex: number) => {
+    const container = updateResizeRef.current;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+    const handleHeight = 6;
+    const contentHeight = rect.height - 2 * handleHeight;
+    const state = {
+      startY: e.clientY,
+      contentHeight,
+      initialFrs: [...updateFrs],
+      handleIndex,
+    };
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    const onMove = (ev: MouseEvent) => {
+      const dy = ev.clientY - state.startY;
+      const deltaFr = Math.round((dy / state.contentHeight) * 100);
+      const minFr = 10;
+      setUpdateFrs(() => {
+        const next = [...state.initialFrs];
+        if (state.handleIndex === 0) {
+          next[0] = Math.min(
+            state.initialFrs[0] + state.initialFrs[1] - minFr,
+            Math.max(minFr, state.initialFrs[0] + deltaFr)
+          );
+          next[1] = state.initialFrs[0] + state.initialFrs[1] - next[0];
+        } else {
+          next[1] = Math.min(
+            state.initialFrs[1] + state.initialFrs[2] - minFr,
+            Math.max(minFr, state.initialFrs[1] + deltaFr)
+          );
+          next[2] = state.initialFrs[1] + state.initialFrs[2] - next[1];
+        }
+        return next;
+      });
+    };
+    const onUp = () => {
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [updateFrs]);
+
   // ─── Schema for autocomplete ────────────────────────────────────────
   const schema = useCollectionSchema(connectionId, database, collection);
 
@@ -1583,7 +1683,11 @@ export function QueryTab({
       >
         <div className="editor">
           {mode === "find" && (
-            <div className="pane__body" style={{ display: "grid", gridTemplateRows: "1fr 1fr 1fr" }}>
+            <div
+              ref={findResizeRef}
+              className="pane__body"
+              style={{ display: "grid", gridTemplateRows: `${findFrs[0]}fr 6px ${findFrs[1]}fr 6px ${findFrs[2]}fr` }}
+            >
               <div className="editor__pane">
                 <div className="editor__toolbar">
                   <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>Filter</span>
@@ -1626,6 +1730,12 @@ export function QueryTab({
                   </div>
                 )}
               </div>
+              <div
+                className="find-sections__handle"
+                onMouseDown={(e) => startFindResize(e, 0)}
+                aria-hidden="true"
+                title="Drag to resize"
+              />
               <div className="editor__pane">
                 <div className="editor__toolbar">
                   <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>Projection <InfoPopover label="Projection help" title="Projection"><p>Specify which fields to return. Use <code>{'{ field: 1 }'}</code> to include fields or <code>{'{ field: 0 }'}</code> to exclude them. Leave empty to return all fields.</p></InfoPopover></span>
@@ -1640,6 +1750,12 @@ export function QueryTab({
                   placeholder="Optional"
                 />
               </div>
+              <div
+                className="find-sections__handle"
+                onMouseDown={(e) => startFindResize(e, 1)}
+                aria-hidden="true"
+                title="Drag to resize"
+              />
               <div className="editor__pane">
                 <div className="editor__toolbar">
                   <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>Sort <InfoPopover label="Sort help" title="Sort"><p>Sort results by one or more fields. Use <code>{'{ field: 1 }'}</code> for ascending or <code>{'{ field: -1 }'}</code> for descending.</p></InfoPopover></span>
@@ -1766,7 +1882,11 @@ export function QueryTab({
             </div>
           )}
           {mode === "update" && (
-            <div className="pane__body" style={{ display: "grid", gridTemplateRows: "1fr 1fr auto" }}>
+            <div
+              ref={updateResizeRef}
+              className="pane__body"
+              style={{ display: "grid", gridTemplateRows: `${updateFrs[0]}fr 6px ${updateFrs[1]}fr 6px ${updateFrs[2]}fr` }}
+            >
               <div className="editor__pane">
                 <div className="editor__toolbar">
                   <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>Filter <InfoPopover label="Filter help" title="Update filter"><p>Documents matching this filter will be updated. Use <code>{'{ field: value }'}</code> syntax.</p></InfoPopover></span>
@@ -1780,6 +1900,12 @@ export function QueryTab({
                   schema={schema.loading ? undefined : schema}
                 />
               </div>
+              <div
+                className="find-sections__handle"
+                onMouseDown={(e) => startUpdateResize(e, 0)}
+                aria-hidden="true"
+                title="Drag to resize"
+              />
               <div className="editor__pane">
                 <div className="editor__toolbar">
                   <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>Update <InfoPopover label="Update help" title="Update document"><p>MongoDB update operators such as <code>$set</code>, <code>$inc</code>, <code>$push</code>, etc.</p></InfoPopover></span>
@@ -1793,6 +1919,12 @@ export function QueryTab({
                   schema={schema.loading ? undefined : schema}
                 />
               </div>
+              <div
+                className="find-sections__handle"
+                onMouseDown={(e) => startUpdateResize(e, 1)}
+                aria-hidden="true"
+                title="Drag to resize"
+              />
               <div style={{ display: "flex", gap: 12, alignItems: "center", padding: "var(--space-2) var(--space-3)", flexWrap: "wrap" }}>
                 <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, cursor: "pointer" }}>
                   <input
