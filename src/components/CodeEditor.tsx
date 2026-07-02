@@ -9,6 +9,7 @@ import { linter, lintGutter, type Diagnostic } from "@codemirror/lint";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
 import {
+  acceptCompletion,
   autocompletion,
   completionKeymap,
   startCompletion,
@@ -241,7 +242,10 @@ export function CodeEditor({
       context === "sql" ? sql() : context === "shell" ? javascript() : json();
     const exts: Extension[] = [
       language,
-      keymap.of(completionKeymap),
+      Prec.highest(keymap.of([
+        ...completionKeymap,
+        { key: "Tab", run: acceptCompletion },
+      ])),
       autocompletion({
         override: [completionSource ?? makeCompletionSource(context, schema)],
         activateOnTyping: false,
