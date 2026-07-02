@@ -45,6 +45,7 @@ boa_engine = "0.21"
 flate2 = "1"
 zstd = "0.13"
 cron = "0.15"
+sqlparser = "0.62"
 
 # Audit service (extracted standalone crate)
 audit-service = { package = "nosqlbuddy-audit-service", path = "../audit-service" }

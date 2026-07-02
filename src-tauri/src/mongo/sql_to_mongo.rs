@@ -1,14 +1,46 @@
-//! SQL -> MongoDB translation. Hand-rolled mini-parser that supports a
-//! useful subset: SELECT (with aliases), FROM, WHERE, GROUP BY, HAVING,
-//! ORDER BY, LIMIT/OFFSET, and JOIN (translated to $lookup). The output
-//! is always an aggregation pipeline the user can edit.
+//! SQL -> MongoDB translation, built on [`sqlparser`] (the Apache
+//! DataFusion SQL parser) for ANSI-SQL-accurate parsing. Supports
+//! `SELECT` (aliases, arithmetic, `LIKE`/`ILIKE`, `BETWEEN`, `IN`,
+//! functions), `FROM`, `WHERE`, `JOIN` (translated to `$lookup`),
+//! `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`/`OFFSET`, `DISTINCT`,
+//! `UPDATE`, `INSERT`, and `DELETE`. The output is always an
+//! aggregation pipeline (or find-shortcut / write document) the user
+//! can edit.
 //!
-//! We intentionally do not pull in a full SQL parser here. The supported
-//! grammar is documented in [`translate`]; anything outside it is
-//! rejected with a clear `AppError::SqlParse`.
+//! A few ergonomic, non-standard extensions are layered on top of
+//! standard SQL for MongoDB-flavored usage:
+//! - `#today`, `#lastweek`, etc. — relative date tags (see
+//!   [`crate::mongo::bson_json::resolve_date_tag`]). These tokenize
+//!   as plain identifiers (`#today` is accepted as one identifier by
+//!   the tokenizer) and are recognized by their leading `#`.
+//! - Double-quoted string literals (`"active"`) — ANSI SQL treats
+//!   double quotes as *quoted identifiers*, not string literals, but
+//!   this dialect targets ad-hoc MongoDB querying where users
+//!   commonly reach for double quotes out of JSON/JS habit. A quoted
+//!   identifier is therefore treated as a string literal rather than
+//!   a (vanishingly unlikely) real quoted column name.
+//! - `REMOVE` as an alias for `DELETE`, and a trailing bare `UPSERT`
+//!   keyword on `UPDATE ... WHERE ...` to set the upsert flag.
+//! - `INSERT INTO <collection> [VALUES] { ...raw JSON... }` — insert
+//!   one or more literal MongoDB documents instead of a SQL tuple,
+//!   for pasting documents directly.
+//!
+//! Anything outside standard SQL plus these extensions is rejected
+//! with a clear `AppError::SqlParse`.
 
 use serde::Serialize;
 use std::collections::BTreeMap;
+
+use sqlparser::ast::{
+    AssignmentTarget, BinaryOperator, Delete as SqlDelete, Distinct, Expr as SqlExpr, FromTable,
+    Function, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident,
+    Insert as SqlInsert, Join, JoinConstraint, JoinOperator, LimitClause, ObjectName, OrderByKind,
+    Query, Select, SelectItem as SqlSelectItem, SetExpr, Statement, TableFactor, TableObject,
+    UnaryOperator, Update as SqlUpdate, Value as SqlValue,
+};
+use sqlparser::dialect::GenericDialect;
+use sqlparser::parser::Parser as SqlParser;
+use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::error::{AppError, AppResult};
 use crate::mongo::bson_json::{date_to_extjson, resolve_date_tag};
@@ -55,33 +87,470 @@ pub struct SqlTranslation {
 
 pub fn translate(database: &str, sql: &str) -> AppResult<SqlTranslation> {
     let mut warnings = Vec::new();
-    let mut p = Parser::new(sql);
-    p.skip_ws();
+    let trimmed = sql.trim();
 
-    if p.peek_keyword("SELECT") {
-        translate_select(database, &mut p, &mut warnings)
-    } else if p.peek_keyword("UPDATE") {
-        translate_update(database, &mut p, &mut warnings)
-    } else if p.peek_keyword("INSERT") || p.peek_keyword("UPSERT") {
-        translate_insert(database, &mut p, &mut warnings)
-    } else if p.peek_keyword("DELETE") || p.peek_keyword("REMOVE") {
-        translate_delete(database, &mut p, &mut warnings)
+    // Non-standard shorthand: paste a raw MongoDB document instead of
+    // a SQL tuple. Checked first since it isn't valid SQL and would
+    // otherwise fail in the real parser.
+    if let Some((collection, documents)) = detect_json_insert(trimmed)? {
+        let code = generate_insert_code_variants(database, &collection, &documents);
+        return Ok(SqlTranslation {
+            database: database.to_string(),
+            collection,
+            operation: SqlOperation::Insert {
+                documents: documents.clone(),
+            },
+            pipeline: serde_json::Value::Array(vec![]),
+            find: None,
+            warnings,
+            code,
+        });
+    }
+
+    // `REMOVE` is a MongoDB-flavored alias for `DELETE`, and a leading
+    // `UPSERT` is an alias for `INSERT`. Rewrite before handing off to
+    // the real SQL parser, which doesn't know either word.
+    let normalized = rewrite_leading_alias(trimmed);
+
+    // A trailing bare `UPSERT` keyword on `UPDATE ... WHERE ...` sets
+    // the upsert flag; it isn't standard SQL, so strip it (using the
+    // tokenizer, so it's never confused with a string literal) before
+    // parsing and remember whether it was present.
+    let (normalized, upsert) = if is_leading_keyword(&normalized, "UPDATE") {
+        strip_trailing_word(&normalized, "UPSERT")
     } else {
-        Err(AppError::SqlParse(
-            "expected SELECT, UPDATE, INSERT, or DELETE statement".into(),
-        ))
+        (normalized, false)
+    };
+
+    let dialect = GenericDialect {};
+    let mut statements = SqlParser::parse_sql(&dialect, &normalized)
+        .map_err(|e| AppError::SqlParse(e.to_string()))?;
+    if statements.len() != 1 {
+        return Err(AppError::SqlParse(
+            "expected exactly one SQL statement".into(),
+        ));
+    }
+    let statement = statements.remove(0);
+
+    match statement {
+        Statement::Query(query) => translate_select(database, &query, &mut warnings),
+        Statement::Update(update) => translate_update(database, &update, upsert, &mut warnings),
+        Statement::Insert(insert) => translate_insert(database, &insert, &mut warnings),
+        Statement::Delete(delete) => translate_delete(database, &delete, &mut warnings),
+        other => Err(AppError::SqlParse(format!(
+            "expected SELECT, UPDATE, INSERT, or DELETE statement, got: {other}"
+        ))),
+    }
+}
+
+// ---------- Non-standard leading/trailing keyword handling ----------
+
+/// `true` when `sql` (after leading whitespace) starts with the exact
+/// keyword `kw`, case-insensitively, at a word boundary.
+fn is_leading_keyword(sql: &str, kw: &str) -> bool {
+    let trimmed = sql.trim_start();
+    if trimmed.len() < kw.len() {
+        return false;
+    }
+    if !trimmed.as_bytes()[..kw.len()].eq_ignore_ascii_case(kw.as_bytes()) {
+        return false;
+    }
+    !matches!(trimmed[kw.len()..].chars().next(), Some(c) if c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Rewrite a leading `REMOVE` to `DELETE` and a leading `UPSERT` to
+/// `INSERT` so the standard SQL parser can handle the rest.
+fn rewrite_leading_alias(sql: &str) -> String {
+    let ws_len = sql.len() - sql.trim_start().len();
+    let (prefix, rest) = sql.split_at(ws_len);
+    if is_leading_keyword(rest, "REMOVE") {
+        format!("{prefix}DELETE{}", &rest["REMOVE".len()..])
+    } else if is_leading_keyword(rest, "UPSERT") {
+        format!("{prefix}INSERT{}", &rest["UPSERT".len()..])
+    } else {
+        sql.to_string()
+    }
+}
+
+/// If the last meaningful token in `sql` is the bare word `word`
+/// (case-insensitive, unquoted), strip it (and any trailing
+/// whitespace/semicolon) and return `(rest, true)`. Uses the real SQL
+/// tokenizer so this is never confused with a string literal ending
+/// in the same text. Falls back to `(sql, false)` on any tokenizer
+/// error, letting the real parser produce the actual error message.
+fn strip_trailing_word(sql: &str, word: &str) -> (String, bool) {
+    let dialect = GenericDialect {};
+    let mut tokenizer = Tokenizer::new(&dialect, sql);
+    let tokens = match tokenizer.tokenize() {
+        Ok(t) => t,
+        Err(_) => return (sql.to_string(), false),
+    };
+    let mut end = tokens.len();
+    while end > 0 && matches!(tokens[end - 1], Token::Whitespace(_) | Token::SemiColon) {
+        end -= 1;
+    }
+    if end > 0 {
+        if let Token::Word(w) = &tokens[end - 1] {
+            if w.quote_style.is_none() && w.value.eq_ignore_ascii_case(word) {
+                let rebuilt: String = tokens[..end - 1].iter().map(|t| t.to_string()).collect();
+                return (rebuilt, true);
+            }
+        }
+    }
+    (sql.to_string(), false)
+}
+
+// ---------- Non-standard raw-JSON INSERT shorthand ----------
+
+/// Minimal scanner used only to detect and parse the non-standard
+/// `INSERT INTO <collection> [VALUES] { ...raw JSON document(s)... }`
+/// shorthand, which lets users paste MongoDB documents directly
+/// instead of writing a SQL tuple. Standard `INSERT ... VALUES (...)`
+/// is handled by the real SQL parser instead (see [`translate_insert`]).
+struct JsonScan<'a> {
+    src: &'a str,
+    pos: usize,
+}
+
+impl<'a> JsonScan<'a> {
+    fn new(src: &'a str) -> Self {
+        Self { src, pos: 0 }
+    }
+
+    fn skip_ws(&mut self) {
+        while let Some(c) = self.peek_char() {
+            if c.is_whitespace() {
+                self.pos += c.len_utf8();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn peek_char(&self) -> Option<char> {
+        self.src[self.pos..].chars().next()
+    }
+
+    fn peek_keyword(&self, kw: &str) -> bool {
+        let rest = &self.src[self.pos..];
+        if rest.len() < kw.len() {
+            return false;
+        }
+        if !rest.as_bytes()[..kw.len()].eq_ignore_ascii_case(kw.as_bytes()) {
+            return false;
+        }
+        !matches!(rest[kw.len()..].chars().next(), Some(c) if c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    fn consume_keyword(&mut self, kw: &str) -> bool {
+        if self.peek_keyword(kw) {
+            self.pos += kw.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn parse_identifier(&mut self) -> Option<String> {
+        let start = self.pos;
+        while let Some(c) = self.peek_char() {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                self.pos += c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if self.pos == start {
+            None
+        } else {
+            Some(self.src[start..self.pos].to_string())
+        }
+    }
+
+    /// Parse a raw JSON value (object or array) by consuming balanced
+    /// braces/brackets, then delegating to `serde_json::from_str`.
+    fn parse_json_value(&mut self) -> AppResult<serde_json::Value> {
+        self.skip_ws();
+        let start = self.pos;
+        let open = match self.peek_char() {
+            Some('{') => '{',
+            Some('[') => '[',
+            _ => return Err(AppError::SqlParse("expected `{` or `[` to start a JSON value".into())),
+        };
+        let close = if open == '{' { '}' } else { ']' };
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut escape = false;
+        for c in self.src[self.pos..].chars() {
+            if in_string {
+                if escape {
+                    escape = false;
+                } else if c == '\\' {
+                    escape = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
+            } else {
+                match c {
+                    '"' => in_string = true,
+                    _ if c == open => depth += 1,
+                    _ if c == close => {
+                        depth -= 1;
+                        if depth == 0 {
+                            self.pos += c.len_utf8();
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            self.pos += c.len_utf8();
+        }
+        if depth != 0 {
+            return Err(AppError::SqlParse("unterminated JSON value".into()));
+        }
+        let json_str = &self.src[start..self.pos];
+        serde_json::from_str(json_str)
+            .map_err(|e| AppError::SqlParse(format!("invalid JSON value: {e}")))
+    }
+}
+
+/// If `sql` matches the `INSERT|UPSERT INTO <collection> [VALUES]
+/// { ... }` shorthand, parse and return the collection + documents.
+/// Returns `Ok(None)` when the input doesn't match this shape at all
+/// (so the caller falls back to standard SQL parsing), and `Err` when
+/// it looks like the shorthand but the JSON itself is malformed.
+fn detect_json_insert(sql: &str) -> AppResult<Option<(String, Vec<serde_json::Value>)>> {
+    let mut s = JsonScan::new(sql);
+    s.skip_ws();
+    if !(s.consume_keyword("INSERT") || s.consume_keyword("UPSERT")) {
+        return Ok(None);
+    }
+    s.skip_ws();
+    if !s.consume_keyword("INTO") {
+        return Ok(None);
+    }
+    s.skip_ws();
+    let collection = match s.parse_identifier() {
+        Some(c) => c,
+        None => return Ok(None),
+    };
+    s.skip_ws();
+    if s.consume_keyword("VALUES") {
+        s.skip_ws();
+    }
+    if s.peek_char() != Some('{') {
+        return Ok(None);
+    }
+
+    let mut documents = Vec::new();
+    loop {
+        documents.push(s.parse_json_value()?);
+        s.skip_ws();
+        if s.peek_char() == Some(',') {
+            s.pos += 1;
+            s.skip_ws();
+            continue;
+        }
+        break;
+    }
+    s.skip_ws();
+    if s.pos < s.src.len() {
+        return Err(AppError::SqlParse(format!(
+            "unexpected trailing input at position {}",
+            s.pos
+        )));
+    }
+    Ok(Some((collection, documents)))
+}
+
+// ---------- SELECT ----------
+
+enum ProjItem {
+    Star,
+    Item { expr: SqlExpr, alias: Option<String> },
+}
+
+struct OrderItem {
+    expr: SqlExpr,
+    desc: bool,
+}
+
+struct JoinClause {
+    collection: String,
+    local_field: String,
+    foreign_field: String,
+    kind: JoinKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum JoinKind {
+    Inner,
+    Left,
+}
+
+fn unwrap_query_body(body: &SetExpr) -> AppResult<&Select> {
+    match body {
+        SetExpr::Select(s) => Ok(s.as_ref()),
+        SetExpr::Query(inner) => unwrap_query_body(inner.body.as_ref()),
+        _ => Err(AppError::SqlParse(
+            "only simple SELECT statements are supported (no UNION/EXCEPT/INTERSECT)".into(),
+        )),
+    }
+}
+
+fn table_name_from_object(name: &ObjectName) -> AppResult<String> {
+    Ok(name.to_string())
+}
+
+fn table_factor_name(tf: &TableFactor) -> AppResult<String> {
+    match tf {
+        TableFactor::Table { name, .. } => table_name_from_object(name),
+        _ => Err(AppError::SqlParse(
+            "FROM/JOIN must reference a simple table name (subqueries and table functions are not supported)".into(),
+        )),
+    }
+}
+
+fn convert_projection(items: &[SqlSelectItem]) -> AppResult<Vec<ProjItem>> {
+    items
+        .iter()
+        .map(|item| match item {
+            SqlSelectItem::Wildcard(_) => Ok(ProjItem::Star),
+            SqlSelectItem::UnnamedExpr(e) => Ok(ProjItem::Item {
+                expr: e.clone(),
+                alias: None,
+            }),
+            SqlSelectItem::ExprWithAlias { expr, alias } => Ok(ProjItem::Item {
+                expr: expr.clone(),
+                alias: Some(alias.value.clone()),
+            }),
+            SqlSelectItem::QualifiedWildcard(..) => Err(AppError::SqlParse(
+                "qualified wildcards (table.*) are not supported".into(),
+            )),
+            SqlSelectItem::ExprWithAliases { .. } => Err(AppError::SqlParse(
+                "multi-alias projections are not supported".into(),
+            )),
+        })
+        .collect()
+}
+
+fn projection_name(expr: &SqlExpr, alias: &Option<String>) -> String {
+    if let Some(a) = alias {
+        return a.clone();
+    }
+    field_name(expr).unwrap_or_else(|| "expr".to_string())
+}
+
+fn join_side_field(expr: &SqlExpr) -> AppResult<String> {
+    match expr {
+        SqlExpr::Identifier(ident) => Ok(ident.value.clone()),
+        // Strip the leading table/alias qualifier; keep the final
+        // segment as the actual document field name.
+        SqlExpr::CompoundIdentifier(idents) => idents
+            .last()
+            .map(|i| i.value.clone())
+            .ok_or_else(|| AppError::SqlParse("empty identifier in JOIN ON clause".into())),
+        _ => Err(AppError::SqlParse(
+            "JOIN ON clause must compare simple field references".into(),
+        )),
+    }
+}
+
+fn join_condition_fields(expr: &SqlExpr) -> AppResult<(String, String)> {
+    match expr {
+        SqlExpr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } => Ok((join_side_field(left)?, join_side_field(right)?)),
+        SqlExpr::Nested(inner) => join_condition_fields(inner),
+        _ => Err(AppError::SqlParse(
+            "JOIN ON clause must be a simple equality: <field> = <field>".into(),
+        )),
+    }
+}
+
+fn build_join(join: &Join) -> AppResult<JoinClause> {
+    let collection = table_factor_name(&join.relation)?;
+    let (kind, constraint) = match &join.join_operator {
+        JoinOperator::Join(c) | JoinOperator::Inner(c) => (JoinKind::Inner, c),
+        JoinOperator::Left(c) | JoinOperator::LeftOuter(c) => (JoinKind::Left, c),
+        other => {
+            return Err(AppError::SqlParse(format!(
+                "unsupported join type `{other:?}`; only INNER/LEFT JOIN ... ON <a> = <b> is supported"
+            )))
+        }
+    };
+    let on_expr = match constraint {
+        JoinConstraint::On(e) => e,
+        _ => {
+            return Err(AppError::SqlParse(
+                "JOIN requires an ON <field> = <field> condition".into(),
+            ))
+        }
+    };
+    let (local_field, foreign_field) = join_condition_fields(on_expr)?;
+    Ok(JoinClause {
+        collection,
+        local_field,
+        foreign_field,
+        kind,
+    })
+}
+
+/// Translate a join into `$lookup` (+ a follow-up `$match` for `INNER`
+/// joins, which drops rows with no match so `INNER` behaves
+/// differently from `LEFT` — plain `$lookup` alone always keeps every
+/// left-hand document, which is exactly `LEFT JOIN` semantics).
+fn join_to_lookup(join: &JoinClause) -> Vec<serde_json::Value> {
+    let as_name = format!("{}_joined", join.collection);
+    let lookup = serde_json::json!({
+        "$lookup": {
+            "from": join.collection,
+            "localField": join.local_field,
+            "foreignField": join.foreign_field,
+            "as": as_name,
+        }
+    });
+    match join.kind {
+        JoinKind::Left => vec![lookup],
+        JoinKind::Inner => {
+            let mut cond = serde_json::Map::new();
+            cond.insert(as_name, serde_json::json!({ "$ne": [] }));
+            vec![lookup, serde_json::json!({ "$match": cond })]
+        }
     }
 }
 
 fn translate_select(
     database: &str,
-    p: &mut Parser,
+    query: &Query,
     warnings: &mut Vec<String>,
 ) -> AppResult<SqlTranslation> {
-    let stmt = p.parse_select()?;
-    let collection = stmt.collection.ok_or_else(|| {
+    if query.with.is_some() {
+        return Err(AppError::SqlParse(
+            "WITH (common table expressions) is not supported".into(),
+        ));
+    }
+    let select = unwrap_query_body(query.body.as_ref())?;
+
+    if select.from.len() > 1 {
+        return Err(AppError::SqlParse(
+            "comma-separated FROM tables are not supported; use JOIN instead".into(),
+        ));
+    }
+    let twj = select.from.first().ok_or_else(|| {
         AppError::SqlParse("FROM clause with at least one table is required".into())
     })?;
+    let collection = table_factor_name(&twj.relation)?;
+    let joins = twj
+        .joins
+        .iter()
+        .map(build_join)
+        .collect::<AppResult<Vec<_>>>()?;
+
+    let projection = convert_projection(&select.projection)?;
 
     let mut stages: Vec<serde_json::Value> = Vec::new();
     let mut find_filter: Option<serde_json::Value> = None;
@@ -90,41 +559,56 @@ fn translate_select(
     let mut find_limit: Option<i64> = None;
     let mut find_skip: Option<u64> = None;
 
-    if let Some(filter) = stmt.where_clause {
+    if let Some(filter_expr) = &select.selection {
         // WHERE is a pre-group filter document, so emit MongoDB filter
         // shape (`{field: {$op: value}}` or `{field: value}` for `$eq`)
         // and only fall back to `{$expr: ...}` when both sides are field
         // references or the comparison is non-scalar. This keeps indexes
         // usable for the common `field <op> literal` case.
-        let value = expr_to_filter(&filter, warnings)?;
+        let value = expr_to_filter(filter_expr, warnings)?;
         find_filter = Some(value.clone());
         stages.push(serde_json::json!({ "$match": value }));
     }
 
-    for join in &stmt.joins {
-        stages.push(join_to_lookup(join, warnings)?);
+    for join in &joins {
+        stages.extend(join_to_lookup(join));
     }
 
-    if stmt.distinct && stmt.group_by.is_empty() {
+    if matches!(&select.distinct, Some(Distinct::On(_))) {
+        return Err(AppError::SqlParse("DISTINCT ON (...) is not supported".into()));
+    }
+    let distinct = matches!(select.distinct, Some(Distinct::Distinct));
+
+    let group_by_exprs: Vec<SqlExpr> = match &select.group_by {
+        GroupByExpr::Expressions(exprs, modifiers) => {
+            if !modifiers.is_empty() {
+                warnings.push("GROUP BY modifiers (ROLLUP/CUBE/etc.) are ignored".into());
+            }
+            exprs.clone()
+        }
+        GroupByExpr::All(_) => return Err(AppError::SqlParse("GROUP BY ALL is not supported".into())),
+    };
+
+    if distinct && group_by_exprs.is_empty() {
         // DISTINCT: collapse duplicates by grouping on the projected
         // fields, then replace the root so the output shape matches
         // what the user asked for (instead of `_id: {...}`).
-        let key = build_distinct_group_key(&stmt.projection, warnings)?;
+        let key = build_distinct_group_key(&projection)?;
         stages.push(serde_json::json!({ "$group": { "_id": key } }));
         stages.push(serde_json::json!({ "$replaceRoot": { "newRoot": "$_id" } }));
         // No `find` shortcut: distinct always runs through aggregate.
-    } else if !stmt.group_by.is_empty() {
-        let group = build_group_stage(&stmt.group_by, &stmt.projection, warnings)?;
+    } else if !group_by_exprs.is_empty() {
+        let group = build_group_stage(&group_by_exprs, &projection, warnings)?;
         stages.push(serde_json::json!({ "$group": group }));
     } else {
-        let project = build_project_stage(&stmt.projection, warnings)?;
+        let project = build_project_stage(&projection, warnings)?;
         if !project.as_object().map(|m| m.is_empty()).unwrap_or(true) {
-            stages.push(serde_json::json!({ "$project": project }));
+            stages.push(serde_json::json!({ "$project": project.clone() }));
             find_projection = Some(project);
         }
     }
 
-    if let Some(having) = &stmt.having {
+    if let Some(having) = &select.having {
         // HAVING runs after $group, so every reference is an aggregation
         // expression and must be wrapped in $expr to be valid inside a
         // $match stage. Bare `{$gt: [...]}` would hit the same
@@ -133,20 +617,57 @@ fn translate_select(
         stages.push(serde_json::json!({ "$match": { "$expr": value } }));
     }
 
-    if !stmt.order_by.is_empty() {
-        let sort = build_sort_stage(&stmt.order_by);
-        stages.push(serde_json::json!({ "$sort": sort }));
+    let order_by: Vec<OrderItem> = match &query.order_by {
+        Some(ob) => match &ob.kind {
+            OrderByKind::Expressions(exprs) => exprs
+                .iter()
+                .map(|oe| OrderItem {
+                    expr: oe.expr.clone(),
+                    desc: oe.options.asc == Some(false),
+                })
+                .collect(),
+            OrderByKind::All(_) => {
+                return Err(AppError::SqlParse("ORDER BY ALL is not supported".into()))
+            }
+        },
+        None => Vec::new(),
+    };
+    if !order_by.is_empty() {
+        let sort = build_sort_stage(&order_by);
+        stages.push(serde_json::json!({ "$sort": sort.clone() }));
         find_sort = Some(sort);
     }
 
-    if let Some(limit) = stmt.limit {
-        stages.push(serde_json::json!({ "$limit": limit }));
-        find_limit = Some(limit);
-    }
-
-    if let Some(offset) = stmt.offset {
-        stages.push(serde_json::json!({ "$skip": offset }));
-        find_skip = Some(offset);
+    if let Some(limit_clause) = &query.limit_clause {
+        match limit_clause {
+            LimitClause::LimitOffset {
+                limit,
+                offset,
+                limit_by,
+            } => {
+                if !limit_by.is_empty() {
+                    warnings.push("LIMIT BY is not supported and was ignored".into());
+                }
+                if let Some(limit_expr) = limit {
+                    let n = expr_to_i64(limit_expr, warnings)?;
+                    stages.push(serde_json::json!({ "$limit": n }));
+                    find_limit = Some(n);
+                }
+                if let Some(off) = offset {
+                    let n = expr_to_u64(&off.value, warnings)?;
+                    stages.push(serde_json::json!({ "$skip": n }));
+                    find_skip = Some(n);
+                }
+            }
+            LimitClause::OffsetCommaLimit { offset, limit } => {
+                let off_n = expr_to_u64(offset, warnings)?;
+                let lim_n = expr_to_i64(limit, warnings)?;
+                stages.push(serde_json::json!({ "$skip": off_n }));
+                stages.push(serde_json::json!({ "$limit": lim_n }));
+                find_skip = Some(off_n);
+                find_limit = Some(lim_n);
+            }
+        }
     }
 
     let looks_like_find = stages.iter().all(|s| {
@@ -178,10 +699,7 @@ fn translate_select(
         None
     };
 
-    let collection_for_code = collection.clone();
-    let pipeline_arr = stages.clone();
-    let code = generate_code_variants(database, &collection_for_code, &pipeline_arr);
-
+    let code = generate_code_variants(database, &collection, &stages);
     let operation = if find.is_some() {
         SqlOperation::Find
     } else {
@@ -199,63 +717,43 @@ fn translate_select(
     })
 }
 
+// ---------- UPDATE / INSERT / DELETE ----------
+
+fn assignment_target_to_field(target: &AssignmentTarget) -> AppResult<String> {
+    match target {
+        AssignmentTarget::ColumnName(name) => Ok(name.to_string()),
+        AssignmentTarget::Tuple(_) => Err(AppError::SqlParse(
+            "tuple assignment targets are not supported".into(),
+        )),
+    }
+}
+
 fn translate_update(
     database: &str,
-    p: &mut Parser,
+    update: &SqlUpdate,
+    upsert: bool,
     warnings: &mut Vec<String>,
 ) -> AppResult<SqlTranslation> {
-    p.expect_keyword("UPDATE")?;
-    p.skip_ws();
-    let collection = p.parse_identifier()?;
-    p.skip_ws();
+    if !update.table.joins.is_empty() {
+        return Err(AppError::SqlParse("UPDATE ... JOIN is not supported".into()));
+    }
+    let collection = table_factor_name(&update.table.relation)?;
 
-    let mut filter = serde_json::Value::Object(serde_json::Map::new());
     let mut set_fields = serde_json::Map::new();
-    let mut upsert = false;
-
-    if p.peek_keyword("SET") {
-        p.consume_keyword("SET")?;
-        p.skip_ws();
-        loop {
-            let field = p.parse_identifier()?;
-            p.skip_ws();
-            p.expect_char('=')?;
-            p.skip_ws();
-            let value = expr_to_agg_expr(&p.parse_expr()?, warnings)?;
-            set_fields.insert(field, value);
-            p.skip_ws();
-            if p.peek_char() == Some(',') {
-                p.pos += 1;
-                p.skip_ws();
-                continue;
-            }
-            break;
-        }
-    }
-    p.skip_ws();
-
-    if p.peek_keyword("WHERE") {
-        p.consume_keyword("WHERE")?;
-        p.skip_ws();
-        filter = expr_to_filter(&p.parse_expr()?, warnings)?;
-    }
-    p.skip_ws();
-
-    if p.peek_keyword("UPSERT") {
-        p.consume_keyword("UPSERT")?;
-        upsert = true;
+    for assignment in &update.assignments {
+        let field = assignment_target_to_field(&assignment.target)?;
+        let value = expr_to_agg_expr(&assignment.value, warnings)?;
+        set_fields.insert(field, value);
     }
 
-    p.skip_ws();
-    if p.pos < p.src.len() {
-        return Err(AppError::SqlParse(format!(
-            "unexpected trailing input at position {}",
-            p.pos
-        )));
-    }
+    let filter = match &update.selection {
+        Some(e) => expr_to_filter(e, warnings)?,
+        None => serde_json::Value::Object(serde_json::Map::new()),
+    };
 
     let update_doc = serde_json::json!({ "$set": set_fields });
-    let code = generate_write_code_variants(database, &collection, "update", &filter, &update_doc, upsert);
+    let code =
+        generate_write_code_variants(database, &collection, "update", &filter, &update_doc, upsert);
 
     Ok(SqlTranslation {
         database: database.to_string(),
@@ -275,91 +773,64 @@ fn translate_update(
 
 fn translate_insert(
     database: &str,
-    p: &mut Parser,
+    insert: &SqlInsert,
     warnings: &mut Vec<String>,
 ) -> AppResult<SqlTranslation> {
-    p.expect_keyword("INSERT")?;
-    p.skip_ws();
-    p.expect_keyword("INTO")?;
-    p.skip_ws();
-    let collection = p.parse_identifier()?;
-    p.skip_ws();
+    let collection = match &insert.table {
+        TableObject::TableName(name) => table_name_from_object(name)?,
+        TableObject::TableFunction(_) => {
+            return Err(AppError::SqlParse(
+                "table-valued functions are not supported in INSERT".into(),
+            ))
+        }
+        TableObject::TableQuery(_) => {
+            return Err(AppError::SqlParse(
+                "INSERT INTO (query)-form table targets are not supported".into(),
+            ))
+        }
+    };
 
-    let mut documents = Vec::new();
+    let source = insert
+        .source
+        .as_ref()
+        .ok_or_else(|| AppError::SqlParse("INSERT requires a VALUES clause".into()))?;
+    let values = match source.body.as_ref() {
+        SetExpr::Values(v) => v,
+        _ => {
+            return Err(AppError::SqlParse(
+                "INSERT ... SELECT is not supported; use VALUES or a raw JSON document".into(),
+            ))
+        }
+    };
 
-    if p.peek_keyword("VALUES") {
-        p.consume_keyword("VALUES")?;
-        p.skip_ws();
-        loop {
-            if p.peek_char() == Some('{') {
-                let doc = p.parse_json_value()?;
-                documents.push(doc);
-            } else {
-                let expr = p.parse_expr()?;
-                let doc = expr_to_agg_expr(&expr, warnings)?;
-                documents.push(doc);
-            }
-            p.skip_ws();
-            if p.peek_char() == Some(',') {
-                p.pos += 1;
-                p.skip_ws();
-                continue;
-            }
-            break;
-        }
-    } else if p.peek_char() == Some('{') {
-        let doc = p.parse_json_value()?;
-        documents.push(doc);
-    } else {
-        p.expect_char('(')?;
-        p.skip_ws();
-        let mut fields = Vec::new();
-        loop {
-            fields.push(p.parse_identifier()?);
-            p.skip_ws();
-            if p.peek_char() == Some(',') {
-                p.pos += 1;
-                p.skip_ws();
-                continue;
-            }
-            break;
-        }
-        p.expect_char(')')?;
-        p.skip_ws();
-        p.expect_keyword("VALUES")?;
-        p.skip_ws();
-        loop {
-            p.expect_char('(')?;
-            p.skip_ws();
-            let mut doc = serde_json::Map::new();
-            for (i, field) in fields.iter().enumerate() {
-                let expr = p.parse_expr()?;
-                let value = expr_to_agg_expr(&expr, warnings)?;
-                doc.insert(field.clone(), value);
-                p.skip_ws();
-                if i < fields.len() - 1 {
-                    p.expect_char(',')?;
-                    p.skip_ws();
-                }
-            }
-            p.expect_char(')')?;
-            documents.push(serde_json::Value::Object(doc));
-            p.skip_ws();
-            if p.peek_char() == Some(',') {
-                p.pos += 1;
-                p.skip_ws();
-                continue;
-            }
-            break;
-        }
+    let column_names: Vec<String> = insert.columns.iter().map(|c| c.to_string()).collect();
+    if column_names.is_empty() {
+        // Without a column list we have no field names to zip the
+        // positional values against, and MongoDB has no fixed table
+        // schema to fall back on. Point the user at the two forms we
+        // do support.
+        return Err(AppError::SqlParse(
+            "INSERT ... VALUES (...) requires an explicit column list, e.g. \
+             INSERT INTO t (a, b) VALUES (1, 2); or paste a document directly: \
+             INSERT INTO t VALUES { \"a\": 1, \"b\": 2 }"
+                .into(),
+        ));
     }
 
-    p.skip_ws();
-    if p.pos < p.src.len() {
-        return Err(AppError::SqlParse(format!(
-            "unexpected trailing input at position {}",
-            p.pos
-        )));
+    let mut documents = Vec::new();
+    for row in &values.rows {
+        if row.content.len() != column_names.len() {
+            return Err(AppError::SqlParse(format!(
+                "expected {} value(s) but got {}",
+                column_names.len(),
+                row.content.len()
+            )));
+        }
+        let mut doc = serde_json::Map::new();
+        for (name, expr) in column_names.iter().zip(row.content.iter()) {
+            doc.insert(name.clone(), expr_to_agg_expr(expr, warnings)?);
+        }
+        documents.push(serde_json::Value::Object(doc));
     }
 
     let code = generate_insert_code_variants(database, &collection, &documents);
@@ -379,34 +850,36 @@ fn translate_insert(
 
 fn translate_delete(
     database: &str,
-    p: &mut Parser,
+    delete: &SqlDelete,
     warnings: &mut Vec<String>,
 ) -> AppResult<SqlTranslation> {
-    p.expect_keyword("DELETE")?;
-    p.skip_ws();
-    if p.peek_keyword("FROM") {
-        p.consume_keyword("FROM")?;
-        p.skip_ws();
+    let tables = match &delete.from {
+        FromTable::WithFromKeyword(t) | FromTable::WithoutKeyword(t) => t,
+    };
+    if tables.len() != 1 {
+        return Err(AppError::SqlParse(
+            "DELETE must reference exactly one table".into(),
+        ));
     }
-    let collection = p.parse_identifier()?;
-    p.skip_ws();
-
-    let mut filter = serde_json::Value::Object(serde_json::Map::new());
-    if p.peek_keyword("WHERE") {
-        p.consume_keyword("WHERE")?;
-        p.skip_ws();
-        filter = expr_to_filter(&p.parse_expr()?, warnings)?;
+    let twj = &tables[0];
+    if !twj.joins.is_empty() {
+        return Err(AppError::SqlParse("DELETE ... JOIN is not supported".into()));
     }
-    p.skip_ws();
+    let collection = table_factor_name(&twj.relation)?;
 
-    if p.pos < p.src.len() {
-        return Err(AppError::SqlParse(format!(
-            "unexpected trailing input at position {}",
-            p.pos
-        )));
-    }
+    let filter = match &delete.selection {
+        Some(e) => expr_to_filter(e, warnings)?,
+        None => serde_json::Value::Object(serde_json::Map::new()),
+    };
 
-    let code = generate_write_code_variants(database, &collection, "delete", &filter, &serde_json::Value::Null, false);
+    let code = generate_write_code_variants(
+        database,
+        &collection,
+        "delete",
+        &filter,
+        &serde_json::Value::Null,
+        false,
+    );
 
     Ok(SqlTranslation {
         database: database.to_string(),
@@ -421,6 +894,8 @@ fn translate_delete(
         code,
     })
 }
+
+// ---------- Driver code generation (unchanged; operates on plain JSON) ----------
 
 fn generate_code_variants(
     database: &str,
@@ -586,863 +1061,373 @@ fn generate_insert_code_variants(
     map
 }
 
-// ---------- Parser ----------
+// ---------- Expression conversion ----------
 
-#[derive(Debug)]
-struct Stmt {
-    projection: Vec<SelectItem>,
-    distinct: bool,
-    collection: Option<String>,
-    joins: Vec<JoinClause>,
-    where_clause: Option<Expr>,
-    group_by: Vec<Expr>,
-    having: Option<Expr>,
-    order_by: Vec<OrderItem>,
-    limit: Option<i64>,
-    offset: Option<u64>,
-}
-
-#[derive(Debug, Clone)]
-enum SelectItem {
-    Star,
-    Expr { expr: Expr, alias: Option<String> },
-}
-
-#[derive(Debug, Clone)]
-struct JoinClause {
-    collection: String,
-    local_field: String,
-    foreign_field: String,
-    #[allow(dead_code)]
-    kind: JoinKind,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum JoinKind {
-    Inner,
-    Left,
-}
-
-#[derive(Debug, Clone)]
-enum Expr {
+/// Classification of a bare identifier, accounting for this dialect's
+/// two extensions: `#tag` date tags and double-quoted string literals
+/// (see the module doc comment).
+enum IdentKind {
     Field(String),
-    Number(f64),
-    Str(String),
-    Bool(bool),
-    Null,
     DateTag(String),
-    Eq(Box<Expr>, Box<Expr>),
-    Ne(Box<Expr>, Box<Expr>),
-    Lt(Box<Expr>, Box<Expr>),
-    Le(Box<Expr>, Box<Expr>),
-    Gt(Box<Expr>, Box<Expr>),
-    Ge(Box<Expr>, Box<Expr>),
-    And(Box<Expr>, Box<Expr>),
-    Or(Box<Expr>, Box<Expr>),
-    In(Box<Expr>, Vec<Expr>),
-    IsNull(Box<Expr>),
-    IsNotNull(Box<Expr>),
-    Func { name: String, args: Vec<Expr> },
+    StringLiteral(String),
 }
 
-#[derive(Debug, Clone)]
-struct OrderItem {
-    expr: Expr,
-    desc: bool,
+fn classify_ident(ident: &Ident) -> IdentKind {
+    if let Some(tag) = ident.value.strip_prefix('#') {
+        IdentKind::DateTag(tag.to_string())
+    } else if ident.quote_style == Some('"') {
+        IdentKind::StringLiteral(ident.value.clone())
+    } else {
+        IdentKind::Field(ident.value.clone())
+    }
 }
 
-struct Parser<'a> {
-    src: &'a str,
-    pos: usize,
+fn ident_chain(idents: &[Ident]) -> String {
+    idents
+        .iter()
+        .map(|i| i.value.as_str())
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
-impl<'a> Parser<'a> {
-    fn new(src: &'a str) -> Self {
-        Self { src, pos: 0 }
+/// `Some(dotted field path)` when `expr` is a bare (possibly
+/// dotted/nested) field reference.
+fn field_name(e: &SqlExpr) -> Option<String> {
+    match e {
+        SqlExpr::Identifier(ident) => match classify_ident(ident) {
+            IdentKind::Field(f) => Some(f),
+            _ => None,
+        },
+        SqlExpr::CompoundIdentifier(idents) => Some(ident_chain(idents)),
+        SqlExpr::Nested(inner) => field_name(inner),
+        _ => None,
     }
+}
 
-    fn parse_select(&mut self) -> AppResult<Stmt> {
-        self.skip_ws();
-        self.expect_keyword("SELECT")?;
-        self.skip_ws();
-        let distinct = if self.peek_keyword("DISTINCT") {
-            self.consume_keyword("DISTINCT")?;
-            self.skip_ws();
-            true
-        } else {
-            false
-        };
-        let projection = self.parse_projection_list()?;
-        self.skip_ws();
-        self.expect_keyword("FROM")?;
-        self.skip_ws();
-        let collection = Some(self.parse_identifier()?);
-        self.skip_ws();
-        // Optional alias: an identifier that is not a known SQL keyword.
-        if self.pos < self.src.len()
-            && !self.peek_keyword("WHERE")
-            && !self.peek_keyword("GROUP")
-            && !self.peek_keyword("HAVING")
-            && !self.peek_keyword("ORDER")
-            && !self.peek_keyword("LIMIT")
-            && !self.peek_keyword("OFFSET")
-            && !self.peek_keyword("JOIN")
-            && !self.peek_keyword("INNER")
-            && !self.peek_keyword("LEFT")
-            && self
-                .peek_char()
-                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        {
-            let _ = self.parse_identifier();
-            self.skip_ws();
+/// `true` when `expr` is a scalar literal (number, string, bool, null,
+/// or a date tag that resolves to a concrete value).
+fn is_literal(e: &SqlExpr) -> bool {
+    match e {
+        SqlExpr::Value(_) => true,
+        SqlExpr::Identifier(ident) => {
+            matches!(classify_ident(ident), IdentKind::DateTag(_) | IdentKind::StringLiteral(_))
         }
-
-        let mut joins = Vec::new();
-        while self.peek_keyword("JOIN") || self.peek_keyword("INNER") || self.peek_keyword("LEFT") {
-            joins.push(self.parse_join()?);
-            self.skip_ws();
-        }
-
-        let where_clause = if self.peek_keyword("WHERE") {
-            self.consume_keyword("WHERE")?;
-            self.skip_ws();
-            Some(self.parse_expr()?)
-        } else {
-            None
-        };
-        self.skip_ws();
-
-        let group_by = if self.peek_keyword("GROUP") {
-            self.consume_keyword("GROUP")?;
-            self.skip_ws();
-            self.expect_keyword("BY")?;
-            self.skip_ws();
-            self.parse_expr_list()?
-        } else {
-            Vec::new()
-        };
-        self.skip_ws();
-
-        let having = if self.peek_keyword("HAVING") {
-            self.consume_keyword("HAVING")?;
-            self.skip_ws();
-            Some(self.parse_expr()?)
-        } else {
-            None
-        };
-        self.skip_ws();
-
-        let order_by = if self.peek_keyword("ORDER") {
-            self.consume_keyword("ORDER")?;
-            self.skip_ws();
-            self.expect_keyword("BY")?;
-            self.skip_ws();
-            self.parse_order_list()?
-        } else {
-            Vec::new()
-        };
-        self.skip_ws();
-
-        let limit = if self.peek_keyword("LIMIT") {
-            self.consume_keyword("LIMIT")?;
-            self.skip_ws();
-            let n = self.parse_number()? as i64;
-            Some(n)
-        } else {
-            None
-        };
-        self.skip_ws();
-
-        let offset = if self.peek_keyword("OFFSET") {
-            self.consume_keyword("OFFSET")?;
-            self.skip_ws();
-            Some(self.parse_number()? as u64)
-        } else {
-            None
-        };
-        self.skip_ws();
-
-        if self.pos < self.src.len() {
-            return Err(AppError::SqlParse(format!(
-                "unexpected trailing input at position {}",
-                self.pos
-            )));
-        }
-
-        Ok(Stmt {
-            projection,
-            distinct,
-            collection,
-            joins,
-            where_clause,
-            group_by,
-            having,
-            order_by,
-            limit,
-            offset,
-        })
+        SqlExpr::UnaryOp {
+            op: UnaryOperator::Minus | UnaryOperator::Plus,
+            expr,
+        } => is_literal(expr),
+        SqlExpr::Nested(inner) => is_literal(inner),
+        _ => false,
     }
+}
 
-    fn parse_projection_list(&mut self) -> AppResult<Vec<SelectItem>> {
-        let mut items = Vec::new();
-        loop {
-            self.skip_ws();
-            if self.peek_char() == Some('*') {
-                self.pos += 1;
-                items.push(SelectItem::Star);
-            } else {
-                let expr = self.parse_expr()?;
-                let alias = if self.peek_keyword("AS") {
-                    self.consume_keyword("AS")?;
-                    self.skip_ws();
-                    Some(self.parse_identifier()?)
-                } else {
-                    None
-                };
-                items.push(SelectItem::Expr { expr, alias });
-            }
-            self.skip_ws();
-            if self.peek_char() == Some(',') {
-                self.pos += 1;
-                continue;
-            }
-            break;
-        }
-        Ok(items)
-    }
-
-    /// Parse a raw JSON value (object or array) by consuming balanced
-    /// braces/brackets, then delegating to `serde_json::from_str`.
-    fn parse_json_value(&mut self) -> AppResult<serde_json::Value> {
-        self.skip_ws();
-        let start = self.pos;
-        let open = match self.peek_char() {
-            Some('{') => '{',
-            Some('[') => '[',
-            other => {
-                return Err(AppError::SqlParse(format!(
-                    "expected JSON object or array, found {:?} at position {}",
-                    other, self.pos
-                )));
-            }
-        };
-        let close = match open {
-            '{' => '}',
-            '[' => ']',
-            _ => unreachable!(),
-        };
-        let mut depth = 1;
-        let mut in_string = false;
-        let mut escape = false;
-        self.pos += 1;
-        while self.pos < self.src.len() {
-            let c = self.src[self.pos..].chars().next().unwrap();
-            if in_string {
-                if escape {
-                    escape = false;
-                } else if c == '\\' {
-                    escape = true;
-                } else if c == '"' {
-                    in_string = false;
-                }
-            } else {
-                match c {
-                    '"' => in_string = true,
-                    _ if c == open => depth += 1,
-                    _ if c == close => {
-                        depth -= 1;
-                        if depth == 0 {
-                            self.pos += 1;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            self.pos += c.len_utf8();
-        }
-        if depth != 0 {
-            return Err(AppError::SqlParse("unterminated JSON value".into()));
-        }
-        let json_str = &self.src[start..self.pos];
-        serde_json::from_str(json_str)
-            .map_err(|e| AppError::SqlParse(format!("invalid JSON value: {e}")))
-    }
-
-    fn parse_join(&mut self) -> AppResult<JoinClause> {
-        let kind = if self.peek_keyword("INNER") {
-            self.consume_keyword("INNER")?;
-            self.skip_ws();
-            JoinKind::Inner
-        } else if self.peek_keyword("LEFT") {
-            self.consume_keyword("LEFT")?;
-            self.skip_ws();
-            JoinKind::Left
-        } else {
-            JoinKind::Inner
-        };
-        self.expect_keyword("JOIN")?;
-        self.skip_ws();
-        let collection = self.parse_identifier()?;
-        self.skip_ws();
-        // Optional alias
-        if self.pos < self.src.len()
-            && !self.peek_keyword("ON")
-            && self
-                .peek_char()
-                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        {
-            let _ = self.parse_identifier();
-            self.skip_ws();
-        }
-        self.expect_keyword("ON")?;
-        self.skip_ws();
-        // Expect a.col = b.col
-        let _left = self.parse_identifier()?;
-        self.expect_char('.')?;
-        let lfield = self.parse_identifier()?;
-        self.skip_ws();
-        self.expect_char('=')?;
-        self.skip_ws();
-        let _right = self.parse_identifier()?;
-        self.expect_char('.')?;
-        let rfield = self.parse_identifier()?;
-        let _ = kind;
-        Ok(JoinClause {
-            collection,
-            local_field: lfield,
-            foreign_field: rfield,
-            kind,
-        })
-    }
-
-    fn parse_order_list(&mut self) -> AppResult<Vec<OrderItem>> {
-        let mut items = Vec::new();
-        loop {
-            let expr = self.parse_expr()?;
-            self.skip_ws();
-            let desc = if self.peek_keyword("DESC") {
-                self.consume_keyword("DESC")?;
-                true
-            } else if self.peek_keyword("ASC") {
-                self.consume_keyword("ASC")?;
-                false
-            } else {
-                false
-            };
-            items.push(OrderItem { expr, desc });
-            self.skip_ws();
-            if self.peek_char() == Some(',') {
-                self.pos += 1;
-                continue;
-            }
-            break;
-        }
-        Ok(items)
-    }
-
-    fn parse_expr_list(&mut self) -> AppResult<Vec<Expr>> {
-        let mut items = Vec::new();
-        loop {
-            items.push(self.parse_expr()?);
-            self.skip_ws();
-            if self.peek_char() == Some(',') {
-                self.pos += 1;
-                self.skip_ws();
-                continue;
-            }
-            break;
-        }
-        Ok(items)
-    }
-
-    fn parse_expr(&mut self) -> AppResult<Expr> {
-        self.parse_or()
-    }
-
-    fn parse_or(&mut self) -> AppResult<Expr> {
-        let mut left = self.parse_and()?;
-        loop {
-            self.skip_ws();
-            if self.peek_keyword("OR") {
-                self.consume_keyword("OR")?;
-                let right = self.parse_and()?;
-                left = Expr::Or(Box::new(left), Box::new(right));
-            } else {
-                break;
-            }
-        }
-        Ok(left)
-    }
-
-    fn parse_and(&mut self) -> AppResult<Expr> {
-        let mut left = self.parse_cmp()?;
-        loop {
-            self.skip_ws();
-            if self.peek_keyword("AND") {
-                self.consume_keyword("AND")?;
-                let right = self.parse_cmp()?;
-                left = Expr::And(Box::new(left), Box::new(right));
-            } else {
-                break;
-            }
-        }
-        Ok(left)
-    }
-
-    fn parse_cmp(&mut self) -> AppResult<Expr> {
-        let left = self.parse_primary()?;
-        self.skip_ws();
-        let op_char = self.peek_char();
-        let op = match op_char {
-            Some('=') => {
-                self.pos += 1;
-                "="
-            }
-            Some('<') => {
-                self.pos += 1;
-                match self.peek_char() {
-                    Some('=') => {
-                        self.pos += 1;
-                        "<="
-                    }
-                    Some('>') => {
-                        self.pos += 1;
-                        "<>"
-                    }
-                    _ => "<",
-                }
-            }
-            Some('>') => {
-                self.pos += 1;
-                match self.peek_char() {
-                    Some('=') => {
-                        self.pos += 1;
-                        ">="
-                    }
-                    _ => ">",
-                }
-            }
-            Some('!') => {
-                self.pos += 1;
-                if self.peek_char() == Some('=') {
-                    self.pos += 1;
-                    "!="
-                } else {
-                    return Err(AppError::SqlParse(format!(
-                        "expected `!=` after `!` at position {}",
-                        self.pos
-                    )));
-                }
-            }
-            _ => return Ok(left),
-        };
-        self.skip_ws();
-        let right = self.parse_primary()?;
-        Ok(match op {
-            "=" => Expr::Eq(Box::new(left), Box::new(right)),
-            "<" => Expr::Lt(Box::new(left), Box::new(right)),
-            "<=" => Expr::Le(Box::new(left), Box::new(right)),
-            ">" => Expr::Gt(Box::new(left), Box::new(right)),
-            ">=" => Expr::Ge(Box::new(left), Box::new(right)),
-            _ => Expr::Ne(Box::new(left), Box::new(right)),
-        })
-    }
-
-    fn parse_primary(&mut self) -> AppResult<Expr> {
-        self.skip_ws();
-        let c = self.peek_char();
-        match c {
-            Some('(') => {
-                self.pos += 1;
-                // Could be a parenthesized expression OR a subquery OR a *
-                // special-case like COUNT(*).
-                if self.peek_char() == Some('*') {
-                    self.pos += 1;
-                    self.expect_char(')')?;
-                    return Ok(Expr::Func {
-                        name: "COUNT".into(),
-                        args: vec![Expr::Field("*".into())],
-                    });
-                }
-                let expr = self.parse_expr()?;
-                self.skip_ws();
-                self.expect_char(')')?;
-                Ok(expr)
-            }
-            Some('\'') => {
-                let s = self.parse_string()?;
-                Ok(Expr::Str(s))
-            }
-            Some('"') => {
-                let s = self.parse_string()?;
-                Ok(Expr::Str(s))
-            }
-            Some(ch) if ch.is_ascii_digit() || (ch == '-' || ch == '+') => {
-                let n = self.parse_number()?;
-                Ok(Expr::Number(n))
-            }
-            Some('#') => {
-                self.pos += 1;
-                let tag = self.parse_identifier()?;
-                Ok(Expr::DateTag(tag))
-            }
-            Some(ch) if ch.is_ascii_alphabetic() || ch == '_' => {
-                let ident = self.parse_identifier()?;
-                self.skip_ws();
-                if self.peek_char() == Some('(') {
-                    self.pos += 1;
-                    let mut args = Vec::new();
-                    if self.peek_char() == Some('*') {
-                        self.pos += 1;
-                        args.push(Expr::Field("*".into()));
-                    } else if self.peek_char() != Some(')') {
-                        loop {
-                            args.push(self.parse_expr()?);
-                            self.skip_ws();
-                            if self.peek_char() == Some(',') {
-                                self.pos += 1;
-                                self.skip_ws();
-                                continue;
-                            }
-                            break;
-                        }
-                    }
-                    self.expect_char(')')?;
-                    Ok(Expr::Func {
-                        name: ident.to_uppercase(),
-                        args,
-                    })
-                } else if ident.eq_ignore_ascii_case("NULL") {
-                    Ok(Expr::Null)
-                } else if ident.eq_ignore_ascii_case("TRUE") {
-                    Ok(Expr::Bool(true))
-                } else if ident.eq_ignore_ascii_case("FALSE") {
-                    Ok(Expr::Bool(false))
-                } else {
-                    // May be a column name possibly followed by IS NULL / IS NOT NULL / IN
-                    let mut field = ident;
-                    // Optional qualifier
-                    if self.peek_char() == Some('.') {
-                        self.pos += 1;
-                        let next = self.parse_identifier()?;
-                        field = format!("{field}.{next}");
-                    }
-                    self.skip_ws();
-                    if self.peek_keyword("IS") {
-                        self.consume_keyword("IS")?;
-                        self.skip_ws();
-                        if self.peek_keyword("NOT") {
-                            self.consume_keyword("NOT")?;
-                            self.skip_ws();
-                            self.expect_keyword("NULL")?;
-                            return Ok(Expr::IsNotNull(Box::new(Expr::Field(field))));
-                        }
-                        self.expect_keyword("NULL")?;
-                        return Ok(Expr::IsNull(Box::new(Expr::Field(field))));
-                    }
-                    if self.peek_keyword("IN") {
-                        self.consume_keyword("IN")?;
-                        self.skip_ws();
-                        self.expect_char('(')?;
-                        let mut values = Vec::new();
-                        if self.peek_char() != Some(')') {
-                            loop {
-                                values.push(self.parse_expr()?);
-                                self.skip_ws();
-                                if self.peek_char() == Some(',') {
-                                    self.pos += 1;
-                                    self.skip_ws();
-                                    continue;
-                                }
-                                break;
-                            }
-                        }
-                        self.expect_char(')')?;
-                        return Ok(Expr::In(Box::new(Expr::Field(field)), values));
-                    }
-                    Ok(Expr::Field(field))
-                }
-            }
-            _ => Err(AppError::SqlParse(format!(
-                "unexpected character `{}` at position {}",
-                c.unwrap_or('?'),
-                self.pos
-            ))),
-        }
-    }
-
-    fn parse_string(&mut self) -> AppResult<String> {
-        let quote = self.src[self.pos..].chars().next().unwrap();
-        self.pos += 1;
-        let start = self.pos;
-        while self.pos < self.src.len() {
-            let c = self.src[self.pos..].chars().next().unwrap();
-            if c == quote {
-                let s = self.src[start..self.pos].to_string();
-                self.pos += 1;
-                return Ok(s);
-            }
-            self.pos += 1;
-        }
-        Err(AppError::SqlParse("unterminated string literal".into()))
-    }
-
-    fn parse_number(&mut self) -> AppResult<f64> {
-        self.skip_ws();
-        let start = self.pos;
-        if matches!(self.peek_char(), Some('+') | Some('-')) {
-            self.pos += 1;
-        }
-        while let Some(c) = self.peek_char() {
-            if c.is_ascii_digit() || c == '.' {
-                self.pos += 1;
-            } else {
-                break;
-            }
-        }
-        if start == self.pos {
-            return Err(AppError::SqlParse("expected a number".into()));
-        }
-        self.src[start..self.pos]
+fn value_to_json(value: &SqlValue, warnings: &mut Vec<String>) -> AppResult<serde_json::Value> {
+    Ok(match value {
+        SqlValue::Number(s, _) => s
             .parse::<f64>()
-            .map_err(|e| AppError::SqlParse(format!("invalid number: {e}")))
-    }
-
-    fn parse_identifier(&mut self) -> AppResult<String> {
-        let start = self.pos;
-        while let Some(c) = self.peek_char() {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                self.pos += 1;
-            } else {
-                break;
-            }
-        }
-        if self.pos == start {
-            return Err(AppError::SqlParse(format!(
-                "expected identifier at position {}",
-                self.pos
-            )));
-        }
-        Ok(self.src[start..self.pos].to_string())
-    }
-
-    fn skip_ws(&mut self) {
-        while let Some(c) = self.peek_char() {
-            if c.is_whitespace() {
-                self.pos += 1;
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn peek_char(&self) -> Option<char> {
-        self.src[self.pos..].chars().next()
-    }
-
-    fn expect_char(&mut self, ch: char) -> AppResult<()> {
-        match self.peek_char() {
-            Some(c) if c == ch => {
-                self.pos += 1;
-                Ok(())
-            }
-            Some(c) => Err(AppError::SqlParse(format!(
-                "expected `{ch}` but found `{c}` at position {}",
-                self.pos
-            ))),
-            None => Err(AppError::SqlParse(format!(
-                "expected `{ch}` but reached end of input"
-            ))),
-        }
-    }
-
-    fn peek_keyword(&self, kw: &str) -> bool {
-        let rest = &self.src[self.pos..];
-        if rest.len() < kw.len() {
-            return false;
-        }
-        if !rest[..kw.len()].eq_ignore_ascii_case(kw) {
-            return false;
-        }
-        // Must be a word boundary
-        !matches!(rest[kw.len()..].chars().next(), Some(c) if c.is_ascii_alphanumeric() || c == '_')
-    }
-
-    fn consume_keyword(&mut self, kw: &str) -> AppResult<()> {
-        if self.peek_keyword(kw) {
-            self.pos += kw.len();
-            Ok(())
-        } else {
-            Err(AppError::SqlParse(format!(
-                "expected keyword `{kw}` at position {}",
-                self.pos
-            )))
-        }
-    }
-
-    fn expect_keyword(&mut self, kw: &str) -> AppResult<()> {
-        if self.peek_keyword(kw) {
-            self.pos += kw.len();
-            Ok(())
-        } else {
-            Err(AppError::SqlParse(format!(
-                "expected keyword `{kw}` at position {}",
-                self.pos
-            )))
-        }
-    }
-}
-
-fn expr_to_agg_expr(expr: &Expr, warnings: &mut Vec<String>) -> AppResult<serde_json::Value> {
-    Ok(match expr {
-        Expr::Field(name) => serde_json::json!(format!("${name}")),
-        Expr::Number(n) => serde_json::json!(n),
-        Expr::Str(s) => serde_json::json!(s),
-        Expr::Bool(b) => serde_json::json!(b),
-        Expr::Null => serde_json::Value::Null,
-        Expr::DateTag(tag) => {
-            if let Some(dt) = resolve_date_tag(tag) {
-                date_to_extjson(dt)
-            } else {
-                warnings.push(format!("unknown date tag #{tag}"));
-                serde_json::Value::String(format!("#{tag}"))
-            }
-        }
-        Expr::Eq(l, r) => {
-            serde_json::json!({ "$eq": [expr_to_agg_expr(l, warnings)?, expr_to_agg_expr(r, warnings)?] })
-        }
-        Expr::Ne(l, r) => {
-            serde_json::json!({ "$ne": [expr_to_agg_expr(l, warnings)?, expr_to_agg_expr(r, warnings)?] })
-        }
-        Expr::Lt(l, r) => {
-            serde_json::json!({ "$lt": [expr_to_agg_expr(l, warnings)?, expr_to_agg_expr(r, warnings)?] })
-        }
-        Expr::Le(l, r) => {
-            serde_json::json!({ "$lte": [expr_to_agg_expr(l, warnings)?, expr_to_agg_expr(r, warnings)?] })
-        }
-        Expr::Gt(l, r) => {
-            serde_json::json!({ "$gt": [expr_to_agg_expr(l, warnings)?, expr_to_agg_expr(r, warnings)?] })
-        }
-        Expr::Ge(l, r) => {
-            serde_json::json!({ "$gte": [expr_to_agg_expr(l, warnings)?, expr_to_agg_expr(r, warnings)?] })
-        }
-        Expr::And(l, r) => {
-            serde_json::json!({ "$and": [expr_to_agg_expr(l, warnings)?, expr_to_agg_expr(r, warnings)?] })
-        }
-        Expr::Or(l, r) => {
-            serde_json::json!({ "$or": [expr_to_agg_expr(l, warnings)?, expr_to_agg_expr(r, warnings)?] })
-        }
-        Expr::In(l, values) => {
-            let arr: Vec<_> = values
-                .iter()
-                .map(|v| expr_to_agg_expr(v, warnings))
-                .collect::<AppResult<Vec<_>>>()?;
-            serde_json::json!({ "$in": [expr_to_agg_expr(l, warnings)?, serde_json::Value::Array(arr)] })
-        }
-        Expr::IsNull(inner) => {
-            serde_json::json!({ "$eq": [expr_to_agg_expr(inner, warnings)?, serde_json::Value::Null] })
-        }
-        Expr::IsNotNull(inner) => {
-            serde_json::json!({ "$ne": [expr_to_agg_expr(inner, warnings)?, serde_json::Value::Null] })
-        }
-        Expr::Func { name, args } => {
-            let upper = name.to_uppercase();
-            match upper.as_str() {
-                "COUNT" => {
-                    let _ = args;
-                    serde_json::json!({ "$sum": 1 })
-                }
-                "SUM" | "AVG" | "MIN" | "MAX" => {
-                    let inner = args.first().ok_or_else(|| {
-                        AppError::SqlParse(format!("{upper}() needs an argument"))
-                    })?;
-                    let op = match upper.as_str() {
-                        "SUM" => "$sum",
-                        "AVG" => "$avg",
-                        "MIN" => "$min",
-                        _ => "$max",
-                    };
-                    serde_json::json!({ op: expr_to_agg_expr(inner, warnings)? })
-                }
-                "REGEX" | "REGEXMATCH" => {
-                    // REGEX(input, pattern[, options])
-                    if args.len() < 2 {
-                        return Err(AppError::SqlParse(
-                            "REGEX requires at least 2 arguments: input, pattern".into(),
-                        ));
-                    }
-                    let input = expr_to_agg_expr(&args[0], warnings)?;
-                    let pattern = expr_to_agg_expr(&args[1], warnings)?;
-                    let mut obj = serde_json::Map::new();
-                    obj.insert("input".into(), input);
-                    obj.insert("regex".into(), pattern);
-                    if let Some(opts) = args.get(2) {
-                        obj.insert("options".into(), expr_to_agg_expr(opts, warnings)?);
-                    }
-                    serde_json::json!({ "$regexMatch": serde_json::Value::Object(obj) })
-                }
-                _ => {
-                    warnings.push(format!("unhandled function {upper}"));
-                    serde_json::Value::Null
-                }
-            }
+            .map(|n| serde_json::json!(n))
+            .map_err(|e| AppError::SqlParse(format!("invalid number `{s}`: {e}")))?,
+        SqlValue::SingleQuotedString(s)
+        | SqlValue::DoubleQuotedString(s)
+        | SqlValue::EscapedStringLiteral(s)
+        | SqlValue::NationalStringLiteral(s) => serde_json::json!(s),
+        SqlValue::Boolean(b) => serde_json::json!(b),
+        SqlValue::Null => serde_json::Value::Null,
+        other => {
+            warnings.push(format!("unsupported literal value, treated as null: {other}"));
+            serde_json::Value::Null
         }
     })
 }
 
-fn build_project_stage(
-    projection: &[SelectItem],
-    warnings: &mut Vec<String>,
-) -> AppResult<serde_json::Value> {
-    let mut out = serde_json::Map::new();
-    for item in projection {
-        match item {
-            SelectItem::Star => {}
-            SelectItem::Expr { expr, alias } => {
-                let name = match (alias, expr) {
-                    (Some(a), _) => a.clone(),
-                    (None, Expr::Field(f)) => f.clone(),
-                    _ => "expr".to_string(),
-                };
-                let value = expr_to_agg_expr(expr, warnings)?;
-                out.insert(name, value);
+/// Translate a SQL `LIKE` pattern (`%` = any run of characters, `_` =
+/// any single character, `\` escapes the next character) into an
+/// anchored regular expression.
+fn like_pattern_to_regex(pattern: &str) -> String {
+    let mut out = String::from("^");
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '%' => out.push_str(".*"),
+            '_' => out.push('.'),
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    out.push_str(&regex::escape(&next.to_string()));
+                } else {
+                    out.push_str("\\\\");
+                }
             }
+            other => out.push_str(&regex::escape(&other.to_string())),
         }
     }
-    Ok(serde_json::Value::Object(out))
+    out.push('$');
+    out
 }
 
-/// Build the `_id` key for a DISTINCT group. `SELECT *` is rejected
-/// (DISTINCT with no columns is meaningless). Each projected column
-/// becomes a sub-field keyed by its column name.
-fn build_distinct_group_key(
-    projection: &[SelectItem],
-    #[allow(clippy::ptr_arg)] _warnings: &mut Vec<String>,
-) -> AppResult<serde_json::Value> {
-    let mut out = serde_json::Map::new();
-    let mut has_star = false;
-    let mut count = 0;
-    for item in projection {
-        match item {
-            SelectItem::Star => has_star = true,
-            SelectItem::Expr { expr, alias } => {
-                let name = match (alias, expr) {
-                    (Some(a), _) => a.clone(),
-                    (None, Expr::Field(f)) => f.clone(),
-                    _ => "expr".to_string(),
-                };
-                out.insert(name.clone(), format!("${}", name).into());
-                count += 1;
+fn like_pattern_string(pattern: &SqlExpr, warnings: &mut Vec<String>) -> String {
+    match pattern {
+        SqlExpr::Value(vws) => match &vws.value {
+            SqlValue::SingleQuotedString(s) | SqlValue::DoubleQuotedString(s) => s.clone(),
+            _ => {
+                warnings.push("LIKE pattern must be a string literal; treated as empty".into());
+                String::new()
             }
+        },
+        SqlExpr::Identifier(ident) if ident.quote_style == Some('"') => ident.value.clone(),
+        _ => {
+            warnings.push("LIKE pattern must be a string literal; treated as empty".into());
+            String::new()
         }
     }
-    if has_star || count == 0 {
-        return Err(AppError::SqlParse(
-            "SELECT DISTINCT requires at least one named column".into(),
-        ));
+}
+
+fn like_to_agg_expr(
+    inner: &SqlExpr,
+    pattern: &SqlExpr,
+    case_insensitive: bool,
+    negated: bool,
+    warnings: &mut Vec<String>,
+) -> AppResult<serde_json::Value> {
+    let input = expr_to_agg_expr(inner, warnings)?;
+    let regex_pattern = like_pattern_to_regex(&like_pattern_string(pattern, warnings));
+    let mut obj = serde_json::Map::new();
+    obj.insert("input".into(), input);
+    obj.insert("regex".into(), serde_json::json!(regex_pattern));
+    if case_insensitive {
+        obj.insert("options".into(), serde_json::json!("i"));
     }
-    Ok(serde_json::Value::Object(out))
+    let m = serde_json::json!({ "$regexMatch": serde_json::Value::Object(obj) });
+    Ok(if negated {
+        serde_json::json!({ "$not": [m] })
+    } else {
+        m
+    })
+}
+
+fn function_args(func: &Function) -> AppResult<Vec<SqlExpr>> {
+    match &func.args {
+        FunctionArguments::None => Ok(vec![]),
+        FunctionArguments::Subquery(_) => Err(AppError::SqlParse(
+            "subqueries as function arguments are not supported".into(),
+        )),
+        FunctionArguments::List(list) => {
+            let mut out = Vec::new();
+            for arg in &list.args {
+                match arg {
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(e))
+                    | FunctionArg::Named {
+                        arg: FunctionArgExpr::Expr(e),
+                        ..
+                    }
+                    | FunctionArg::ExprNamed {
+                        arg: FunctionArgExpr::Expr(e),
+                        ..
+                    } => out.push(e.clone()),
+                    // `COUNT(*)` and friends: the wildcard itself carries
+                    // no data these functions need.
+                    _ => {}
+                }
+            }
+            Ok(out)
+        }
+    }
+}
+
+fn function_to_agg_expr(func: &Function, warnings: &mut Vec<String>) -> AppResult<serde_json::Value> {
+    let upper = func.name.to_string().to_uppercase();
+    let args = function_args(func)?;
+    Ok(match upper.as_str() {
+        "COUNT" => serde_json::json!({ "$sum": 1 }),
+        "SUM" | "AVG" | "MIN" | "MAX" => {
+            let inner = args
+                .first()
+                .ok_or_else(|| AppError::SqlParse(format!("{upper}() needs an argument")))?;
+            let op = match upper.as_str() {
+                "SUM" => "$sum",
+                "AVG" => "$avg",
+                "MIN" => "$min",
+                _ => "$max",
+            };
+            serde_json::json!({ op: expr_to_agg_expr(inner, warnings)? })
+        }
+        "REGEX" | "REGEXMATCH" => {
+            // REGEX(input, pattern[, options])
+            if args.len() < 2 {
+                return Err(AppError::SqlParse(
+                    "REGEX requires at least 2 arguments: input, pattern".into(),
+                ));
+            }
+            let input = expr_to_agg_expr(&args[0], warnings)?;
+            let pattern = expr_to_agg_expr(&args[1], warnings)?;
+            let mut obj = serde_json::Map::new();
+            obj.insert("input".into(), input);
+            obj.insert("regex".into(), pattern);
+            if let Some(opts) = args.get(2) {
+                obj.insert("options".into(), expr_to_agg_expr(opts, warnings)?);
+            }
+            serde_json::json!({ "$regexMatch": serde_json::Value::Object(obj) })
+        }
+        "COALESCE" => {
+            let vals = args
+                .iter()
+                .map(|a| expr_to_agg_expr(a, warnings))
+                .collect::<AppResult<Vec<_>>>()?;
+            serde_json::json!({ "$ifNull": vals })
+        }
+        "LOWER" | "UPPER" | "ABS" | "CEIL" | "FLOOR" | "SQRT" | "TRIM" => {
+            let inner = args
+                .first()
+                .ok_or_else(|| AppError::SqlParse(format!("{upper}() needs an argument")))?;
+            let op = match upper.as_str() {
+                "LOWER" => "$toLower",
+                "UPPER" => "$toUpper",
+                "ABS" => "$abs",
+                "CEIL" => "$ceil",
+                "FLOOR" => "$floor",
+                "SQRT" => "$sqrt",
+                _ => "$trim",
+            };
+            if op == "$trim" {
+                serde_json::json!({ op: { "input": expr_to_agg_expr(inner, warnings)? } })
+            } else {
+                serde_json::json!({ op: expr_to_agg_expr(inner, warnings)? })
+            }
+        }
+        _ => {
+            warnings.push(format!("unhandled function {upper}"));
+            serde_json::Value::Null
+        }
+    })
+}
+
+fn binary_op_to_agg_expr(
+    left: &SqlExpr,
+    op: &BinaryOperator,
+    right: &SqlExpr,
+    warnings: &mut Vec<String>,
+) -> AppResult<serde_json::Value> {
+    let mongo_op = match op {
+        BinaryOperator::Eq | BinaryOperator::Spaceship => "$eq",
+        BinaryOperator::NotEq => "$ne",
+        BinaryOperator::Lt => "$lt",
+        BinaryOperator::LtEq => "$lte",
+        BinaryOperator::Gt => "$gt",
+        BinaryOperator::GtEq => "$gte",
+        BinaryOperator::And => "$and",
+        BinaryOperator::Or => "$or",
+        BinaryOperator::Plus => "$add",
+        BinaryOperator::Minus => "$subtract",
+        BinaryOperator::Multiply => "$multiply",
+        BinaryOperator::Divide => "$divide",
+        BinaryOperator::Modulo => "$mod",
+        other => {
+            warnings.push(format!("unsupported operator `{other}`, treated as `=`"));
+            "$eq"
+        }
+    };
+    Ok(
+        serde_json::json!({ mongo_op: [expr_to_agg_expr(left, warnings)?, expr_to_agg_expr(right, warnings)?] }),
+    )
+}
+
+/// Convert any expression into MongoDB **aggregation expression**
+/// shape (`"$field"`, `{$op: [...]}`, literals as-is). Used for
+/// projections, `SET` values, `HAVING`, and as the fallback for any
+/// WHERE-clause shape that [`expr_to_filter`] can't express as a plain
+/// filter document.
+fn expr_to_agg_expr(expr: &SqlExpr, warnings: &mut Vec<String>) -> AppResult<serde_json::Value> {
+    Ok(match expr {
+        SqlExpr::Identifier(ident) => match classify_ident(ident) {
+            IdentKind::Field(f) => serde_json::json!(format!("${f}")),
+            IdentKind::StringLiteral(s) => serde_json::json!(s),
+            IdentKind::DateTag(tag) => {
+                if let Some(dt) = resolve_date_tag(&tag) {
+                    date_to_extjson(dt)
+                } else {
+                    warnings.push(format!("unknown date tag #{tag}"));
+                    serde_json::Value::String(format!("#{tag}"))
+                }
+            }
+        },
+        SqlExpr::CompoundIdentifier(idents) => serde_json::json!(format!("${}", ident_chain(idents))),
+        SqlExpr::Nested(inner) => expr_to_agg_expr(inner, warnings)?,
+        SqlExpr::Value(vws) => value_to_json(&vws.value, warnings)?,
+        SqlExpr::UnaryOp {
+            op: UnaryOperator::Minus,
+            expr: inner,
+        } => {
+            let v = expr_to_agg_expr(inner, warnings)?;
+            match v.as_f64() {
+                Some(n) => serde_json::json!(-n),
+                None => serde_json::json!({ "$multiply": [v, -1] }),
+            }
+        }
+        SqlExpr::UnaryOp {
+            op: UnaryOperator::Plus,
+            expr: inner,
+        } => expr_to_agg_expr(inner, warnings)?,
+        SqlExpr::UnaryOp {
+            op: UnaryOperator::Not,
+            expr: inner,
+        } => serde_json::json!({ "$not": [expr_to_agg_expr(inner, warnings)?] }),
+        SqlExpr::BinaryOp { left, op, right } => binary_op_to_agg_expr(left, op, right, warnings)?,
+        SqlExpr::InList {
+            expr: inner,
+            list,
+            negated,
+        } => {
+            let arr: Vec<_> = list
+                .iter()
+                .map(|v| expr_to_agg_expr(v, warnings))
+                .collect::<AppResult<Vec<_>>>()?;
+            let in_expr = serde_json::json!({ "$in": [expr_to_agg_expr(inner, warnings)?, serde_json::Value::Array(arr)] });
+            if *negated {
+                serde_json::json!({ "$not": [in_expr] })
+            } else {
+                in_expr
+            }
+        }
+        SqlExpr::IsNull(inner) => {
+            serde_json::json!({ "$eq": [expr_to_agg_expr(inner, warnings)?, serde_json::Value::Null] })
+        }
+        SqlExpr::IsNotNull(inner) => {
+            serde_json::json!({ "$ne": [expr_to_agg_expr(inner, warnings)?, serde_json::Value::Null] })
+        }
+        SqlExpr::Between {
+            expr: inner,
+            negated,
+            low,
+            high,
+        } => {
+            let e = expr_to_agg_expr(inner, warnings)?;
+            let l = expr_to_agg_expr(low, warnings)?;
+            let h = expr_to_agg_expr(high, warnings)?;
+            let between =
+                serde_json::json!({ "$and": [ { "$gte": [e.clone(), l] }, { "$lte": [e, h] } ] });
+            if *negated {
+                serde_json::json!({ "$not": [between] })
+            } else {
+                between
+            }
+        }
+        SqlExpr::Like {
+            negated,
+            expr: inner,
+            pattern,
+            ..
+        } => like_to_agg_expr(inner, pattern, false, *negated, warnings)?,
+        SqlExpr::ILike {
+            negated,
+            expr: inner,
+            pattern,
+            ..
+        } => like_to_agg_expr(inner, pattern, true, *negated, warnings)?,
+        SqlExpr::Function(func) => function_to_agg_expr(func, warnings)?,
+        other => {
+            warnings.push(format!("unsupported expression, treated as null: {other}"));
+            serde_json::Value::Null
+        }
+    })
 }
 
 /// Convert a WHERE-clause expression into a MongoDB **filter document**.
@@ -1466,59 +1451,120 @@ fn build_distinct_group_key(
 ///   fall back to `{$and: [...]}`. Sharing a key (e.g. two ranges on the
 ///   same field) is left as `$and` so neither condition is dropped.
 /// - `a OR b`              -> `{$or: [...]}` (cannot be merged).
-/// - `field IN (...)`      -> `{field: {$in: [...]}}`.
+/// - `field IN (...)`      -> `{field: {$in: [...]}}` (`$nin` when negated).
 /// - `field IS NULL`       -> `{field: null}`; `IS NOT NULL` ->
 ///   `{field: {$ne: null}}`.
-/// - Functions (`REGEX`, etc.) and any non-scalar shape fall back to
-///   `{$expr: <agg expr>}` so they remain valid inside `$match`.
-fn expr_to_filter(expr: &Expr, warnings: &mut Vec<String>) -> AppResult<serde_json::Value> {
+/// - `field BETWEEN a AND b` -> `{field: {$gte: a, $lte: b}}`.
+/// - Functions (`REGEX`, etc.), `LIKE`/`ILIKE`, and any non-scalar shape
+///   fall back to `{$expr: <agg expr>}` so they remain valid inside `$match`.
+fn expr_to_filter(expr: &SqlExpr, warnings: &mut Vec<String>) -> AppResult<serde_json::Value> {
     Ok(match expr {
-        Expr::Eq(l, r) => comparison_to_filter("$eq", l, r, warnings)?,
-        Expr::Ne(l, r) => comparison_to_filter("$ne", l, r, warnings)?,
-        Expr::Lt(l, r) => comparison_to_filter("$lt", l, r, warnings)?,
-        Expr::Le(l, r) => comparison_to_filter("$lte", l, r, warnings)?,
-        Expr::Gt(l, r) => comparison_to_filter("$gt", l, r, warnings)?,
-        Expr::Ge(l, r) => comparison_to_filter("$gte", l, r, warnings)?,
-        Expr::And(l, r) => {
-            let left = expr_to_filter(l, warnings)?;
-            let right = expr_to_filter(r, warnings)?;
-            merge_and(left, right)
+        SqlExpr::Nested(inner) => expr_to_filter(inner, warnings)?,
+        SqlExpr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } => {
+            let l = expr_to_filter(left, warnings)?;
+            let r = expr_to_filter(right, warnings)?;
+            merge_and(l, r)
         }
-        Expr::Or(l, r) => {
-            let left = expr_to_filter(l, warnings)?;
-            let right = expr_to_filter(r, warnings)?;
-            serde_json::json!({ "$or": [left, right] })
+        SqlExpr::BinaryOp {
+            left,
+            op: BinaryOperator::Or,
+            right,
+        } => {
+            let l = expr_to_filter(left, warnings)?;
+            let r = expr_to_filter(right, warnings)?;
+            serde_json::json!({ "$or": [l, r] })
         }
-        Expr::In(l, values) => {
-            let arr: Vec<_> = values
+        SqlExpr::BinaryOp { left, op, right }
+            if matches!(
+                op,
+                BinaryOperator::Eq
+                    | BinaryOperator::NotEq
+                    | BinaryOperator::Lt
+                    | BinaryOperator::LtEq
+                    | BinaryOperator::Gt
+                    | BinaryOperator::GtEq
+            ) =>
+        {
+            let mongo_op = match op {
+                BinaryOperator::Eq => "$eq",
+                BinaryOperator::NotEq => "$ne",
+                BinaryOperator::Lt => "$lt",
+                BinaryOperator::LtEq => "$lte",
+                BinaryOperator::Gt => "$gt",
+                _ => "$gte",
+            };
+            comparison_to_filter(mongo_op, left, right, warnings)?
+        }
+        SqlExpr::InList {
+            expr: inner,
+            list,
+            negated,
+        } => {
+            let arr: Vec<_> = list
                 .iter()
                 .map(|v| expr_to_agg_expr(v, warnings))
                 .collect::<AppResult<Vec<_>>>()?;
-            if let Some(field) = field_name(l) {
-                serde_json::json!({ field: { "$in": serde_json::Value::Array(arr) } })
+            if let Some(field) = field_name(inner) {
+                let op = if *negated { "$nin" } else { "$in" };
+                simple_field_filter(op, &field, serde_json::Value::Array(arr))
             } else {
-                let left = expr_to_agg_expr(l, warnings)?;
-                serde_json::json!({ "$expr": { "$in": [left, serde_json::Value::Array(arr)] } })
+                let left = expr_to_agg_expr(inner, warnings)?;
+                let in_expr =
+                    serde_json::json!({ "$in": [left, serde_json::Value::Array(arr)] });
+                let value = if *negated {
+                    serde_json::json!({ "$not": [in_expr] })
+                } else {
+                    in_expr
+                };
+                serde_json::json!({ "$expr": value })
             }
         }
-        Expr::IsNull(inner) => match field_name(inner) {
+        SqlExpr::IsNull(inner) => match field_name(inner) {
             Some(field) => serde_json::json!({ field: serde_json::Value::Null }),
             None => {
                 let inner_expr = expr_to_agg_expr(inner, warnings)?;
                 serde_json::json!({ "$expr": { "$eq": [inner_expr, serde_json::Value::Null] } })
             }
         },
-        Expr::IsNotNull(inner) => match field_name(inner) {
+        SqlExpr::IsNotNull(inner) => match field_name(inner) {
             Some(field) => serde_json::json!({ field: { "$ne": serde_json::Value::Null } }),
             None => {
                 let inner_expr = expr_to_agg_expr(inner, warnings)?;
                 serde_json::json!({ "$expr": { "$ne": [inner_expr, serde_json::Value::Null] } })
             }
         },
-        // Functions (REGEX, aggregates, ...) and bare scalars are
-        // aggregation expressions; wrap them so they are legal in $match.
-        Expr::Func { .. } | Expr::Field(_) | Expr::Number(_) | Expr::Str(_)
-        | Expr::Bool(_) | Expr::Null | Expr::DateTag(_) => {
+        SqlExpr::Between {
+            expr: inner,
+            negated,
+            low,
+            high,
+        } => match field_name(inner) {
+            Some(field) => {
+                let l = expr_to_agg_expr(low, warnings)?;
+                let h = expr_to_agg_expr(high, warnings)?;
+                if *negated {
+                    let mut lt = serde_json::Map::new();
+                    lt.insert(field.clone(), serde_json::json!({ "$lt": l }));
+                    let mut gt = serde_json::Map::new();
+                    gt.insert(field, serde_json::json!({ "$gt": h }));
+                    serde_json::json!({ "$or": [serde_json::Value::Object(lt), serde_json::Value::Object(gt)] })
+                } else {
+                    serde_json::json!({ field: { "$gte": l, "$lte": h } })
+                }
+            }
+            None => {
+                let agg = expr_to_agg_expr(expr, warnings)?;
+                serde_json::json!({ "$expr": agg })
+            }
+        },
+        // Functions (REGEX, aggregates, ...), LIKE/ILIKE, arithmetic, and
+        // bare scalars are aggregation expressions; wrap them so they are
+        // legal in $match.
+        _ => {
             let agg = expr_to_agg_expr(expr, warnings)?;
             serde_json::json!({ "$expr": agg })
         }
@@ -1529,14 +1575,14 @@ fn expr_to_filter(expr: &Expr, warnings: &mut Vec<String>) -> AppResult<serde_js
 /// for the shape rules. `op` is the MongoDB operator (`$eq`, `$gt`, ...).
 fn comparison_to_filter(
     op: &str,
-    l: &Expr,
-    r: &Expr,
+    l: &SqlExpr,
+    r: &SqlExpr,
     warnings: &mut Vec<String>,
 ) -> AppResult<serde_json::Value> {
     // field <op> literal -> {field: {$op: literal}} (or {field: literal} for $eq)
     if let (Some(field), true) = (field_name(l), is_literal(r)) {
         let lit = expr_to_agg_expr(r, warnings)?;
-        return Ok(simple_field_filter(op, field, lit));
+        return Ok(simple_field_filter(op, &field, lit));
     }
     // literal <op> field -> normalize to field <op> literal.
     if let (true, Some(field)) = (is_literal(l), field_name(r)) {
@@ -1551,7 +1597,7 @@ fn comparison_to_filter(
             "$gte" => "$lte",
             other => other,
         };
-        return Ok(simple_field_filter(swapped, field, lit));
+        return Ok(simple_field_filter(swapped, &field, lit));
     }
     // Both sides are fields, or a non-scalar expression is involved ->
     // genuine aggregation expression; wrap in $expr.
@@ -1591,50 +1637,83 @@ fn merge_and(left: serde_json::Value, right: serde_json::Value) -> serde_json::V
     serde_json::json!({ "$and": [left, right] })
 }
 
-/// `Some(name)` when `expr` is a bare field reference.
-fn field_name(e: &Expr) -> Option<&str> {
-    if let Expr::Field(name) = e {
-        Some(name)
-    } else {
-        None
-    }
+fn expr_to_i64(expr: &SqlExpr, warnings: &mut Vec<String>) -> AppResult<i64> {
+    expr_to_agg_expr(expr, warnings)?
+        .as_f64()
+        .map(|n| n as i64)
+        .ok_or_else(|| AppError::SqlParse("LIMIT must be a numeric literal".into()))
 }
 
-/// `true` when `expr` is a scalar literal (number, string, bool, null, or
-/// a date tag that resolves to a concrete value).
-fn is_literal(e: &Expr) -> bool {
-    matches!(
-        e,
-        Expr::Number(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Null | Expr::DateTag(_)
-    )
+fn expr_to_u64(expr: &SqlExpr, warnings: &mut Vec<String>) -> AppResult<u64> {
+    expr_to_agg_expr(expr, warnings)?
+        .as_f64()
+        .map(|n| n as u64)
+        .ok_or_else(|| AppError::SqlParse("OFFSET must be a numeric literal".into()))
+}
+
+fn build_project_stage(
+    projection: &[ProjItem],
+    warnings: &mut Vec<String>,
+) -> AppResult<serde_json::Value> {
+    let mut out = serde_json::Map::new();
+    for item in projection {
+        if let ProjItem::Item { expr, alias } = item {
+            let name = projection_name(expr, alias);
+            let value = expr_to_agg_expr(expr, warnings)?;
+            out.insert(name, value);
+        }
+    }
+    Ok(serde_json::Value::Object(out))
+}
+
+/// Build the `_id` key for a DISTINCT group. `SELECT *` is rejected
+/// (DISTINCT with no columns is meaningless). Each projected column
+/// becomes a sub-field keyed by its column name.
+fn build_distinct_group_key(projection: &[ProjItem]) -> AppResult<serde_json::Value> {
+    let mut out = serde_json::Map::new();
+    let mut has_star = false;
+    let mut count = 0;
+    for item in projection {
+        match item {
+            ProjItem::Star => has_star = true,
+            ProjItem::Item { expr, alias } => {
+                let name = projection_name(expr, alias);
+                out.insert(name.clone(), serde_json::json!(format!("${name}")));
+                count += 1;
+            }
+        }
+    }
+    if has_star || count == 0 {
+        return Err(AppError::SqlParse(
+            "SELECT DISTINCT requires at least one named column".into(),
+        ));
+    }
+    Ok(serde_json::Value::Object(out))
 }
 
 fn build_group_stage(
-    keys: &[Expr],
-    projection: &[SelectItem],
+    keys: &[SqlExpr],
+    projection: &[ProjItem],
     warnings: &mut Vec<String>,
 ) -> AppResult<serde_json::Value> {
     let mut group = serde_json::Map::new();
     let mut id_doc = serde_json::Map::new();
     for key in keys {
-        let name = match key {
-            Expr::Field(f) => f.clone(),
-            _ => "_key".to_string(),
-        };
+        let name = field_name(key).unwrap_or_else(|| "_key".to_string());
         id_doc.insert(name.clone(), serde_json::json!(format!("${name}")));
     }
     group.insert("_id".into(), serde_json::Value::Object(id_doc));
     for item in projection {
-        if let SelectItem::Expr { expr, alias } = item {
-            let key_name = match (alias, expr) {
+        if let ProjItem::Item { expr, alias } = item {
+            let key_name = match (alias, field_name(expr)) {
                 (Some(a), _) => a.clone(),
-                (None, Expr::Field(f)) => f.clone(),
-                _ => continue,
+                (None, Some(f)) => f,
+                (None, None) => continue,
             };
             if is_grouping_key(expr, keys) {
                 continue;
             }
-            if let Expr::Func { .. } = expr {
+            if let SqlExpr::Function(_) = expr {
                 let value = expr_to_agg_expr(expr, warnings)?;
                 group.insert(key_name, value);
             } else {
@@ -1647,34 +1726,20 @@ fn build_group_stage(
     Ok(serde_json::Value::Object(group))
 }
 
-fn is_grouping_key(expr: &Expr, keys: &[Expr]) -> bool {
-    keys.iter()
-        .any(|k| matches!((k, expr), (Expr::Field(name), Expr::Field(other)) if other == name))
+fn is_grouping_key(expr: &SqlExpr, keys: &[SqlExpr]) -> bool {
+    match field_name(expr) {
+        Some(name) => keys.iter().any(|k| field_name(k).as_deref() == Some(name.as_str())),
+        None => false,
+    }
 }
 
 fn build_sort_stage(order: &[OrderItem]) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     for item in order {
-        let name = match &item.expr {
-            Expr::Field(f) => f.clone(),
-            _ => "_id".to_string(),
-        };
+        let name = field_name(&item.expr).unwrap_or_else(|| "_id".to_string());
         map.insert(name, serde_json::json!(if item.desc { -1 } else { 1 }));
     }
     serde_json::Value::Object(map)
-}
-
-#[allow(clippy::ptr_arg)]
-fn join_to_lookup(join: &JoinClause, _warnings: &mut Vec<String>) -> AppResult<serde_json::Value> {
-    let as_name = format!("{}_joined", join.collection);
-    Ok(serde_json::json!({
-        "$lookup": {
-            "from": join.collection,
-            "localField": join.local_field,
-            "foreignField": join.foreign_field,
-            "as": as_name,
-        }
-    }))
 }
 
 #[cfg(test)]
@@ -1711,6 +1776,46 @@ mod tests {
         assert_eq!(lookup["$lookup"]["from"], "orders");
         assert_eq!(lookup["$lookup"]["localField"], "_id");
         assert_eq!(lookup["$lookup"]["foreignField"], "userId");
+    }
+
+    #[test]
+    fn translates_join_with_bare_fields() {
+        let t = translate(
+            "shop",
+            "SELECT name, total FROM products LEFT JOIN orders ON categoryId = _id",
+        )
+        .expect("translate");
+        let stages = t.pipeline.as_array().expect("array");
+        let lookup = stages
+            .iter()
+            .find(|s| s.get("$lookup").is_some())
+            .expect("lookup");
+        assert_eq!(lookup["$lookup"]["from"], "orders");
+        assert_eq!(lookup["$lookup"]["localField"], "categoryId");
+        assert_eq!(lookup["$lookup"]["foreignField"], "_id");
+    }
+
+    #[test]
+    fn inner_join_adds_non_empty_match_but_left_join_does_not() {
+        let inner = translate(
+            "shop",
+            "SELECT name FROM products INNER JOIN categories ON categoryId = _id",
+        )
+        .expect("translate");
+        let inner_stages = inner.pipeline.as_array().expect("array");
+        assert!(inner_stages
+            .iter()
+            .any(|s| s["$match"].get("categories_joined").is_some()));
+
+        let left = translate(
+            "shop",
+            "SELECT name FROM products LEFT JOIN categories ON categoryId = _id",
+        )
+        .expect("translate");
+        let left_stages = left.pipeline.as_array().expect("array");
+        assert!(!left_stages
+            .iter()
+            .any(|s| s.get("$match").map(|m| m.get("categories_joined").is_some()).unwrap_or(false)));
     }
 
     #[test]
@@ -1824,6 +1929,47 @@ mod tests {
     }
 
     #[test]
+    fn translates_like_to_anchored_regex() {
+        let t = translate("shop", "SELECT * FROM products WHERE name LIKE 'foo%bar_'")
+            .expect("translate");
+        let stages = t.pipeline.as_array().expect("array");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
+        assert_eq!(
+            m["$match"]["$expr"]["$regexMatch"]["regex"],
+            "^foo.*bar.$"
+        );
+    }
+
+    #[test]
+    fn translates_ilike_case_insensitive() {
+        let t = translate("shop", "SELECT * FROM products WHERE name ILIKE 'foo%'")
+            .expect("translate");
+        let stages = t.pipeline.as_array().expect("array");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
+        assert_eq!(m["$match"]["$expr"]["$regexMatch"]["options"], "i");
+    }
+
+    #[test]
+    fn translates_between_on_field_to_range_filter() {
+        let t = translate("shop", "SELECT * FROM products WHERE price BETWEEN 10 AND 20")
+            .expect("translate");
+        let stages = t.pipeline.as_array().expect("array");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
+        assert_eq!(m["$match"]["price"]["$gte"], 10.0);
+        assert_eq!(m["$match"]["price"]["$lte"], 20.0);
+        assert!(m["$match"].get("$expr").is_none());
+    }
+
+    #[test]
     fn field_comparison_in_where_wraps_in_expr() {
         let t = translate("shop", "SELECT * FROM products WHERE total = max").expect("translate");
         let stages = t.pipeline.as_array().expect("array");
@@ -1842,95 +1988,6 @@ mod tests {
         // `field = literal` emits the index-friendly `{field: literal}`
         // form, NOT a top-level `$eq` (which MongoDB rejects) and NOT a
         // `$expr` wrapper (which would defeat single-field indexes).
-        let t = translate("shop", "SELECT * FROM products WHERE total = 5").expect("translate");
-        let stages = t.pipeline.as_array().expect("array");
-        let m = stages
-            .iter()
-            .find(|s| s.get("$match").is_some())
-            .expect("match");
-        assert!(m["$match"].get("$expr").is_none());
-        assert!(m["$match"].get("$eq").is_none());
-        assert_eq!(m["$match"]["total"], 5.0);
-    }
-
-    #[test]
-    fn mixed_and_wraps_each_field_comparison_branch() {
-        // Mixed: literal comparison + field comparison. The literal branch
-        // becomes `{total: {$gt: 5}}`; the field-vs-field branch needs
-        // `$expr` so it stays legal in a filter document. The two cannot
-        // merge (one has a `$expr` top-level key), so they remain under
-        // `$and`.
-        let t = translate("shop", "SELECT * FROM products WHERE total > 5 AND x = y")
-            .expect("translate");
-        let stages = t.pipeline.as_array().expect("array");
-        let m = stages
-            .iter()
-            .find(|s| s.get("$match").is_some())
-            .expect("match");
-        let and = m["$match"]["$and"].as_array().expect("and array");
-        // Literal branch: {total: {$gt: 5}}
-        let literal_branch = and
-            .iter()
-            .find(|b| b.get("total").is_some())
-            .expect("literal total branch");
-        assert_eq!(literal_branch["total"]["$gt"], 5.0);
-        // Field branch: {$expr: {$eq: ["$x", "$y"]}}
-        let field_branch = and
-            .iter()
-            .find(|b| b.get("$expr").is_some())
-            .expect("field $expr branch");
-        assert_eq!(field_branch["$expr"]["$eq"][0], "$x");
-        assert_eq!(field_branch["$expr"]["$eq"][1], "$y");
-    }
-
-    #[test]
-    fn translates_date_tag_today_to_bson_date() {
-        let t =
-            translate("shop", "SELECT * FROM events WHERE createdAt >= #today").expect("translate");
-        let stages = t.pipeline.as_array().expect("array");
-        let m = stages
-            .iter()
-            .find(|s| s.get("$match").is_some())
-            .expect("match");
-        // `field >= literal` -> {field: {$gte: <date>}}
-        let date = &m["$match"]["createdAt"]["$gte"];
-        assert!(date.get("$date").is_some());
-    }
-
-    #[test]
-    fn translates_date_tag_lastweek_in_range() {
-        let t = translate(
-            "shop",
-            "SELECT * FROM events WHERE createdAt >= #lastweek AND createdAt < #today",
-        )
-        .expect("translate");
-        let stages = t.pipeline.as_array().expect("array");
-        let m = stages
-            .iter()
-            .find(|s| s.get("$match").is_some())
-            .expect("match");
-        // Same field on both branches -> keys collide -> cannot merge,
-        // so the result stays under `$and` and neither range is dropped.
-        let and = m["$match"]["$and"].as_array().expect("and");
-        assert!(and.iter().all(|b| {
-            b["createdAt"]["$gte"].get("$date").is_some()
-                || b["createdAt"]["$lt"].get("$date").is_some()
-        }));
-    }
-
-    #[test]
-    fn warns_on_unknown_date_tag() {
-        let t =
-            translate("shop", "SELECT * FROM events WHERE createdAt = #nope").expect("translate");
-        assert!(t.warnings.iter().any(|w| w.contains("unknown date tag")));
-    }
-
-    // ---- Regression + optimization coverage for the filter-shape fix ----
-
-    /// The exact query that originally surfaced
-    /// "unknown top level operator: $eq". Must now emit a legal filter.
-    #[test]
-    fn user_query_eq_string_literal_emits_field_filter() {
         let t = translate(
             "shop",
             "SELECT * FROM categories WHERE name=\"Audio\" ORDER BY _id LIMIT 50",
@@ -2068,6 +2125,22 @@ mod tests {
     }
 
     #[test]
+    fn not_in_literal_list_emits_field_nin_filter() {
+        let t = translate(
+            "shop",
+            "SELECT * FROM products WHERE category NOT IN (\"a\", \"b\")",
+        )
+        .expect("translate");
+        let stages = t.pipeline.as_array().expect("array");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
+        let arr = m["$match"]["category"]["$nin"].as_array().expect("nin array");
+        assert_eq!(arr.len(), 2);
+    }
+
+    #[test]
     fn is_null_field_emits_field_null_filter() {
         let t = translate("shop", "SELECT * FROM products WHERE deletedAt IS NULL").expect("translate");
         let stages = t.pipeline.as_array().expect("array");
@@ -2117,6 +2190,112 @@ mod tests {
             .expect("post-group $match");
         assert!(m["$match"].get("$expr").is_some());
         assert!(m["$match"]["$expr"].get("$gt").is_some());
+    }
+
+    #[test]
+    fn translates_date_tag_today_to_bson_date() {
+        let t =
+            translate("shop", "SELECT * FROM events WHERE createdAt >= #today").expect("translate");
+        let stages = t.pipeline.as_array().expect("array");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
+        // `field >= literal` -> {field: {$gte: <date>}}
+        let date = &m["$match"]["createdAt"]["$gte"];
+        assert!(date.get("$date").is_some());
+    }
+
+    #[test]
+    fn translates_date_tag_lastweek_in_range() {
+        let t = translate(
+            "shop",
+            "SELECT * FROM events WHERE createdAt >= #lastweek AND createdAt < #today",
+        )
+        .expect("translate");
+        let stages = t.pipeline.as_array().expect("array");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
+        // Same field on both branches -> keys collide -> cannot merge,
+        // so the result stays under `$and` and neither range is dropped.
+        let and = m["$match"]["$and"].as_array().expect("and");
+        assert!(and.iter().all(|b| {
+            b["createdAt"]["$gte"].get("$date").is_some()
+                || b["createdAt"]["$lt"].get("$date").is_some()
+        }));
+    }
+
+    #[test]
+    fn warns_on_unknown_date_tag() {
+        let t =
+            translate("shop", "SELECT * FROM events WHERE createdAt = #nope").expect("translate");
+        assert!(t.warnings.iter().any(|w| w.contains("unknown date tag")));
+    }
+
+    // ---- Arithmetic ----
+
+    #[test]
+    fn translates_arithmetic_in_projection() {
+        let t = translate("shop", "SELECT name, price * stockQuantity AS inventoryValue FROM products").expect("translate");
+        let stages = t.pipeline.as_array().expect("array");
+        let project = stages
+            .iter()
+            .find(|s| s.get("$project").is_some())
+            .expect("project");
+        assert_eq!(project["$project"]["inventoryValue"]["$multiply"][0], "$price");
+        assert_eq!(project["$project"]["inventoryValue"]["$multiply"][1], "$stockQuantity");
+    }
+
+    #[test]
+    fn translates_arithmetic_in_where() {
+        let t = translate("shop", "SELECT * FROM products WHERE price * 2 > 100").expect("translate");
+        let stages = t.pipeline.as_array().expect("array");
+        let m = stages
+            .iter()
+            .find(|s| s.get("$match").is_some())
+            .expect("match");
+        assert_eq!(m["$match"]["$expr"]["$gt"][0]["$multiply"][0], "$price");
+        assert_eq!(m["$match"]["$expr"]["$gt"][0]["$multiply"][1], 2.0);
+        assert_eq!(m["$match"]["$expr"]["$gt"][1], 100.0);
+    }
+
+    #[test]
+    fn arithmetic_precedence_mul_before_add() {
+        let t = translate("shop", "SELECT price + stockQuantity * 2 AS expr FROM products").expect("translate");
+        let stages = t.pipeline.as_array().expect("array");
+        let project = stages
+            .iter()
+            .find(|s| s.get("$project").is_some())
+            .expect("project");
+        // Should be $add: ["$price", {$multiply: ["$stockQuantity", 2]}]
+        assert_eq!(project["$project"]["expr"]["$add"][0], "$price");
+        assert_eq!(project["$project"]["expr"]["$add"][1]["$multiply"][0], "$stockQuantity");
+        assert_eq!(project["$project"]["expr"]["$add"][1]["$multiply"][1], 2.0);
+    }
+
+    #[test]
+    fn arithmetic_all_four_operators() {
+        let t = translate(
+            "shop",
+            "SELECT (price + 10) / (stockQuantity - 1) * 2 AS expr FROM products",
+        )
+        .expect("translate");
+        let stages = t.pipeline.as_array().expect("array");
+        let project = stages
+            .iter()
+            .find(|s| s.get("$project").is_some())
+            .expect("project");
+        // Top level should be $multiply: [ {$divide: [...]}, 2 ]
+        let top = &project["$project"]["expr"];
+        assert!(top["$multiply"].is_array());
+        assert_eq!(top["$multiply"][1], 2.0);
+        let div = &top["$multiply"][0];
+        assert_eq!(div["$divide"][0]["$add"][0], "$price");
+        assert_eq!(div["$divide"][0]["$add"][1], 10.0);
+        assert_eq!(div["$divide"][1]["$subtract"][0], "$stockQuantity");
+        assert_eq!(div["$divide"][1]["$subtract"][1], 1.0);
     }
 
     // ---- Write operation translation tests ----
@@ -2201,6 +2380,13 @@ mod tests {
     }
 
     #[test]
+    fn remove_is_alias_for_delete() {
+        let t = translate("shop", "REMOVE FROM products WHERE status = \"archived\"").expect("translate");
+        assert_eq!(t.collection, "products");
+        assert!(matches!(t.operation, SqlOperation::Delete { .. }));
+    }
+
+    #[test]
     fn rejects_unsupported_statement() {
         assert!(translate("shop", "DROP TABLE products").is_err());
     }
@@ -2208,5 +2394,10 @@ mod tests {
     #[test]
     fn update_rejects_trailing_input() {
         assert!(translate("shop", "UPDATE products SET x = 1 WHERE y = 2 trailing").is_err());
+    }
+
+    #[test]
+    fn insert_without_column_list_requires_json_or_columns() {
+        assert!(translate("shop", "INSERT INTO products VALUES (1, 2)").is_err());
     }
 }
