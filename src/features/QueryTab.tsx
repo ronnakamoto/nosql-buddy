@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import commands, { formatError, type DocumentPage, type SqlLanguage } from "../ipc/commands";
 import { ResultsTable, type ResultsViewMode } from "../components/ResultsTable";
 import { toFilterId } from "../components/resultsDisplay";
-import { InsertDocumentModal } from "../components/InsertDocumentModal";
 import { QueryHistoryPanel } from "../components/QueryHistoryPanel";
 import { ShortcutButton } from "../components/ShortcutButton";
 import { AggregationEditor } from "./AggregationEditor";
@@ -414,7 +413,6 @@ export function QueryTab({
   const toast = useToast();
   const [page, setPage] = useState<DocumentPage | null>(null);
   const [running, setRunning] = useState(false);
-  const [insertOpen, setInsertOpen] = useState(false);
 
   // ─── Update mode state ──────────────────────────────────────────────
   const [updateFilterText, setUpdateFilterText] = useState("{}");
@@ -1337,16 +1335,6 @@ export function QueryTab({
     setPendingDelete(null);
   }
 
-  async function handleInserted(id: string) {
-    toast.push(`Inserted document (id=${id || "auto"}).`, "success");
-    // Refresh results so the new row appears.
-    await run();
-  }
-
-  function handleInsertError(message: string) {
-    toast.push(`Insert failed: ${message}`, "error");
-  }
-
   function handleBulkDeleteSelected() {
     if (selectedDocuments.length === 0) {
       toast.push("Select one or more rows first.", "warning");
@@ -1528,13 +1516,6 @@ export function QueryTab({
             onError={(message) => toast.push(message, "error")}
             onNotice={(message) => toast.push(message, "success")}
           />
-          <button
-            className="btn btn--sm"
-            onClick={() => setInsertOpen(true)}
-            title="Insert a new document into this collection"
-          >
-            Insert
-          </button>
           <button
             className="btn btn--sm"
             onClick={() => setImportOpen(true)}
@@ -2033,15 +2014,6 @@ export function QueryTab({
           </div>
         )}
       </div>
-      <InsertDocumentModal
-        open={insertOpen}
-        connectionId={connectionId}
-        database={database}
-        collection={collection}
-        onClose={() => setInsertOpen(false)}
-        onInserted={handleInserted}
-        onError={handleInsertError}
-      />
       {exportOpen && exportSource && (
         <ExportWizard
           connectionId={connectionId}
