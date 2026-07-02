@@ -38,8 +38,13 @@ export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFo
     ["scram-sha-1", "scram-sha-256", "ldap", "aws-iam"] as const
   ).includes(authMechanism as "scram-sha-1" | "scram-sha-256" | "ldap" | "aws-iam");
   const isX509 = authMechanism === "x509";
+  const isLdap = authMechanism === "ldap";
+  const isAwsIam = authMechanism === "aws-iam";
   const tlsEffective = tlsEnabled || isX509;
   const tlsSectionVisible = tlsEffective;
+
+  const secretLabel = isAwsIam ? "AWS secret access key" : isLdap ? "LDAP password" : "Password / secret (stored in OS keychain)";
+  const secretPlaceholder = isAwsIam ? "AWS secret access key (leave blank to use env/instance credentials)" : "Stored once. Cleared after save.";
 
   function buildTlsConfig(): TlsConfig | null {
     if (!tlsEffective && !tlsCertFile && !tlsCaFile) return null;
@@ -215,10 +220,11 @@ export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFo
           Authentication <InfoPopover label="What is authentication?" title="Authentication mechanism">
             <p>Choose how MongoDB validates your identity.</p>
             <ul>
-              <li><strong>SCRAM-SHA-256</strong>: modern default for username and password.</li>
+              <li><strong>No authentication</strong>: best when the URI already contains credentials (e.g. MongoDB Atlas connection strings). The driver negotiates automatically.</li>
+              <li><strong>SCRAM-SHA-256</strong>: modern username/password auth. Use when the password lives in the keychain, not the URI.</li>
               <li><strong>x.509</strong>: certificate-based authentication (requires TLS section below).</li>
               <li><strong>LDAP</strong>: enterprise directory integration.</li>
-              <li><strong>AWS IAM</strong>: MongoDB Atlas IAM roles.</li>
+              <li><strong>AWS IAM</strong>: Atlas clusters with IAM database authentication.</li>
             </ul>
           </InfoPopover>
         </label>
@@ -228,7 +234,7 @@ export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFo
           value={authMechanism}
           onChange={(e) => setAuthMechanism(e.target.value as SaveProfileRequest["authMechanism"])}
         >
-          <option value="none">No authentication</option>
+          <option value="none">No authentication (use credentials in URI)</option>
           <option value="scram-sha-1">SCRAM-SHA-1</option>
           <option value="scram-sha-256">SCRAM-SHA-256</option>
           <option value="x509">x.509 certificate</option>
@@ -236,10 +242,17 @@ export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFo
           <option value="aws-iam">AWS IAM</option>
         </select>
       </div>
+      {authMechanism === "none" && (
+        <div className="field__hint">
+          For MongoDB Atlas and most hosted providers, paste the full connection
+          string (including username and password) and leave this on
+          "No authentication". The driver handles credential negotiation automatically.
+        </div>
+      )}
       {storesPasswordSecret && (
         <div className="field">
           <label className="field__label" htmlFor="conn-secret">
-            Password / secret (stored in OS keychain)
+            {secretLabel}
           </label>
           <input
             id="conn-secret"
@@ -247,9 +260,21 @@ export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFo
             type="password"
             value={secret}
             onChange={(e) => setSecret(e.target.value)}
-            placeholder="Stored once. Cleared after save."
+            placeholder={secretPlaceholder}
             autoComplete="off"
           />
+          {isAwsIam && (
+            <div className="field__hint">
+              Put the AWS access key ID in the URI username. Leave this blank to use
+              AWS environment variables, shared credentials, or instance metadata.
+            </div>
+          )}
+          {isLdap && (
+            <div className="field__hint">
+              Put the LDAP username in the URI. Authentication uses the SASL PLAIN
+              mechanism against the $external database.
+            </div>
+          )}
         </div>
       )}
       {isX509 && (
