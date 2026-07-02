@@ -13,6 +13,7 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::mongo::bson_json::{doc_to_display_json, doc_to_extjson, parse_optional_doc};
 use crate::mongo::client_registry::list_collections as registry_list_collections;
+use crate::mongo::client_registry::list_databases as registry_list_databases;
 use crate::mongo::safe_change::{SafeChangePreview, SafeChangePreviewRequest};
 use crate::mongo::types::{
     CollationDto, CollectionKind, CollectionStats, CollectionSummary, DatabaseSummary,
@@ -113,30 +114,7 @@ pub async fn list_databases(
     state: State<'_, AppState>,
 ) -> AppResult<Vec<DatabaseSummary>> {
     let entry = state.clients.get(&connection_id).await?;
-    let names = entry.client.list_database_names().await?;
-    let mut out = Vec::with_capacity(names.len());
-    for name in names {
-        let size = entry
-            .client
-            .database(&name)
-            .run_command(bson::doc! { "dbStats": 1 })
-            .await
-            .ok()
-            .and_then(|d| d.get_i64("dataSize").ok().map(|v| v as u64));
-        let collections_count = entry
-            .client
-            .database(&name)
-            .list_collection_names()
-            .await
-            .ok()
-            .map(|c| c.len() as u64);
-        out.push(DatabaseSummary {
-            name,
-            size_on_disk: size,
-            collections_count,
-        });
-    }
-    Ok(out)
+    registry_list_databases(&entry.client).await
 }
 
 #[tauri::command]

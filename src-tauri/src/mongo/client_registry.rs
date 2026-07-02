@@ -795,10 +795,12 @@ async fn hello(client: &Client) -> AppResult<ServerInfo> {
         .database("admin")
         .run_command(bson::doc! { "hello": 1 })
         .await?;
-    let version = doc
-        .get_str("maxWireVersion")
+    let version = client
+        .database("admin")
+        .run_command(bson::doc! { "buildInfo": 1 })
+        .await
         .ok()
-        .map(|_| "unknown".to_string());
+        .and_then(|d| d.get_str("version").ok().map(|s| s.to_string()));
     let host = doc.get_str("me").ok().map(|s| s.to_string());
     let is_master = doc.get_bool("isWritablePrimary").unwrap_or(false);
     let topology = if doc.contains_key("setName") {
@@ -817,25 +819,60 @@ async fn hello(client: &Client) -> AppResult<ServerInfo> {
 }
 
 pub async fn list_databases(client: &Client) -> AppResult<Vec<DatabaseSummary>> {
-    let databases = client.list_database_names().await?;
-    let mut out = Vec::with_capacity(databases.len());
-    for name in databases {
-        let size = client
-            .database(&name)
-            .run_command(bson::doc! { "dbStats": 1 })
+    // Use the native listDatabases admin command to get name + size_on_disk
+    // + empty in a single round trip. This is more reliable than running
+    // dbStats per database (which can fail for system DBs on some deployments).
+    let specs = client.list_databases().await?;
+    let mut out = Vec::with_capacity(specs.len());
+    for spec in specs {
+        // Enrich with dbStats for document/index counts. Best-effort: if the
+        // command fails (e.g. lack of permissions on admin DB), we still have
+        // the sizeOnDisk from listDatabases.
+        //
+        // MongoDB returns dbStats numbers as BSON doubles (f64) for some fields
+        // and as i32/i64 for others depending on version. We try i64 → i32 → f64
+        // to cover all cases.
+        let stats = client
+            .database(&spec.name)
+            .run_command(bson::doc! { "dbStats": 1, "freeSpace": 0 })
             .await
-            .ok()
-            .and_then(|d| d.get_i64("dataSize").ok().map(|v| v as u64));
-        let collections_count = client
-            .database(&name)
-            .list_collection_names()
-            .await
-            .ok()
-            .map(|c| c.len() as u64);
+            .ok();
+
+        let get_num = |field: &str| -> Option<u64> {
+            stats.as_ref().and_then(|d| {
+                d.get_i64(field)
+                    .ok()
+                    .map(|v| v as u64)
+                    .or_else(|| d.get_i32(field).ok().map(|v| v as u64))
+                    .or_else(|| d.get_f64(field).ok().map(|v| v as u64))
+            })
+        };
+
+        // For collections_count, fall back to list_collection_names if dbStats
+        // didn't return it.
+        let collections_count = match get_num("collections") {
+            Some(n) => Some(n),
+            None => client
+                .database(&spec.name)
+                .list_collection_names()
+                .await
+                .ok()
+                .map(|c| c.len() as u64),
+        };
+
+        let document_count = get_num("objects");
+        let index_count = get_num("indexes");
+        let index_size_bytes = get_num("indexSize");
+        let storage_size_bytes = get_num("storageSize");
+
         out.push(DatabaseSummary {
-            name,
-            size_on_disk: size,
+            name: spec.name,
+            size_on_disk: if spec.empty { Some(0) } else { Some(spec.size_on_disk) },
             collections_count,
+            document_count,
+            index_count,
+            index_size_bytes,
+            storage_size_bytes,
         });
     }
     Ok(out)

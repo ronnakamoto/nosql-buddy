@@ -271,6 +271,10 @@ pub struct DatabaseSummary {
     pub name: String,
     pub size_on_disk: Option<u64>,
     pub collections_count: Option<u64>,
+    pub document_count: Option<u64>,
+    pub index_count: Option<u64>,
+    pub index_size_bytes: Option<u64>,
+    pub storage_size_bytes: Option<u64>,
 }
 
 /// Collection summary used in the tree navigator.

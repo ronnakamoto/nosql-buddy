@@ -32,6 +32,7 @@ import { ConfirmDialog } from "./components/ConfirmDialog";
 import { ShortcutsMap } from "./components/ShortcutsMap";
 import { ShortcutButton } from "./components/ShortcutButton";
 import { AboutScreen } from "./components/AboutScreen";
+import { ConnectionOverview } from "./components/ConnectionOverview";
 import logoUrl from "./assets/logo.png";
 import {
   Search,
@@ -1448,6 +1449,11 @@ export default function App() {
               onImported={refreshConnection}
             />
           </ErrorBoundary>
+        ) : active ? (
+          <ConnectionOverview
+            active={active}
+            onNewQuery={handleNewQuery}
+          />
         ) : (
           <div className="empty-state">
             <h2>Connect to a database to get started</h2>

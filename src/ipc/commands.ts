@@ -168,6 +168,10 @@ export interface DatabaseSummary {
   name: string;
   sizeOnDisk: number | null;
   collectionsCount: number | null;
+  documentCount: number | null;
+  indexCount: number | null;
+  indexSizeBytes: number | null;
+  storageSizeBytes: number | null;
 }
 
 export type CollectionKind =
