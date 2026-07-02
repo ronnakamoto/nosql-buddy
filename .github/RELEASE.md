@@ -1,11 +1,20 @@
 # Release pipeline
 
-`.github/workflows/release.yml` builds signed installers for macOS
-(universal `.dmg`), Windows (`.msi` + NSIS `.exe`, unsigned for now), and
-Linux (`.deb` + `.AppImage`) whenever a `v*` tag is pushed, and publishes
-them as a GitHub Release. The updater manifest (`latest.json`) is generated
-and attached automatically so the in-app "Check for updates" button
-(About screen) can find new versions.
+`.github/workflows/release.yml` builds signed installers for macOS (two
+native `.dmg`s — Apple Silicon and Intel, see note below), Windows
+(`.msi` + NSIS `.exe`, unsigned for now), and Linux (`.deb` + `.AppImage`)
+whenever a `v*` tag is pushed, and publishes them as a GitHub Release. The
+updater manifest (`latest.json`) is generated and attached automatically so
+the in-app "Check for updates" button (About screen) can find new versions.
+
+**Why two DMGs instead of one universal binary:** `ark-circom` depends on
+`wasmer_vm`, which contains hand-written per-architecture assembly for its
+JIT backend. That assembly fails to cross-link when cross-compiling
+`x86_64-apple-darwin` from the arm64 `macos-latest` runner
+(`___rust_probestack` undefined), so `--target universal-apple-darwin`
+doesn't work here. Each architecture is instead built natively on its own
+runner (`macos-latest` for Apple Silicon, `macos-15-intel` for Intel — the
+only Intel image GitHub still offers).
 
 ## One-time setup: GitHub Secrets
 

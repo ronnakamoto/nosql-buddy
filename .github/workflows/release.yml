@@ -1,7 +1,9 @@
 name: release
 
-# Builds signed installers for macOS (universal), Windows, and Linux and
-# publishes them to a GitHub Release whenever a `v*` tag is pushed.
+# Builds signed installers for macOS (Apple Silicon + Intel, built natively
+# rather than as a single universal binary — see the macOS build note below),
+# Windows, and Linux, and publishes them to a GitHub Release whenever a `v*`
+# tag is pushed.
 #
 # Required secrets (see .github/RELEASE.md for how to obtain each one):
 #   APPLE_CERTIFICATE                    base64 of the Developer ID Application .p12
@@ -49,6 +51,15 @@ jobs:
             });
             return data.id;
 
+  # macOS note: `ark-circom` pulls in `wasmer_vm`, which ships hand-written
+  # per-architecture assembly for its JIT backend. That assembly fails to
+  # cross-link (`___rust_probestack` undefined) when cross-compiling
+  # x86_64-apple-darwin from the arm64 `macos-latest` runner, so a single
+  # `--target universal-apple-darwin` build doesn't work here. Instead we
+  # build each macOS architecture natively on its own runner (macos-latest =
+  # Apple Silicon, macos-15-intel = Intel — the only Intel image GitHub
+  # still offers) and ship two separate signed/notarized DMGs rather than
+  # one universal DMG.
   build:
     needs: draft-release
     strategy:
@@ -56,10 +67,16 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            args: '--target universal-apple-darwin'
+            target: aarch64-apple-darwin
+            args: '--target aarch64-apple-darwin'
+          - platform: macos-15-intel
+            target: x86_64-apple-darwin
+            args: '--target x86_64-apple-darwin'
           - platform: ubuntu-22.04
+            target: ''
             args: ''
           - platform: windows-latest
+            target: ''
             args: ''
     runs-on: ${{ matrix.platform }}
     steps:
@@ -74,7 +91,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ matrix.target }}
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -112,7 +129,7 @@ jobs:
             src-tauri/resources/contract/zk_audit_commitment.wasm
 
       - name: Import Apple signing certificate
-        if: matrix.platform == 'macos-latest'
+        if: startsWith(matrix.platform, 'macos')
         uses: apple-actions/import-codesign-certs@v3
         with:
           p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
