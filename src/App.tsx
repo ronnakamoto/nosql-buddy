@@ -971,6 +971,19 @@ export default function App() {
     openShellTab(active.handle.connectionId, active.databases[0]?.name ?? "admin");
   }, [active, openShellTab]);
 
+  // Open a Find query tab on the first collection of the selected database.
+  // Triggered from the connection-overview database cards so clicking "local"
+  // takes you straight into browsing its first collection.
+  const handleOpenDatabase = useCallback(
+    (databaseName: string) => {
+      if (!active) return;
+      const colls = active.collections?.[databaseName] ?? [];
+      const firstColl = colls.find((c) => c?.name)?.name ?? `${databaseName}_new`;
+      openQueryTab(active.handle.connectionId, databaseName, firstColl);
+    },
+    [active, openQueryTab],
+  );
+
   const handleNewDiagram = useCallback(() => {
     if (!active) return;
     openDiagramTab(active.handle.connectionId, active.databases[0]?.name ?? "admin");
@@ -1452,7 +1465,7 @@ export default function App() {
         ) : active ? (
           <ConnectionOverview
             active={active}
-            onNewQuery={handleNewQuery}
+            onOpenDatabase={handleOpenDatabase}
           />
         ) : (
           <div className="empty-state">

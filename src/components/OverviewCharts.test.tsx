@@ -1,9 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import {
-  StorageByDatabaseChart,
   DocumentsByDatabaseChart,
-  DataVsIndexChart,
+  StorageShareDonutChart,
   TopCollectionsChart,
   CollectionTypeChart,
 } from "./OverviewCharts";
@@ -34,35 +33,14 @@ function makeColl(over: Partial<CollectionSummary> = {}): CollectionSummary {
 }
 
 describe("OverviewCharts - empty / null / undefined data", () => {
-  it("StorageByDatabaseChart renders empty state with no databases", () => {
-    render(<StorageByDatabaseChart databases={[]} />);
-    expect(screen.getByText("No data available")).toBeInTheDocument();
-  });
-
-  it("StorageByDatabaseChart renders empty state with null", () => {
-    render(<StorageByDatabaseChart databases={null as unknown as DatabaseSummary[]} />);
-    expect(screen.getByText("No data available")).toBeInTheDocument();
-  });
-
-  it("StorageByDatabaseChart filters databases with zero or null sizeOnDisk", () => {
-    const dbs = [
-      makeDb({ name: "a", sizeOnDisk: 0 }),
-      makeDb({ name: "b", sizeOnDisk: null }),
-      makeDb({ name: "c", sizeOnDisk: undefined }),
-      makeDb({ name: "d", sizeOnDisk: -100 }),
-    ];
-    render(<StorageByDatabaseChart databases={dbs} />);
-    expect(screen.getByText("No data available")).toBeInTheDocument();
-  });
-
   it("DocumentsByDatabaseChart renders empty state when no document counts", () => {
     const dbs = [makeDb({ name: "a", documentCount: 0 }), makeDb({ name: "b", documentCount: null })];
-    render(<DocumentsByDatabaseChart databases={dbs} />);
+    render(<DocumentsByDatabaseChart databases={dbs} collections={{}} />);
     expect(screen.getByText("No data available")).toBeInTheDocument();
   });
 
-  it("DataVsIndexChart renders empty state with no size data", () => {
-    render(<DataVsIndexChart databases={[]} />);
+  it("StorageShareDonutChart renders empty state with no size data", () => {
+    render(<StorageShareDonutChart databases={[]} />);
     expect(screen.getByText("No data available")).toBeInTheDocument();
   });
 
@@ -98,85 +76,94 @@ describe("OverviewCharts - empty / null / undefined data", () => {
 });
 
 describe("OverviewCharts - NaN / Infinity / malformed values", () => {
-  it("StorageByDatabaseChart handles NaN sizeOnDisk", () => {
-    const dbs = [makeDb({ name: "a", sizeOnDisk: NaN })];
-    render(<StorageByDatabaseChart databases={dbs} />);
-    expect(screen.getByText("No data available")).toBeInTheDocument();
-  });
-
-  it("StorageByDatabaseChart handles Infinity sizeOnDisk", () => {
-    const dbs = [makeDb({ name: "a", sizeOnDisk: Infinity })];
-    render(<StorageByDatabaseChart databases={dbs} />);
-    expect(screen.getByText("No data available")).toBeInTheDocument();
-  });
-
   it("DocumentsByDatabaseChart handles NaN documentCount", () => {
     const dbs = [makeDb({ name: "a", documentCount: NaN })];
-    render(<DocumentsByDatabaseChart databases={dbs} />);
+    render(<DocumentsByDatabaseChart databases={dbs} collections={{}} />);
     expect(screen.getByText("No data available")).toBeInTheDocument();
   });
 
-  it("DataVsIndexChart handles NaN storage/index sizes by treating as zero", () => {
+  it("StorageShareDonutChart filters databases with no size", () => {
     const dbs = [
-      makeDb({ name: "big", storageSizeBytes: 2048, indexSizeBytes: 1024 }),
-      makeDb({ name: "bad", storageSizeBytes: NaN, indexSizeBytes: NaN }),
+      makeDb({ name: "big", sizeOnDisk: 2048 }),
+      makeDb({ name: "zero", sizeOnDisk: 0 }),
+      makeDb({ name: "bad", sizeOnDisk: NaN }),
+      makeDb({ name: "null", sizeOnDisk: null }),
     ];
-    const { container } = render(<DataVsIndexChart databases={dbs} />);
-    const rows = container.querySelectorAll(".overview__bar-row");
-    expect(rows).toHaveLength(1);
-  });
-
-  it("handles databases array with null entries", () => {
-    const dbs = [null, makeDb({ name: "real", sizeOnDisk: 1024 }), undefined] as unknown as DatabaseSummary[];
-    render(<StorageByDatabaseChart databases={dbs} />);
-    expect(screen.getByText("real")).toBeInTheDocument();
-    expect(screen.getByText("1.0 KB")).toBeInTheDocument();
-  });
-
-  it("handles databases with missing name", () => {
-    const dbs = [
-      makeDb({ name: "", sizeOnDisk: 500 }),
-      makeDb({ name: "valid", sizeOnDisk: 1000 }),
-    ];
-    render(<StorageByDatabaseChart databases={dbs} />);
-    expect(screen.getByText("valid")).toBeInTheDocument();
+    const { container } = render(<StorageShareDonutChart databases={dbs} />);
+    const items = container.querySelectorAll(".overview__donut-legend-item");
+    expect(items).toHaveLength(1);
   });
 });
 
 describe("OverviewCharts - correct rendering with valid data", () => {
-  it("StorageByDatabaseChart renders bars sorted by size descending", () => {
-    const dbs = [
-      makeDb({ name: "small", sizeOnDisk: 1024 }),
-      makeDb({ name: "big", sizeOnDisk: 1048576 }),
-      makeDb({ name: "medium", sizeOnDisk: 102400 }),
-    ];
-    const { container } = render(<StorageByDatabaseChart databases={dbs} />);
-    const labels = container.querySelectorAll(".overview__bar-label");
-    expect(labels).toHaveLength(3);
-    expect(labels[0].textContent).toBe("big");
-    expect(labels[1].textContent).toBe("medium");
-    expect(labels[2].textContent).toBe("small");
-  });
-
-  it("StorageByDatabaseChart formats bytes correctly", () => {
-    const dbs = [makeDb({ name: "db", sizeOnDisk: 1048576 })];
-    render(<StorageByDatabaseChart databases={dbs} />);
-    expect(screen.getByText("1.0 MB")).toBeInTheDocument();
-  });
-
-  it("StorageByDatabaseChart limits to 8 databases", () => {
-    const dbs = Array.from({ length: 12 }, (_, i) =>
-      makeDb({ name: `db${i}`, sizeOnDisk: 1024 * (12 - i) }),
-    );
-    const { container } = render(<StorageByDatabaseChart databases={dbs} />);
-    const rows = container.querySelectorAll(".overview__bar-row");
-    expect(rows).toHaveLength(8);
-  });
-
   it("DocumentsByDatabaseChart formats counts correctly", () => {
     const dbs = [makeDb({ name: "db", documentCount: 1500000 })];
-    render(<DocumentsByDatabaseChart databases={dbs} />);
+    render(<DocumentsByDatabaseChart databases={dbs} collections={{}} />);
     expect(screen.getByText("1.5M")).toBeInTheDocument();
+  });
+
+  it("DocumentsByDatabaseChart falls back to per-collection aggregation when dbStats.objects missing", () => {
+    const dbs = [
+      makeDb({ name: "a", documentCount: null, collectionsCount: 2 }),
+      makeDb({ name: "b", documentCount: 0, collectionsCount: 1 }),
+    ];
+    const collections = {
+      a: [makeColl({ name: "users", documentCount: 500 }), makeColl({ name: "logs", documentCount: 200 })],
+      b: [makeColl({ name: "items", documentCount: 1000 })],
+    };
+    render(<DocumentsByDatabaseChart databases={dbs} collections={collections} />);
+    expect(screen.getByText("700")).toBeInTheDocument();
+    expect(screen.getByText("1.0k")).toBeInTheDocument();
+  });
+
+  it("DocumentsByDatabaseChart prefers dbStats.objects over collection aggregation", () => {
+    const dbs = [makeDb({ name: "a", documentCount: 9999 })];
+    const collections = {
+      a: [makeColl({ name: "users", documentCount: 500 })],
+    };
+    render(<DocumentsByDatabaseChart databases={dbs} collections={collections} />);
+    expect(screen.getByText("10.0k")).toBeInTheDocument();
+    expect(screen.queryByText("500")).not.toBeInTheDocument();
+  });
+
+  it("DocumentsByDatabaseChart shows log/linear toggle when data spans orders of magnitude", () => {
+    const dbs = [
+      makeDb({ name: "huge", documentCount: 57700 }),
+      makeDb({ name: "medium", documentCount: 44 }),
+      makeDb({ name: "tiny", documentCount: 3 }),
+    ];
+    const { container } = render(<DocumentsByDatabaseChart databases={dbs} collections={{}} />);
+    expect(container.querySelector(".overview__scale-toggle")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Log" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Linear" })).toBeInTheDocument();
+  });
+
+  it("DocumentsByDatabaseChart hides toggle when data is uniform", () => {
+    const dbs = [
+      makeDb({ name: "a", documentCount: 100 }),
+      makeDb({ name: "b", documentCount: 80 }),
+      makeDb({ name: "c", documentCount: 60 }),
+    ];
+    const { container } = render(<DocumentsByDatabaseChart databases={dbs} collections={{}} />);
+    expect(container.querySelector(".overview__scale-toggle")).not.toBeInTheDocument();
+  });
+
+  it("DocumentsByDatabaseChart toggle switches between log and linear scales", () => {
+    const dbs = [
+      makeDb({ name: "huge", documentCount: 57700 }),
+      makeDb({ name: "tiny", documentCount: 3 }),
+    ];
+    const { container } = render(<DocumentsByDatabaseChart databases={dbs} collections={{}} />);
+    // The tiny value's bar (second in the list) should be wider on log scale
+    // than on linear scale. The huge value's bar is always ~100% on both.
+    const fills = () => Array.from(container.querySelectorAll(".overview__bar-fill")) as HTMLElement[];
+    // Default is log scale
+    const logTinyWidth = parseFloat(fills()[1].style.width);
+    // Switch to linear
+    fireEvent.click(screen.getByRole("button", { name: "Linear" }));
+    const linearTinyWidth = parseFloat(fills()[1].style.width);
+    // Log scaling should give the tiny value a meaningfully wider bar
+    expect(logTinyWidth).toBeGreaterThan(linearTinyWidth);
   });
 
   it("TopCollectionsChart merges collections across databases", () => {
@@ -228,16 +215,95 @@ describe("OverviewCharts - correct rendering with valid data", () => {
     expect(screen.getByText("custom-type")).toBeInTheDocument();
   });
 
-  it("DataVsIndexChart renders stacked bars with legend", () => {
+  it("StorageShareDonutChart renders donut with legend showing percentages", () => {
     const dbs = [
-      makeDb({ name: "db1", storageSizeBytes: 4096, indexSizeBytes: 1024 }),
-      makeDb({ name: "db2", storageSizeBytes: 2048, indexSizeBytes: 2048 }),
+      makeDb({ name: "alpha", sizeOnDisk: 4096 }),
+      makeDb({ name: "beta", sizeOnDisk: 2048 }),
     ];
-    const { container } = render(<DataVsIndexChart databases={dbs} />);
-    const rows = container.querySelectorAll(".overview__bar-row--stacked");
-    expect(rows).toHaveLength(2);
-    expect(screen.getByText("Data")).toBeInTheDocument();
-    expect(screen.getByText("Indexes")).toBeInTheDocument();
+    const { container } = render(<StorageShareDonutChart databases={dbs} />);
+    const ring = container.querySelector(".overview__donut-ring");
+    expect(ring).toBeInTheDocument();
+    expect((ring as HTMLElement).style.background).toContain("conic-gradient");
+    const items = container.querySelectorAll(".overview__donut-legend-item");
+    expect(items).toHaveLength(2);
+    expect(screen.getByText("alpha")).toBeInTheDocument();
+    expect(screen.getByText("beta")).toBeInTheDocument();
+    expect(screen.getByText("Total")).toBeInTheDocument();
+  });
+
+  it("StorageShareDonutChart groups tail databases into Other bucket when 20 databases", () => {
+    // 20 databases with sizes such that top 7 each clearly exceed MIN_VISIBLE_PCT (1.5%).
+    // Use an arithmetic series with a big gap so db0..db6 each hold >= 2% and the
+    // remaining 13 databases together fall into "Other".
+    const dbs = Array.from({ length: 20 }, (_, i) => {
+      // db0..db6: sizes 100, 90, 80, 70, 60, 50, 40  →  sum=490, each >= 40/490 = 8%
+      // db7..db19: tiny tail  → all together about 0.01, well under any single top item
+      const size = i < 7 ? (7 - i) * 10 : 0.001;
+      return makeDb({ name: `db${i}`, sizeOnDisk: size });
+    });
+    const { container } = render(<StorageShareDonutChart databases={dbs} />);
+    const items = container.querySelectorAll(".overview__donut-legend-item");
+    // 7 named + 1 Other bucket = 8 total
+    expect(items).toHaveLength(8);
+    expect(screen.getByText(/Other \(/)).toBeInTheDocument();
+    // The legend should show database names in descending size order
+    expect(screen.getByText("db0")).toBeInTheDocument();
+    expect(screen.getByText("db6")).toBeInTheDocument();
+    // db19 should NOT appear directly (it's in Other)
+    expect(screen.queryByText("db19")).not.toBeInTheDocument();
+  });
+
+  it("StorageShareDonutChart rolls sub-threshold databases into Other even when fewer than MAX_SLICES", () => {
+    // 3 databases, but tiny ones are < MIN_VISIBLE_PCT so they fall into Other
+    const dbs = [
+      makeDb({ name: "big", sizeOnDisk: 1000000 }),
+      makeDb({ name: "small1", sizeOnDisk: 100 }),    // ~0.01%
+      makeDb({ name: "small2", sizeOnDisk: 100 }),    // ~0.01%
+    ];
+    const { container } = render(<StorageShareDonutChart databases={dbs} />);
+    const items = container.querySelectorAll(".overview__donut-legend-item");
+    // 1 named + 1 Other = 2
+    expect(items).toHaveLength(2);
+    expect(screen.getByText("big")).toBeInTheDocument();
+    expect(screen.getByText(/Other \(2\)/)).toBeInTheDocument();
+  });
+
+  it("StorageShareDonutChart does not show Other bucket when all databases fit", () => {
+    const dbs = [
+      makeDb({ name: "alpha", sizeOnDisk: 1000000 }),
+      makeDb({ name: "beta", sizeOnDisk: 500000 }),
+      makeDb({ name: "gamma", sizeOnDisk: 250000 }),
+    ];
+    render(<StorageShareDonutChart databases={dbs} />);
+    expect(screen.queryByText(/Other/)).not.toBeInTheDocument();
+  });
+
+  it("StorageShareDonutChart Other bucket percentage equals sum of rolled-in databases", () => {
+    // 5 dbs: 1 large (~99.4%) dominates; 4 small roll into "Other"
+    const dbs = [
+      makeDb({ name: "a", sizeOnDisk: 99000000 }),  // ~99.4%
+      makeDb({ name: "b", sizeOnDisk: 500000 }),     // ~0.5%  → Other
+      makeDb({ name: "c", sizeOnDisk: 300000 }),     // ~0.3%  → Other
+      makeDb({ name: "d", sizeOnDisk: 100000 }),     // ~0.1%  → Other
+      makeDb({ name: "tiny", sizeOnDisk: 100 }),     // ~0%    → Other
+    ];
+    render(<StorageShareDonutChart databases={dbs} />);
+    expect(screen.getByText("a")).toBeInTheDocument();
+    // 4 databases rolled into Other
+    expect(screen.getByText(/Other \(4\)/)).toBeInTheDocument();
+  });
+
+  it("StorageShareDonutChart stays readable with 20 databases", () => {
+    const dbs = Array.from({ length: 20 }, (_, i) =>
+      makeDb({ name: `db${i}`, sizeOnDisk: 1024 * (20 - i) }),
+    );
+    const { container } = render(<StorageShareDonutChart databases={dbs} />);
+    const items = container.querySelectorAll(".overview__donut-legend-item");
+    // Capped: 7 named + 1 Other = 8
+    expect(items).toHaveLength(8);
+    // Total still equals the full sum (not just the visible top 7)
+    const ring = container.querySelector(".overview__donut-ring") as HTMLElement;
+    expect(ring.style.background).toContain("conic-gradient");
   });
 
   it("TopCollectionsChart handles collections referencing unknown databases", () => {

@@ -10,16 +10,13 @@ import {
   Layers,
   Server,
   ArrowRight,
-  BarChart3,
   TrendingUp,
   PieChart,
-  HardDrive,
   FileText,
 } from "lucide-react";
 import {
-  StorageByDatabaseChart,
   DocumentsByDatabaseChart,
-  DataVsIndexChart,
+  StorageShareDonutChart,
   TopCollectionsChart,
   CollectionTypeChart,
 } from "./OverviewCharts";
@@ -65,7 +62,7 @@ function topologyLabel(topology: string | null | undefined): string {
 
 export function ConnectionOverview({
   active,
-  onNewQuery,
+  onOpenDatabase,
 }: {
   active: {
     handle: ConnectionHandle;
@@ -73,7 +70,7 @@ export function ConnectionOverview({
     databases: DatabaseSummary[];
     collections: Record<string, CollectionSummary[]>;
   };
-  onNewQuery: () => void;
+  onOpenDatabase: (databaseName: string) => void;
 }) {
   const { handle, databases, collections } = active;
   const serverInfo = handle.serverInfo;
@@ -128,24 +125,17 @@ export function ConnectionOverview({
       <div className="overview__charts">
         <section className="overview__chart-panel">
           <h3 className="overview__chart-title">
-            <HardDrive size={13} aria-hidden="true" />
-            <span>Storage by Database</span>
-          </h3>
-          <StorageByDatabaseChart databases={safeDatabases} />
-        </section>
-        <section className="overview__chart-panel">
-          <h3 className="overview__chart-title">
             <FileText size={13} aria-hidden="true" />
             <span>Documents by Database</span>
           </h3>
-          <DocumentsByDatabaseChart databases={safeDatabases} />
+          <DocumentsByDatabaseChart databases={safeDatabases} collections={safeCollections} />
         </section>
         <section className="overview__chart-panel">
           <h3 className="overview__chart-title">
-            <BarChart3 size={13} aria-hidden="true" />
-            <span>Data vs Index Size</span>
+            <PieChart size={13} aria-hidden="true" />
+            <span>Storage Share</span>
           </h3>
-          <DataVsIndexChart databases={safeDatabases} />
+          <StorageShareDonutChart databases={safeDatabases} />
         </section>
         <section className="overview__chart-panel">
           <h3 className="overview__chart-title">
@@ -189,9 +179,14 @@ export function ConnectionOverview({
                   className="overview__db-card"
                   role="button"
                   tabIndex={0}
-                  onClick={onNewQuery}
+                  aria-label={`Open ${db.name} in Find`}
+                  title={`Open ${db.name} in Find${colls.length ? ` (${colls[0].name})` : ""}`}
+                  onClick={() => onOpenDatabase(db.name)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") onNewQuery();
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      onOpenDatabase(db.name);
+                    }
                   }}
                 >
                   <div className="overview__db-card-head">

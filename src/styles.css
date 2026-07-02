@@ -1557,6 +1557,91 @@ body,
 }
 
 /* Collection type breakdown */
+/* Donut chart for storage share by database */
+.overview__donut {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.overview__donut-ring {
+  position: relative;
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.overview__donut-center {
+  position: absolute;
+  width: 84px;
+  height: 84px;
+  border-radius: 50%;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+}
+
+.overview__donut-center-value {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.overview__donut-center-label {
+  font-size: var(--font-size-xs);
+  color: var(--ink-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.overview__donut-legend {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+}
+
+.overview__donut-legend-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-xs);
+  color: var(--ink-muted);
+  min-width: 0;
+}
+
+.overview__donut-legend-label {
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.overview__donut-legend-pct {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.overview__donut-legend-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-faint);
+}
+
 .overview__type-breakdown {
   display: flex;
   flex-direction: column;
@@ -1688,6 +1773,48 @@ body,
   text-align: center;
   color: var(--ink-faint);
   font-size: var(--font-size-xs);
+}
+
+/* Scale toggle (log / linear) for skewed bar charts */
+.overview__scale-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  align-self: flex-end;
+  margin-bottom: var(--space-1);
+}
+
+.overview__scale-btn {
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ink-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 120ms ease-out, color 120ms ease-out, border-color 120ms ease-out;
+  font-family: var(--font-sans);
+  line-height: 1.4;
+}
+
+.overview__scale-btn:first-child {
+  border-right: none;
+}
+
+.overview__scale-btn:hover {
+  color: var(--ink);
+  background: var(--surface-3);
+}
+
+.overview__scale-btn.is-active {
+  color: var(--accent-fg);
+  background: var(--accent-500);
+  border-color: var(--accent-700);
+}
+
+.overview__scale-btn:focus-visible {
+  outline: 2px solid var(--accent-500) !important;
+  outline-offset: -2px !important;
 }
 
 .overview__db-grid {

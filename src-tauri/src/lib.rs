@@ -22,7 +22,7 @@ const APP_NAME: &str = "NoSQLBuddy";
 
 /// Build the native application menu (macOS menu bar + Windows/Linux in-window).
 fn build_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> {
-    let app_meta = AboutMetadata {
+    let _app_meta = AboutMetadata {
         name: Some(APP_NAME.into()),
         version: Some(env!("CARGO_PKG_VERSION").into()),
         short_version: Some(env!("CARGO_PKG_VERSION").into()),

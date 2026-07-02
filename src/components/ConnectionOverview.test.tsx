@@ -72,7 +72,7 @@ const defaultProps = {
     databases: [makeDb()],
     collections: { testdb: [makeColl(), makeColl({ name: "c2" })] },
   },
-  onNewQuery: vi.fn(),
+  onOpenDatabase: vi.fn(),
 };
 
 describe("ConnectionOverview - server header", () => {
@@ -193,12 +193,12 @@ describe("ConnectionOverview - database grid", () => {
     expect(screen.getByText("No databases found on this server.")).toBeInTheDocument();
   });
 
-  it("calls onNewQuery when a database card is clicked", () => {
-    const onNewQuery = vi.fn();
+  it("calls onOpenDatabase with the database name when a card is clicked", () => {
+    const onOpenDatabase = vi.fn();
     const { container } = render(
       <ConnectionOverview
         {...defaultProps}
-        onNewQuery={onNewQuery}
+        onOpenDatabase={onOpenDatabase}
         active={{
           ...defaultProps.active,
           databases: [makeDb({ name: "app", sizeOnDisk: 0 })],
@@ -208,15 +208,16 @@ describe("ConnectionOverview - database grid", () => {
     );
     const card = container.querySelector(".overview__db-card") as HTMLElement;
     fireEvent.click(card);
-    expect(onNewQuery).toHaveBeenCalledTimes(1);
+    expect(onOpenDatabase).toHaveBeenCalledTimes(1);
+    expect(onOpenDatabase).toHaveBeenCalledWith("app");
   });
 
-  it("calls onNewQuery on Enter key press", () => {
-    const onNewQuery = vi.fn();
+  it("calls onOpenDatabase with the database name on Enter key press", () => {
+    const onOpenDatabase = vi.fn();
     const { container } = render(
       <ConnectionOverview
         {...defaultProps}
-        onNewQuery={onNewQuery}
+        onOpenDatabase={onOpenDatabase}
         active={{
           ...defaultProps.active,
           databases: [makeDb({ name: "app", sizeOnDisk: 0 })],
@@ -226,7 +227,26 @@ describe("ConnectionOverview - database grid", () => {
     );
     const card = container.querySelector(".overview__db-card") as HTMLElement;
     fireEvent.keyDown(card, { key: "Enter" });
-    expect(onNewQuery).toHaveBeenCalledTimes(1);
+    expect(onOpenDatabase).toHaveBeenCalledTimes(1);
+    expect(onOpenDatabase).toHaveBeenCalledWith("app");
+  });
+
+  it("calls onOpenDatabase on Space key press for accessibility", () => {
+    const onOpenDatabase = vi.fn();
+    const { container } = render(
+      <ConnectionOverview
+        {...defaultProps}
+        onOpenDatabase={onOpenDatabase}
+        active={{
+          ...defaultProps.active,
+          databases: [makeDb({ name: "shopkeeper", sizeOnDisk: 1024 })],
+          collections: {},
+        }}
+      />,
+    );
+    const card = container.querySelector(".overview__db-card") as HTMLElement;
+    fireEvent.keyDown(card, { key: " " });
+    expect(onOpenDatabase).toHaveBeenCalledWith("shopkeeper");
   });
 
   it("handles database with null sizeOnDisk", () => {
