@@ -51,15 +51,11 @@ jobs:
             });
             return data.id;
 
-  # macOS note: `ark-circom` pulls in `wasmer_vm`, which ships hand-written
-  # per-architecture assembly for its JIT backend. That assembly fails to
-  # cross-link (`___rust_probestack` undefined) when cross-compiling
-  # x86_64-apple-darwin from the arm64 `macos-latest` runner, so a single
-  # `--target universal-apple-darwin` build doesn't work here. Instead we
-  # build each macOS architecture natively on its own runner (macos-latest =
-  # Apple Silicon, macos-15-intel = Intel — the only Intel image GitHub
-  # still offers) and ship two separate signed/notarized DMGs rather than
-  # one universal DMG.
+  # macOS note: we build each architecture natively on its own runner
+  # (macos-latest = Apple Silicon, macos-15-intel = Intel — the only Intel
+  # image GitHub still offers) and ship two separate signed/notarized DMGs
+  # rather than one universal DMG, mainly to keep the two builds independent
+  # while `RUST_TOOLCHAIN` below is pinned (see that comment for why).
   build:
     needs: draft-release
     strategy:
@@ -88,9 +84,23 @@ jobs:
           node-version: lts/*
           cache: npm
 
+      # Pinned (not `stable`) because Rust 1.89+ mangles the
+      # `__rust_probestack` symbol that `wasmer_vm` v4.x (pulled in
+      # transitively via `ark-circom`) still depends on unmangled. This only
+      # affects x86/x86_64 (LLVM only implements stack probes for those
+      # architectures), so it breaks Windows, Linux, and Intel-macOS builds
+      # with "undefined symbol: __rust_probestack" at link time. 1.88.0 is
+      # the last version before that change landed. Bump this once
+      # `ark-circom`/`wasmer` are upgraded past the fix (wasmer >= 6, see
+      # https://github.com/wasmerio/wasmer/pull/5690).
+      #
+      # `notify-rust` was downgraded to 4.17.0 (via `cargo update -p
+      # notify-rust --precise 4.17.0`) in the same change: 4.18.0 requires
+      # rustc >= 1.89, which conflicts with the 1.88.0 pin above.
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: '1.88.0'
           targets: ${{ matrix.target }}
 
       - name: Rust cache

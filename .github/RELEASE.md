@@ -7,14 +7,24 @@ whenever a `v*` tag is pushed, and publishes them as a GitHub Release. The
 updater manifest (`latest.json`) is generated and attached automatically so
 the in-app "Check for updates" button (About screen) can find new versions.
 
-**Why two DMGs instead of one universal binary:** `ark-circom` depends on
-`wasmer_vm`, which contains hand-written per-architecture assembly for its
-JIT backend. That assembly fails to cross-link when cross-compiling
-`x86_64-apple-darwin` from the arm64 `macos-latest` runner
-(`___rust_probestack` undefined), so `--target universal-apple-darwin`
-doesn't work here. Each architecture is instead built natively on its own
-runner (`macos-latest` for Apple Silicon, `macos-15-intel` for Intel — the
-only Intel image GitHub still offers).
+**Why two DMGs instead of one universal binary:** mainly to keep the two
+architectures' builds independent while the Rust toolchain pin below is in
+place. Each architecture is built natively on its own runner (`macos-latest`
+for Apple Silicon, `macos-15-intel` for Intel — the only Intel image GitHub
+still offers).
+
+**Rust toolchain is pinned to 1.88.0** (not `stable`) across all four build
+jobs. Rust 1.89+ mangles the `__rust_probestack` symbol that `wasmer_vm` v4.x
+(pulled in transitively via `ark-circom`) still depends on unmangled. This
+only affects x86/x86_64 (LLVM only implements stack probes for those
+architectures), so it breaks Windows, Linux, and Intel-macOS builds with
+"undefined symbol: __rust_probestack" at link time — Apple Silicon is
+unaffected but pinned too for consistency. `notify-rust` is downgraded to
+4.17.0 in `Cargo.lock` (`cargo update -p notify-rust --precise 4.17.0`) in
+the same change, since 4.18.0 requires rustc >= 1.89. Bump the toolchain
+pin (and re-allow `notify-rust` to float) once `ark-circom`/`wasmer` are
+upgraded past the fix (wasmer >= 6, see
+https://github.com/wasmerio/wasmer/pull/5690).
 
 ## One-time setup: GitHub Secrets
 
