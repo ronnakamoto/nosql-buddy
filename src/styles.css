@@ -6514,6 +6514,12 @@ input[type="checkbox"]:disabled {
   height: 32px;
 }
 
+.about-dialog__update-error {
+  margin: var(--space-2) 0 0;
+  color: var(--danger-500);
+  font-size: var(--font-size-xs);
+}
+
 .about-dialog__link-icon {
   margin-left: 2px;
   opacity: 0.6;

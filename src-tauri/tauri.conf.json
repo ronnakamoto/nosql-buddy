@@ -30,7 +30,14 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg", "msi", "nsis", "appimage", "deb"],
+    "targets": [
+      "app",
+      "dmg",
+      "msi",
+      "nsis",
+      "appimage",
+      "deb"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -43,6 +50,17 @@
     "category": "DeveloperTool",
     "publisher": "NoSQLBuddy",
     "copyright": "(c) 2026 NoSQLBuddy",
+    "macOS": {
+      "entitlements": "entitlements.plist",
+      "minimumSystemVersion": "10.15"
+    },
+    "windows": {
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.digicert.com",
+      "nsis": {
+        "installMode": "perMachine"
+      }
+    },
     "resources": {
       "resources/circuits/merkle_inclusion.r1cs": "resources/circuits/merkle_inclusion.r1cs",
       "resources/circuits/merkle_inclusion.wasm": "resources/circuits/merkle_inclusion.wasm",
@@ -52,6 +70,18 @@
       "../scripts/rs-init-audit.js": "stack/scripts/rs-init-audit.js",
       "../scripts/seed.js": "stack/scripts/seed.js",
       "../audit-stack.env.example": "stack/audit-stack.env.example"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://github.com/ronnakamoto/nosql-buddy/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY5QzhFQzJFN0IwM0Q0QUEKUldTcTFBTjdMdXpJK1NGL2tlRkNVN2o3QmxzZCtpdXh5c1lNQWRQZytWYW9xYXNKL0UwaHlHS3IK",
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

@@ -6,9 +6,12 @@ import {
   Keyboard,
   Code2,
   X,
+  RefreshCw,
+  Download,
 } from "lucide-react";
 import logoUrl from "../assets/logo.png";
 import type { AppInfo } from "../ipc/commands";
+import { useAppUpdater } from "../hooks/useAppUpdater";
 
 interface AboutScreenProps {
   open: boolean;
@@ -25,6 +28,8 @@ export function AboutScreen({
 }: AboutScreenProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
   const year = useMemo(() => new Date().getFullYear(), []);
+  const { status, latestVersion, error, checkForUpdates, installUpdate } =
+    useAppUpdater();
 
   const specs = useMemo(
     () => [
@@ -104,6 +109,47 @@ export function AboutScreen({
           </div>
 
           <div className="about-dialog__actions">
+            {status === "available" ||
+            status === "downloading" ||
+            status === "installing" ? (
+              <button
+                className="toolbar-btn"
+                onClick={() => void installUpdate()}
+                disabled={status !== "available"}
+                title={`Download and install version ${latestVersion}`}
+              >
+                <Download size={14} aria-hidden="true" />
+                <span>
+                  {status === "downloading"
+                    ? "Downloading…"
+                    : status === "installing"
+                      ? "Installing…"
+                      : `Update to ${latestVersion}`}
+                </span>
+              </button>
+            ) : (
+              <button
+                className="toolbar-btn"
+                onClick={() => void checkForUpdates()}
+                disabled={status === "checking"}
+                title="Check for a newer version"
+              >
+                <RefreshCw
+                  size={14}
+                  aria-hidden="true"
+                  className={status === "checking" ? "spin" : undefined}
+                />
+                <span>
+                  {status === "checking"
+                    ? "Checking…"
+                    : status === "up-to-date"
+                      ? "Up to date"
+                      : status === "error"
+                        ? "Check failed"
+                        : "Check for updates"}
+                </span>
+              </button>
+            )}
             {onOpenShortcuts && (
               <button
                 className="toolbar-btn"
@@ -129,6 +175,9 @@ export function AboutScreen({
               <ExternalLink size={12} aria-hidden="true" className="about-dialog__link-icon" />
             </a>
           </div>
+          {status === "error" && error && (
+            <p className="about-dialog__update-error">{error}</p>
+          )}
         </div>
 
         <div className="modal__footer about-dialog__footer">
