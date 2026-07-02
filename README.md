@@ -11,6 +11,8 @@ NoSQLBuddy connects to MongoDB, lets you browse data, run queries, build aggrega
 - [Features](#features)
 - [Using NoSQLBuddy](#using-nosqlbuddy) — how to use the core features
 - [ZK Audit Log](#zk-audit-log) — how the audit system works, roles, and modes
+  - [ZK implementation](#zk-implementation-circuit-prover-and-on-chain-verifier) — circuit, prover, and on-chain verifier
+  - [On-chain contract reference](#on-chain-contract-reference)
   - [Dev Mode](#dev-mode-full-stack-locally) · [Production Mode](#production-mode-in-app-your-keys)
   - [Audit domains and selective disclosure](#audit-domains-and-selective-disclosure-desktop-app)
 - [Standalone audit service](#standalone-audit-service-nosqlbuddy-audit) — CLI, HTTP API, and protocol reference
@@ -193,6 +195,96 @@ NoSQLBuddy can produce a tamper-evident, independently verifiable audit log of e
 3. **Anchor.** The Merkle root is committed on-chain (Stellar blockchain) and the full batch is stored on IPFS. This makes the fingerprint public and permanent.
 4. **Prove.** For any individual record, you can generate a zero-knowledge inclusion proof that it is part of a sealed batch, without revealing any other record.
 5. **Verify.** Anyone can independently verify that a record is in the on-chain log, and that no writes were omitted.
+
+### ZK implementation: circuit, prover, and on-chain verifier
+
+The zero-knowledge proof system is the core of the audit log's integrity guarantee. This section explains the three components: the Circom circuit, the off-chain prover, and the on-chain Soroban verifier.
+
+#### 1. The circuit (Circom + Poseidon)
+
+**File:** [`zk-spike/circuits/merkle_inclusion.circom`](zk-spike/circuits/merkle_inclusion.circom)
+
+The circuit proves **Merkle inclusion**: that a specific leaf (an audit entry) is part of a Merkle tree whose root is publicly committed on-chain. The tree uses **Poseidon(2)** — a ZK-friendly hash with `t=3` (2 inputs + 1 capacity field) — matching `light-poseidon`'s `new_circom(2)` on the Rust side and Circom's `Poseidon(2)` on the circuit side. Poseidon is the hash function Stellar added as a **native host function in Protocol 25**, making it the natural choice for ZK proofs that verify on Stellar.
+
+| Input | Visibility | Description |
+|---|---|---|
+| `root` | **Public** | The Merkle tree root (committed on-chain via Soroban) |
+| `leaf` | Private | The audit entry hash being proven included |
+| `pathElements[20]` | Private | Sibling hashes at each level of the tree |
+| `pathIndices[20]` | Private | Direction bits (0 = left child, 1 = right), constrained to {0, 1} |
+
+The tree is 20 levels deep, supporting up to 2²⁰ ≈ 1M entries per epoch. The circuit reconstructs the root from the leaf and authentication path, and constrains the output to equal the public `root`. If the proof verifies, a judge knows the leaf is in the committed tree — without learning which leaf, or anything about any other entry.
+
+#### 2. The prover (off-chain: ark-circom + ark-groth16)
+
+**Files:** [`zk-audit/src/prover.rs`](zk-audit/src/prover.rs), [`zk-audit/src/merkle.rs`](zk-audit/src/merkle.rs), [`zk-audit/src/bin/ceremony.rs`](zk-audit/src/bin/ceremony.rs)
+
+Proof generation runs off-chain in Rust:
+
+1. **Witness computation** — `ark-circom` loads the compiled circuit (`merkle_inclusion.r1cs` + `.wasm`) and computes the witness via Wasmer, given the leaf and its authentication path.
+2. **Groth16 proof** — `ark-groth16` on the BN254 curve generates a zero-knowledge proof that the witness satisfies the circuit's constraints. The proof is a triple of elliptic-curve points (A ∈ G1, B ∈ G2, C ∈ G1).
+3. **Trusted setup** — The `zk-audit-ceremony` binary runs the Powers of Tau ceremony once to produce a stable proving key (`.pkey`) and verifying key (`.vkey`) in arkworks binary format. The proving key is reused for every proof; the verifying key is deployed with the contract.
+
+```
+audit entry → Poseidon hash → leaf in Merkle tree → authentication path
+  → Circom witness → Groth16 proof (A, B, C on BN254)
+```
+
+#### 3. The on-chain verifier (Soroban + BN254 host functions)
+
+**File:** [`zk-audit/soroban-contract/src/lib.rs`](zk-audit/soroban-contract/src/lib.rs) — function `verify_inclusion`
+
+The Soroban contract verifies Groth16 proofs **on-chain** using Stellar's native BN254 host functions, introduced in **Protocol 25 ("X-Ray")** and expanded in **Protocol 26 ("Yardstick")**. These host functions move the heavy elliptic-curve math into the protocol layer, making on-chain proof verification affordable enough to run for every batch.
+
+The verification algorithm:
+
+1. **Check the root was committed** — the contract looks up the root in its append-only on-chain log. You can't verify a proof against a root that was never anchored.
+2. **Deserialize proof and verifying key** — points are received as raw big-endian bytes (G1: 64 bytes, G2: 128 bytes), matching the off-chain serializer in [`zk-audit/src/serialize.rs`](zk-audit/src/serialize.rs).
+3. **Compute `vk_x`** — `vk_x = ic[0] + Σ pub_signals[i] · ic[i+1]` using `bn254.g1_mul` and `bn254.g1_add` (Protocol 25 host functions).
+4. **Pairing check** — verifies the Groth16 pairing equation:
+   ```
+   e(-A, B) · e(α, β) · e(vk_x, γ) · e(C, δ) == 1
+   ```
+   via `bn254.pairing_check` (Protocol 25/26 host function). If the pairing holds, the proof is valid.
+
+The contract uses these Soroban BN254 host functions: `g1_mul`, `g1_add`, `pairing_check`, and `Fr` field arithmetic — all from Protocol 25/26. This is what makes on-chain Groth16 verification cost-effective on Stellar.
+
+#### What is zero-knowledge about this
+
+The proof reveals **nothing** about the private inputs. An auditor verifying the proof on-chain learns only:
+
+- A specific leaf exists in the committed Merkle tree (inclusion)
+- The root matches the on-chain commitment (integrity)
+
+They do **not** learn:
+
+- Which audit entry the leaf corresponds to
+- Any sibling hashes or tree structure
+- Any document content, field names, or data from the database
+
+The database content never leaves the operator's infrastructure. Only a 32-byte hash (the root) and a zero-knowledge proof go on-chain. This is the core ZK value: prove the audit log is complete and correct, without revealing the data being audited.
+
+### On-chain contract reference
+
+The verifier contract is deployed on **Stellar testnet**:
+
+```
+Contract ID: CCUCFDRF6IMY3STBIFRBBGFFPETBSAPPTDACNOBYWKNPG5QUCAMGGUQ5
+```
+
+You can inspect committed roots and transactions on [stellar.expert](https://stellar.expert/explorer/testnet/contract/CCUCFDRF6IMY3STBIFRBBGFFPETBSAPPTDACNOBYWKNPG5QUCAMGGUQ5). The contract exposes:
+
+| Function | What it does |
+|---|---|
+| `commit_root(root, metadata)` | Anchor a Merkle root on-chain (admin-gated) |
+| `commit_root_with_oplog(root, oplog_root, metadata)` | Anchor root + oplog completeness hash |
+| `verify_inclusion(root, proof, vk)` | **Verify a Groth16 proof on-chain** via BN254 host functions |
+| `get_current_root()` | Read the latest committed root |
+| `attest_oplog(epoch, oplog_root, signature)` | Independent attester signs the oplog hash |
+
+To independently verify a proof: obtain a Groth16 proof and verifying key from the prover (see the [example flow](#example-end-to-end-flow) below), call `verify_inclusion` on the contract with the committed root, and the BN254 pairing check runs on-chain. The full contract source is in [`zk-audit/soroban-contract/`](zk-audit/soroban-contract/), with interface documentation in [`INTERFACE.md`](zk-audit/soroban-contract/INTERFACE.md).
+
+> **Dev Mode deploys your own contract.** When you run Dev Mode setup, the wizard deploys a fresh per-user contract on testnet (your publisher key becomes admin). The contract ID above is the shared default; your Dev Mode instance will have its own. Check **Advanced → Your contract** in the Audit tab for the active ID.
 
 ### Roles: publisher vs attester
 

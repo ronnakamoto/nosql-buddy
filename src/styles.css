@@ -54,7 +54,7 @@ body,
   grid-template-columns: auto 1fr;
   grid-template-areas:
     "titlebar titlebar"
-    "toolbar toolbar"
+    "sidebar toolbar"
     "sidebar workspace"
     "statusbar statusbar";
   height: 100vh;
@@ -81,6 +81,15 @@ body,
   font-weight: 700;
   letter-spacing: -0.01em;
   color: var(--ink);
+}
+
+.app__titlebar-logo {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  object-fit: contain;
+  -webkit-user-drag: none;
+  pointer-events: none;
 }
 
 /* ─── Feature toolbar ──────────────────────────────────────────── */
@@ -117,7 +126,8 @@ body,
   gap: var(--space-2);
   height: 28px;
   padding: 0 var(--space-3);
-  border: none;
+  border: 1px solid transparent;
+  border-bottom-color: transparent;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--ink-muted);
@@ -127,7 +137,8 @@ body,
   letter-spacing: -0.003em;
   white-space: nowrap;
   cursor: pointer;
-  transition: background 150ms ease-out, color 150ms ease-out;
+  transition: background 150ms ease-out, color 150ms ease-out,
+    border-color 150ms ease-out, box-shadow 150ms ease-out, transform 150ms ease-out;
 }
 .toolbar-btn svg {
   color: var(--ink-faint);
@@ -135,13 +146,22 @@ body,
 }
 .toolbar-btn:hover {
   background: var(--surface-2);
+  border-color: var(--border);
+  border-bottom-color: var(--border-strong);
   color: var(--ink);
+  box-shadow: 0 1px 0 0 color-mix(in oklch, var(--ink) 3%, transparent);
+  transform: translateY(-0.5px);
 }
 .toolbar-btn:hover svg {
   color: var(--ink-muted);
 }
 .toolbar-btn:active {
   background: var(--surface-3);
+  border-color: var(--border);
+  border-bottom-color: var(--border);
+  border-top-color: var(--border-strong);
+  box-shadow: inset 0 1px 2px 0 color-mix(in oklch, oklch(0.2 0 0) 4%, transparent);
+  transform: translateY(0.5px);
 }
 .toolbar-btn:focus-visible {
   outline: 2px solid var(--accent-500);
@@ -151,6 +171,9 @@ body,
   opacity: 0.4;
   cursor: not-allowed;
   color: var(--ink-faint);
+  border-color: transparent;
+  box-shadow: none;
+  transform: none;
 }
 .toolbar-btn:disabled svg {
   color: var(--ink-faint);
@@ -158,17 +181,34 @@ body,
 .toolbar-btn:disabled:hover {
   background: transparent;
   color: var(--ink-faint);
+  border-color: transparent;
+  box-shadow: none;
+  transform: none;
 }
 
 .app__sidebar {
   grid-area: sidebar;
-  width: 300px;
   border-right: 1px solid var(--border);
   background: var(--surface);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   min-height: 0;
   overflow: hidden;
+}
+
+.app__sidebar-resizer {
+  grid-area: sidebar;
+  justify-self: end;
+  width: 5px;
+  cursor: col-resize;
+  background: transparent;
+  z-index: var(--z-elevated);
+  position: relative;
+  margin-right: -2px;
+}
+.app__sidebar-resizer:hover,
+.app__sidebar-resizer.is-resizing {
+  background: var(--accent-500);
 }
 
 .app__sidebar-header {
@@ -216,7 +256,7 @@ body,
 
 .app__sidebar-search-icon {
   position: absolute;
-  left: calc(var(--space-3) + 2px);
+  left: calc(var(--space-3) + 8px);
   top: 50%;
   transform: translateY(-50%);
   color: var(--ink-faint);
@@ -225,8 +265,8 @@ body,
 
 .app__sidebar-search input {
   width: 100%;
-  height: 28px;
-  padding: 0 var(--space-2) 0 calc(var(--space-2) + 18px);
+  min-height: 30px;
+  padding: 5px 28px 5px 34px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg);
@@ -237,7 +277,7 @@ body,
 
 .app__sidebar-search-clear {
   position: absolute;
-  right: calc(var(--space-3) + 4px);
+  right: calc(var(--space-3) + 8px);
   top: 50%;
   transform: translateY(-50%);
   width: 16px;
@@ -317,7 +357,7 @@ body,
 .conn-status {
   width: 8px;
   height: 8px;
-  border-radius: 50%;
+  border-radius: 0px;
   flex-shrink: 0;
 }
 .conn-status--connected {
@@ -519,7 +559,7 @@ body,
   color: var(--success-500);
   background: color-mix(in oklch, var(--success-500) 15%, transparent);
   padding: 2px 6px;
-  border-radius: 999px;
+  border-radius: 0px;
   flex-shrink: 0;
 }
 
@@ -790,10 +830,12 @@ body,
   letter-spacing: -0.003em;
   border-radius: var(--radius-md);
   border: 1px solid var(--border);
+  border-bottom-color: var(--border-strong);
   background: var(--surface);
   color: var(--ink);
+  box-shadow: 0 1px 0 0 color-mix(in oklch, var(--ink) 4%, transparent);
   transition: background 120ms ease-out, border-color 120ms ease-out,
-    box-shadow 120ms ease-out, color 120ms ease-out;
+    box-shadow 120ms ease-out, color 120ms ease-out, transform 120ms ease-out;
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
@@ -802,32 +844,53 @@ body,
 .btn:hover {
   background: var(--surface-2);
   border-color: var(--border-strong);
+  border-bottom-color: var(--border-strong);
+  box-shadow: 0 2px 0 0 color-mix(in oklch, var(--ink) 6%, transparent);
+  transform: translateY(-0.5px);
 }
 .btn:active {
   background: var(--surface-3);
+  border-color: var(--border);
+  border-bottom-color: var(--border);
+  border-top-color: var(--border-strong);
+  box-shadow: inset 0 1px 2px 0 color-mix(in oklch, oklch(0.2 0 0) 5%, transparent);
   transform: translateY(0.5px);
 }
 .btn[disabled] {
   opacity: 0.5;
   cursor: not-allowed;
   transform: none;
+  box-shadow: none;
+  border-bottom-color: var(--border);
 }
 
-/* Primary: filled accent with a fine top sheen, the Zed control signature. */
+/* Primary: filled accent with a fine top sheen, the Zed control signature.
+   Extra bottom offset shadow lifts the surface for a tactile 3D feel. */
 .btn--primary {
   background: var(--accent-500);
-  border-color: transparent;
+  border: 1px solid var(--accent-700);
+  border-bottom-color: var(--accent-700);
   color: var(--accent-fg);
-  box-shadow: inset 0 1px 0 0 var(--highlight), 0 1px 2px 0 oklch(0 0 0 / 0.12);
+  box-shadow:
+    inset 0 1px 0 0 var(--highlight),
+    0 1px 0 0 color-mix(in oklch, var(--accent-700) 35%, transparent);
 }
 .btn--primary:hover {
   background: var(--accent-600);
-  border-color: transparent;
+  border-color: var(--accent-700);
+  border-bottom-color: var(--accent-700);
   color: var(--accent-fg);
+  box-shadow:
+    inset 0 1px 0 0 var(--highlight),
+    0 2px 0 0 color-mix(in oklch, var(--accent-700) 45%, transparent);
+  transform: translateY(-0.5px);
 }
 .btn--primary:active {
   background: var(--accent-700);
-  color: var(--accent-fg);
+  border-color: var(--accent-700);
+  border-bottom-color: var(--accent-700);
+  box-shadow: inset 0 1px 3px 0 color-mix(in oklch, oklch(0.2 0 0) 12%, transparent);
+  transform: translateY(0.5px);
 }
 .btn--primary .kbd {
   background: oklch(1 0 0 / 0.16);
@@ -837,39 +900,82 @@ body,
 .btn--ghost {
   background: transparent;
   border-color: transparent;
+  border-bottom-color: transparent;
   color: var(--ink-muted);
+  box-shadow: none;
 }
 .btn--ghost:hover {
   background: var(--surface-2);
   color: var(--ink);
   border-color: transparent;
+  border-bottom-color: transparent;
+  box-shadow: none;
+  transform: none;
+}
+.btn--ghost:active {
+  background: var(--surface-3);
+  box-shadow: none;
+  transform: none;
 }
 .btn--danger {
   background: transparent;
-  border-color: var(--border);
+  border: 1px solid var(--border);
+  border-bottom-color: var(--border-strong);
   color: var(--danger-500);
+  box-shadow: 0 1px 0 0 color-mix(in oklch, var(--ink) 4%, transparent);
 }
 .btn--danger:hover {
   background: color-mix(in oklch, var(--danger-500), transparent 88%);
   border-color: var(--danger-500);
+  border-bottom-color: var(--danger-500);
+  color: var(--danger-500);
+  box-shadow: 0 2px 0 0 color-mix(in oklch, var(--danger-500) 18%, transparent);
+  transform: translateY(-0.5px);
+}
+.btn--danger:active {
+  background: color-mix(in oklch, var(--danger-500), transparent 80%);
+  border-color: var(--danger-500);
+  border-bottom-color: var(--danger-500);
+  box-shadow: inset 0 1px 2px 0 color-mix(in oklch, oklch(0.2 0 0) 5%, transparent);
+  transform: translateY(0.5px);
 }
 /* Filled danger: solid red background for confirm-destroy actions. */
 .btn--danger-filled {
   background: var(--danger-500);
-  border-color: var(--danger-500);
+  border: 1px solid oklch(from var(--danger-500) calc(l - 0.08) c h);
+  border-bottom-color: oklch(from var(--danger-500) calc(l - 0.08) c h);
   color: var(--accent-fg);
+  box-shadow:
+    inset 0 1px 0 0 oklch(1 0 0 / 0.12),
+    0 1px 0 0 color-mix(in oklch, oklch(from var(--danger-500) calc(l - 0.08) c h) 35%, transparent);
 }
 .btn--danger-filled:hover {
   background: oklch(from var(--danger-500) calc(l - 0.05) c h);
-  border-color: oklch(from var(--danger-500) calc(l - 0.05) c h);
+  border-color: oklch(from var(--danger-500) calc(l - 0.08) c h);
+  border-bottom-color: oklch(from var(--danger-500) calc(l - 0.08) c h);
+  color: var(--accent-fg);
+  box-shadow:
+    inset 0 1px 0 0 oklch(1 0 0 / 0.12),
+    0 2px 0 0 color-mix(in oklch, oklch(from var(--danger-500) calc(l - 0.08) c h) 45%, transparent);
+  transform: translateY(-0.5px);
+}
+.btn--danger-filled:active {
+  background: oklch(from var(--danger-500) calc(l - 0.1) c h);
+  border-color: oklch(from var(--danger-500) calc(l - 0.08) c h);
+  border-bottom-color: oklch(from var(--danger-500) calc(l - 0.08) c h);
+  box-shadow: inset 0 1px 3px 0 color-mix(in oklch, oklch(0.2 0 0) 12%, transparent);
+  transform: translateY(0.5px);
 }
 .btn--danger-filled:focus-visible {
   box-shadow: 0 0 0 3px color-mix(in oklch, var(--danger-500) 30%, transparent);
 }
 .btn.is-active {
   background: var(--accent-100);
-  border-color: color-mix(in oklch, var(--accent-500), transparent 55%);
+  border: 1px solid color-mix(in oklch, var(--accent-500), transparent 55%);
+  border-bottom-color: color-mix(in oklch, var(--accent-500), transparent 40%);
   color: var(--accent-700);
+  box-shadow: inset 0 1px 2px 0 color-mix(in oklch, var(--accent-500) 10%, transparent);
+  transform: translateY(0.5px);
 }
 .btn--sm {
   height: 24px;
@@ -921,7 +1027,7 @@ body,
   font-size: var(--font-size-sm);
   color: var(--ink-muted);
   border-bottom: 2px solid transparent;
-  cursor: default;
+  cursor: pointer;
   user-select: none;
   white-space: nowrap;
   transition: background 120ms ease-out, color 120ms ease-out;
@@ -1015,6 +1121,7 @@ body,
   line-height: 1;
   background: transparent;
   border: none;
+  cursor: pointer;
   transition: background 150ms ease-out, color 150ms ease-out;
 }
 .new-tab-menu__trigger:hover {
@@ -1396,6 +1503,61 @@ body,
   z-index: 1;
 }
 
+.results-grid__th-label {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-right: var(--space-2);
+}
+
+/* Grabbable column-resize separator, anchored to the trailing edge of a
+ * header cell. Sits flush against the header's sticky positioning context
+ * so it tracks the column while scrolling. Widened invisible hit area keeps
+ * the visible line thin without making it hard to grab. */
+.col-resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 2;
+}
+
+.col-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--border);
+  transition: background-color 120ms ease-out, width 120ms ease-out;
+}
+
+.col-resize-handle:hover::after,
+.col-resize-handle:focus-visible::after,
+.col-resize-handle--active::after {
+  width: 2px;
+  background: var(--accent-500);
+}
+
+.col-resize-handle:focus-visible {
+  outline: 2px solid var(--accent-500);
+  outline-offset: -2px;
+}
+
+body.col-resize-active,
+body.col-resize-active * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+.results-grid tbody tr {
+  cursor: pointer;
+}
 .results-grid tbody tr:hover {
   background: var(--surface);
 }
@@ -1457,7 +1619,7 @@ body,
   color: var(--ink);
   background: var(--surface-2);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 0px;
   padding: 1px 4px;
 }
 .paging-bar__spacer {
@@ -1479,7 +1641,7 @@ body,
   align-items: center;
   justify-content: center;
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: 0px;
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.04em;
@@ -1647,9 +1809,7 @@ body,
   color: var(--ink);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
-  box-shadow:
-    var(--shadow-md),
-    0 24px 48px color-mix(in oklch, var(--ink), transparent 75%);
+  box-shadow: var(--shadow-lg);
   width: min(640px, 92vw);
   max-height: 86vh;
   overflow: hidden;
@@ -1857,7 +2017,6 @@ body,
 .field__input:focus,
 .field__select:focus,
 .field__textarea:focus {
-  border-color: var(--accent-500);
   background: var(--surface);
 }
 .field__textarea {
@@ -1884,7 +2043,7 @@ input[type="checkbox"] {
   width: 16px;
   height: 16px;
   border: 2px solid var(--ink-muted);
-  border-radius: 3px;
+  border-radius: 0px;
   background: var(--surface-2);
   cursor: pointer;
   display: inline-grid;
@@ -1985,7 +2144,7 @@ input[type="checkbox"]:disabled {
   gap: var(--space-3);
   font-size: var(--font-size-sm);
   color: var(--ink);
-  cursor: default;
+  cursor: pointer;
 }
 .command-palette__item.is-active,
 .command-palette__item:hover {
@@ -2554,7 +2713,7 @@ input[type="checkbox"]:disabled {
   gap: var(--space-3);
   padding: var(--space-2) var(--space-3);
   font-size: var(--font-size-sm);
-  cursor: default;
+  cursor: pointer;
 }
 
 .schema-field__head[role="button"] {
@@ -2644,7 +2803,7 @@ input[type="checkbox"]:disabled {
   display: flex;
   height: 6px;
   width: 80px;
-  border-radius: 3px;
+  border-radius: 0px;
   overflow: hidden;
   background: var(--surface-3);
   flex-shrink: 0;
@@ -2695,7 +2854,7 @@ input[type="checkbox"]:disabled {
   display: block;
   height: 12px;
   background: var(--surface-3);
-  border-radius: 2px;
+  border-radius: 0px;
   overflow: hidden;
 }
 
@@ -2703,7 +2862,7 @@ input[type="checkbox"]:disabled {
   display: block;
   height: 100%;
   background: var(--accent-500);
-  border-radius: 2px;
+  border-radius: 0px;
   transform-origin: left center;
   transition: transform 0.2s ease;
 }
@@ -2738,7 +2897,7 @@ input[type="checkbox"]:disabled {
 .schema-type {
   display: inline-block;
   padding: 1px 6px;
-  border-radius: 3px;
+  border-radius: 0px;
   background: var(--surface-2);
   border: 1px solid var(--border);
   font-size: 10px;
@@ -2760,7 +2919,7 @@ input[type="checkbox"]:disabled {
   font-size: var(--font-size-sm);
   color: var(--ink-muted);
   border-bottom: 2px solid transparent;
-  cursor: default;
+  cursor: pointer;
 }
 .tabs-secondary__item.is-active {
   color: var(--ink);
@@ -2780,7 +2939,7 @@ input[type="checkbox"]:disabled {
   display: inline-block;
   width: 12px;
   height: 12px;
-  border-radius: 50%;
+  border-radius: 0px;
   border: 2px solid var(--border);
   border-top-color: var(--accent-500);
   animation: spin 800ms linear infinite;
@@ -2816,7 +2975,7 @@ input[type="checkbox"]:disabled {
   background: var(--ink);
   color: var(--bg);
   padding: 4px 8px;
-  border-radius: 4px;
+  border-radius: 0px;
   font-size: var(--font-size-xs);
   white-space: nowrap;
   z-index: var(--z-tooltip);
@@ -2833,7 +2992,7 @@ input[type="checkbox"]:disabled {
   border: 1px solid transparent;
   padding: 2px 4px;
   margin: -3px -5px;
-  border-radius: 4px;
+  border-radius: 0px;
   cursor: pointer;
   font: inherit;
   color: inherit;
@@ -2880,7 +3039,7 @@ input[type="checkbox"]:disabled {
   font-size: 12px;
   padding: 4px 6px;
   border: 1px solid var(--accent-700);
-  border-radius: 4px;
+  border-radius: 0px;
   background: var(--bg);
   color: var(--ink);
   resize: vertical;
@@ -2898,7 +3057,7 @@ input[type="checkbox"]:disabled {
   background: var(--surface-2);
   color: var(--ink);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: 0px;
   cursor: pointer;
 }
 
@@ -2909,11 +3068,14 @@ input[type="checkbox"]:disabled {
 
 .editable-cell-button--save {
   background: var(--accent-700);
-  color: var(--bg);
+  color: var(--accent-fg);
   border-color: var(--accent-700);
 }
 
 .editable-cell-button--save:hover:not(:disabled) {
+  background: var(--accent-600);
+  color: var(--accent-fg);
+  border-color: var(--accent-600);
   filter: brightness(1.1);
 }
 
@@ -2964,8 +3126,8 @@ input[type="checkbox"]:disabled {
   z-index: var(--z-overlay, 100);
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  box-shadow: 0 4px 16px oklch(0.2 0 0 / 0.18);
+  border-radius: 0px;
+  box-shadow: var(--shadow-md);
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 2px;
@@ -2979,7 +3141,7 @@ input[type="checkbox"]:disabled {
   border: 1px solid transparent;
   color: var(--ink);
   padding: 6px 10px;
-  border-radius: 4px;
+  border-radius: 0px;
   cursor: pointer;
   font-family: var(--font-mono);
   font-size: 12px;
@@ -3018,7 +3180,7 @@ input[type="checkbox"]:disabled {
 .agg-stage {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 0px;
   padding: var(--space-2);
   display: flex;
   flex-direction: column;
@@ -3061,7 +3223,7 @@ input[type="checkbox"]:disabled {
   background: var(--accent-100);
   color: var(--accent-700);
   padding: 2px 8px;
-  border-radius: 4px;
+  border-radius: 0px;
   font-weight: 600;
 }
 
@@ -3077,7 +3239,7 @@ input[type="checkbox"]:disabled {
   font-size: 12px;
   padding: var(--space-2);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: 0px;
   background: var(--bg);
   color: var(--ink);
   resize: vertical;
@@ -3093,7 +3255,7 @@ input[type="checkbox"]:disabled {
 .cm-stage-editor {
   width: 100%;
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: 0px;
   background: var(--bg);
   overflow: hidden;
 }
@@ -3132,7 +3294,7 @@ input[type="checkbox"]:disabled {
   margin-top: 4px;
   padding: 2px 4px 2px 8px;
   border: none;
-  border-radius: 4px;
+  border-radius: 0px;
   background: var(--accent-600);
   color: #fff;
   font-size: 11px;
@@ -3146,7 +3308,7 @@ input[type="checkbox"]:disabled {
 }
 .cm-fix-btn__kbd {
   padding: 1px 4px;
-  border-radius: 3px;
+  border-radius: 0px;
   background: color-mix(in oklch, #fff, transparent 75%);
   color: #fff;
   font-family: var(--font-sans);
@@ -3160,7 +3322,7 @@ input[type="checkbox"]:disabled {
   color: oklch(0.45 0.18 25);
   background: oklch(0.95 0.05 25);
   border: 1px solid oklch(0.85 0.08 25);
-  border-radius: 4px;
+  border-radius: 0px;
   padding: 4px 8px;
 }
 
@@ -3177,8 +3339,8 @@ input[type="checkbox"]:disabled {
   z-index: var(--z-overlay, 100);
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  box-shadow: 0 4px 16px oklch(0.2 0 0 / 0.18);
+  border-radius: 0px;
+  box-shadow: var(--shadow-md);
   width: min(420px, 90vw);
   max-height: 480px;
   overflow: auto;
@@ -3244,7 +3406,8 @@ input[type="checkbox"]:disabled {
   align-items: center;
   gap: var(--space-1);
   padding: 4px var(--space-1);
-  border-radius: 4px;
+  border-radius: 0px;
+  cursor: pointer;
 }
 
 .history-panel__item:hover {
@@ -3411,6 +3574,7 @@ input[type="checkbox"]:disabled {
   flex-wrap: wrap;
   padding: 3px var(--space-4);
   border-radius: var(--radius-sm);
+  cursor: pointer;
   transition: background 120ms ease-out;
 }
 .explain-node__head:hover {
@@ -3451,7 +3615,7 @@ input[type="checkbox"]:disabled {
   content: "";
   width: 4px;
   height: 4px;
-  border-radius: 50%;
+  border-radius: 0px;
   background: var(--border-strong);
 }
 
@@ -3813,7 +3977,7 @@ input[type="checkbox"]:disabled {
   background: var(--bg-elev-2);
   border: 1px solid var(--border-soft);
   padding: 2px var(--space-2);
-  border-radius: 999px;
+  border-radius: 0px;
 }
 .shell-tab__hint {
   margin-left: auto;
@@ -4734,7 +4898,7 @@ input[type="checkbox"]:disabled {
   flex: 1;
   height: 4px;
   background: var(--surface-3);
-  border-radius: 2px;
+  border-radius: 0px;
   overflow: hidden;
 }
 
@@ -4743,7 +4907,7 @@ input[type="checkbox"]:disabled {
   width: 100%;
   height: 100%;
   background: var(--accent-500);
-  border-radius: 2px;
+  border-radius: 0px;
   transform-origin: left center;
   transition: transform 200ms ease-out;
 }
@@ -4868,6 +5032,7 @@ input[type="checkbox"]:disabled {
   padding: 4px var(--space-2);
   border-radius: var(--radius-sm);
   font-size: var(--font-size-xs);
+  cursor: pointer;
 }
 
 .job-runs__item:hover {
@@ -5064,6 +5229,7 @@ input[type="checkbox"]:disabled {
   align-items: center;
   gap: var(--space-2);
   padding: var(--space-1) var(--space-3);
+  cursor: pointer;
   transition: background 150ms ease-out;
   font-size: var(--font-size-sm);
 }
@@ -5265,6 +5431,7 @@ input[type="checkbox"]:disabled {
 .shortcut-btn--primary:hover:not(:disabled) {
   background: var(--accent-600);
   border-color: var(--accent-600);
+  color: var(--accent-fg);
 }
 
 .shortcut-btn--primary:focus-visible {
@@ -5291,6 +5458,7 @@ input[type="checkbox"]:disabled {
 .shortcut-btn--danger:hover:not(:disabled) {
   background: color-mix(in oklch, var(--danger-500) 85%, black);
   border-color: color-mix(in oklch, var(--danger-500) 85%, black);
+  color: white;
 }
 
 .shortcut-btn--default {
@@ -5556,6 +5724,7 @@ input[type="checkbox"]:disabled {
   gap: var(--space-4);
   padding: var(--space-3);
   border-radius: var(--radius-md);
+  cursor: pointer;
   transition: background 150ms ease-out;
 }
 

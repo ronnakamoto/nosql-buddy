@@ -5,7 +5,7 @@
 
 :root {
   color-scheme: light dark;
-  /* Typography. Zed Plex Sans / Mono are built on IBM Plex; we use the
+  /* Typography. Plex Sans / Mono are built on IBM Plex; we use the
      upstream IBM Plex family for the same calm, engineered character. */
   --font-sans: "IBM Plex Sans Variable", "IBM Plex Sans", -apple-system,
     BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", system-ui, sans-serif;
@@ -37,10 +37,10 @@
   --space-7: 28px;
   --space-8: 32px;
 
-  /* Radii. Tight, engineered corners in the Zed register. */
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 9px;
+  /* Radii. Zero-tolerance corners for a precise instrument-panel register. */
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
 
   /* Z-index scale (semantic, no arbitrary 9999) */
   --z-base: 0;
@@ -82,11 +82,11 @@
   --ink-faint: oklch(0.6 0.012 240);
   --selection: oklch(0.93 0.04 252);
 
-  /* Shadows */
-  --shadow-xs: 0 1px 2px 0 oklch(0.2 0.01 240 / 0.05);
-  --shadow-sm: 0 1px 3px 0 oklch(0.2 0.01 240 / 0.07), 0 1px 2px -1px oklch(0.2 0.01 240 / 0.07);
-  --shadow-md: 0 4px 6px -1px oklch(0.2 0.01 240 / 0.08), 0 2px 4px -2px oklch(0.2 0.01 240 / 0.06);
-  --shadow-lg: 0 12px 24px -6px oklch(0.2 0.01 240 / 0.14), 0 6px 12px -4px oklch(0.2 0.01 240 / 0.08);
+  /* Shadows — crisp, directional, minimal blur for a lifted instrument feel. */
+  --shadow-xs: 0 1px 0 0 oklch(0.2 0.01 240 / 0.06);
+  --shadow-sm: 0 2px 0 0 oklch(0.2 0.01 240 / 0.08), 0 1px 0 0 oklch(0.2 0.01 240 / 0.04);
+  --shadow-md: 0 4px 0 0 oklch(0.2 0.01 240 / 0.10), 0 2px 0 0 oklch(0.2 0.01 240 / 0.06);
+  --shadow-lg: 0 8px 0 0 oklch(0.2 0.01 240 / 0.12), 0 4px 0 0 oklch(0.2 0.01 240 / 0.08);
   --link: var(--accent-600);
   --link-hover: var(--accent-700);
 }
@@ -105,10 +105,10 @@
     --selection: oklch(0.36 0.07 256);
     --accent-100: oklch(0.32 0.07 256);
     --highlight: oklch(1 0 0 / 0.06);
-    --shadow-xs: 0 1px 2px 0 oklch(0 0 0 / 0.3);
-    --shadow-sm: 0 1px 3px 0 oklch(0 0 0 / 0.4), 0 1px 2px -1px oklch(0 0 0 / 0.3);
-    --shadow-md: 0 4px 6px -1px oklch(0 0 0 / 0.5), 0 2px 4px -2px oklch(0 0 0 / 0.35);
-    --shadow-lg: 0 16px 32px -8px oklch(0 0 0 / 0.6), 0 8px 16px -6px oklch(0 0 0 / 0.45);
+    --shadow-xs: 0 1px 0 0 oklch(0 0 0 / 0.35);
+    --shadow-sm: 0 2px 0 0 oklch(0 0 0 / 0.45), 0 1px 0 0 oklch(0 0 0 / 0.25);
+    --shadow-md: 0 4px 0 0 oklch(0 0 0 / 0.55), 0 2px 0 0 oklch(0 0 0 / 0.35);
+    --shadow-lg: 0 8px 0 0 oklch(0 0 0 / 0.65), 0 4px 0 0 oklch(0 0 0 / 0.45);
     --link: var(--accent-500);
     --link-hover: var(--accent-500);
   }
@@ -126,10 +126,10 @@
   --ink-muted: oklch(0.46 0.012 240);
   --ink-faint: oklch(0.6 0.012 240);
   --selection: oklch(0.93 0.04 252);
-  --shadow-xs: 0 1px 2px 0 oklch(0.2 0.01 240 / 0.05);
-  --shadow-sm: 0 1px 3px 0 oklch(0.2 0.01 240 / 0.07), 0 1px 2px -1px oklch(0.2 0.01 240 / 0.07);
-  --shadow-md: 0 4px 6px -1px oklch(0.2 0.01 240 / 0.08), 0 2px 4px -2px oklch(0.2 0.01 240 / 0.06);
-  --shadow-lg: 0 12px 24px -6px oklch(0.2 0.01 240 / 0.14), 0 6px 12px -4px oklch(0.2 0.01 240 / 0.08);
+  --shadow-xs: 0 1px 0 0 oklch(0.2 0.01 240 / 0.06);
+  --shadow-sm: 0 2px 0 0 oklch(0.2 0.01 240 / 0.08), 0 1px 0 0 oklch(0.2 0.01 240 / 0.04);
+  --shadow-md: 0 4px 0 0 oklch(0.2 0.01 240 / 0.10), 0 2px 0 0 oklch(0.2 0.01 240 / 0.06);
+  --shadow-lg: 0 8px 0 0 oklch(0.2 0.01 240 / 0.12), 0 4px 0 0 oklch(0.2 0.01 240 / 0.08);
   --link: var(--accent-600);
   --link-hover: var(--accent-700);
 }
@@ -148,10 +148,10 @@
   --selection: oklch(0.36 0.07 256);
   --accent-100: oklch(0.32 0.07 256);
   --highlight: oklch(1 0 0 / 0.06);
-  --shadow-xs: 0 1px 2px 0 oklch(0 0 0 / 0.3);
-  --shadow-sm: 0 1px 3px 0 oklch(0 0 0 / 0.4), 0 1px 2px -1px oklch(0 0 0 / 0.3);
-  --shadow-md: 0 4px 6px -1px oklch(0 0 0 / 0.5), 0 2px 4px -2px oklch(0 0 0 / 0.35);
-  --shadow-lg: 0 16px 32px -8px oklch(0 0 0 / 0.6), 0 8px 16px -6px oklch(0 0 0 / 0.45);
+  --shadow-xs: 0 1px 0 0 oklch(0 0 0 / 0.35);
+  --shadow-sm: 0 2px 0 0 oklch(0 0 0 / 0.45), 0 1px 0 0 oklch(0 0 0 / 0.25);
+  --shadow-md: 0 4px 0 0 oklch(0 0 0 / 0.55), 0 2px 0 0 oklch(0 0 0 / 0.35);
+  --shadow-lg: 0 8px 0 0 oklch(0 0 0 / 0.65), 0 4px 0 0 oklch(0 0 0 / 0.45);
   --link: var(--accent-500);
   --link-hover: var(--accent-500);
 }
@@ -249,15 +249,14 @@ select:focus-visible,
 .kbd:focus-visible {
   outline: 2px solid var(--accent-500) !important;
   outline-offset: -2px !important;
-  border-radius: var(--radius-sm);
 }
 
-/* Form controls: accent border plus a soft accent ring on focus. */
+/* Form controls: no accent ring on focus (zero-border-radius aesthetic). */
 input:focus,
 textarea:focus,
 select:focus {
-  border-color: var(--accent-500) !important;
-  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent-500), transparent 82%) !important;
+  border-color: var(--border-strong) !important;
+  box-shadow: none !important;
 }
 
 ::selection {

@@ -446,6 +446,46 @@ export function QueryTab({
   const [resultsPanelState, setResultsPanelState] = useState<ResultsPanelState>("expanded");
   const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(() => new Set());
 
+  // ─── Editor / results split resize ──────────────────────────────────
+  const splitRef = useRef<HTMLDivElement>(null);
+  const [editorFr, setEditorFr] = useState(50); // out of 100
+  const splitResizeRef = useRef<{ startY: number; containerHeight: number; initialEditorFr: number } | null>(null);
+
+  const startSplitResize = useCallback((e: React.MouseEvent) => {
+    const container = splitRef.current;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+    const handleHeight = 6;
+    const containerHeight = rect.height - handleHeight;
+    splitResizeRef.current = {
+      startY: e.clientY,
+      containerHeight,
+      initialEditorFr: editorFr,
+    };
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    const onMove = (ev: MouseEvent) => {
+      const ref = splitResizeRef.current;
+      if (!ref || !container) return;
+      const dy = ev.clientY - ref.startY;
+      const deltaFr = Math.round((dy / ref.containerHeight) * 100);
+      const next = Math.min(
+        100 - Math.round((160 / ref.containerHeight) * 100),
+        Math.max(Math.round((100 / ref.containerHeight) * 100), ref.initialEditorFr + deltaFr)
+      );
+      setEditorFr(next);
+    };
+    const onUp = () => {
+      splitResizeRef.current = null;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [editorFr]);
+
   // ─── Schema for autocomplete ────────────────────────────────────────
   const schema = useCollectionSchema(connectionId, database, collection);
 
@@ -1555,7 +1595,11 @@ export function QueryTab({
           )}
         </div>
       </div>
-      <div className={`split split--results-${resultsPanelState}`}>
+      <div
+        ref={splitRef}
+        className={`split split--results-${resultsPanelState}`}
+        style={resultsPanelState === "expanded" ? { gridTemplateRows: `${editorFr}fr auto ${100 - editorFr}fr` } : undefined}
+      >
         <div className="editor">
           {mode === "find" && (
             <div className="pane__body" style={{ display: "grid", gridTemplateRows: "1fr 1fr 1fr" }}>
@@ -1852,7 +1896,14 @@ export function QueryTab({
             </div>
           )}
         </div>
-        {resultsPanelState !== "closed" && <div className="split__handle" aria-hidden="true" />}
+        {resultsPanelState !== "closed" && (
+          <div
+            className="split__handle"
+            aria-hidden="true"
+            onMouseDown={startSplitResize}
+            title="Drag to resize"
+          />
+        )}
         {resultsPanelState !== "closed" && (
           <div className="pane__body results-pane">
             {resultsPanelState === "minimized" ? (

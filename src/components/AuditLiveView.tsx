@@ -377,7 +377,7 @@ function ProgressBar({ current, max }: { current: number; max: number }) {
       style={{
         height: "4px",
         background: "var(--surface-1)",
-        borderRadius: "2px",
+        borderRadius: "0px",
         overflow: "hidden",
       }}
     >

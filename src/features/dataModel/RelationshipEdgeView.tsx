@@ -28,7 +28,7 @@ export function RelationshipEdgeView({
     targetX,
     targetY,
     targetPosition,
-    borderRadius: 8,
+    borderRadius: 0,
   });
 
   const edge = data.edge;

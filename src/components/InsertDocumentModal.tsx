@@ -124,7 +124,7 @@ export function InsertDocumentModal({
             fontSize: 12,
             padding: "var(--space-2)",
             border: "1px solid var(--border)",
-            borderRadius: 4,
+            borderRadius: 0,
             background: "var(--surface-2)",
             color: "var(--ink)",
             resize: "vertical",

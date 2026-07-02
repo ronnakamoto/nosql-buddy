@@ -47,7 +47,7 @@ function RiskBadge({ score }: { score: number }) {
         alignItems: "center",
         gap: "4px",
         padding: "2px 8px",
-        borderRadius: "var(--radius)",
+        borderRadius: 0,
         background: `color-mix(in oklch, ${color}, transparent 85%)`,
         color,
         fontSize: "var(--font-size-xs)",
@@ -88,7 +88,7 @@ function FieldChangeRow({ change }: { change: SafeChangeFieldChange }) {
             display: "inline-block",
             width: 8,
             height: 8,
-            borderRadius: "50%",
+            borderRadius: 0,
             background: dotColor,
             marginRight: 6,
             flexShrink: 0,
@@ -326,7 +326,7 @@ export function SafeChangeModal({
                     fontSize: "var(--font-size-xs)",
                     fontWeight: 600,
                     padding: "2px 6px",
-                    borderRadius: "var(--radius)",
+                    borderRadius: 0,
                     background: "color-mix(in oklch, var(--danger-500), transparent 80%)",
                     color: "var(--danger-500)",
                     border: "1px solid color-mix(in oklch, var(--danger-500), transparent 60%)",
@@ -364,7 +364,7 @@ export function SafeChangeModal({
             <div
               style={{
                 padding: "12px 14px",
-                borderRadius: "var(--radius)",
+                borderRadius: 0,
                 background: "color-mix(in oklch, var(--danger-500), transparent 88%)",
                 color: "var(--danger-500)",
                 border: "1px solid color-mix(in oklch, var(--danger-500), transparent 65%)",
@@ -457,7 +457,7 @@ export function SafeChangeModal({
                       <div
                         style={{
                           padding: "10px 12px",
-                          borderRadius: "var(--radius)",
+                          borderRadius: 0,
                           background: "var(--surface-2)",
                           fontSize: "var(--font-size-sm)",
                           color: "var(--ink-muted)",
@@ -469,7 +469,7 @@ export function SafeChangeModal({
                       <Section title={`Sample documents that will be deleted (${preview.sampleBefore.length} shown)`}>
                         <div
                           style={{
-                            borderRadius: "var(--radius)",
+                            borderRadius: 0,
                             border: "1px solid var(--border)",
                             overflow: "hidden",
                           }}
@@ -500,7 +500,7 @@ export function SafeChangeModal({
                       <Section title="Field-level changes (sample)">
                         <div
                           style={{
-                            borderRadius: "var(--radius)",
+                            borderRadius: 0,
                             border: "1px solid var(--border)",
                             overflow: "hidden",
                           }}
@@ -517,7 +517,7 @@ export function SafeChangeModal({
                     <div
                       style={{
                         position: "relative",
-                        borderRadius: "var(--radius)",
+                        borderRadius: 0,
                         border: "1px solid var(--border)",
                         overflow: "hidden",
                       }}
@@ -573,7 +573,7 @@ export function SafeChangeModal({
                     style={{
                       display: "block",
                       padding: "6px 10px",
-                      borderRadius: "var(--radius)",
+                      borderRadius: 0,
                       background: "var(--surface-2)",
                       fontSize: "var(--font-size-xs)",
                       fontFamily: "var(--font-mono)",

@@ -911,6 +911,16 @@ function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
         : "warning"
     : "neutral";
 
+  const displayFingerprint = useMemo(() => {
+    if (committedEpochNum !== null) {
+      const ep = epochs.find((e) => e.epochNumber === committedEpochNum);
+      if (ep?.rootHex) return shortHash(ep.rootHex);
+    }
+    if (lastClosedEpoch?.rootHex) return shortHash(lastClosedEpoch.rootHex);
+    if (status?.audit.rootHex) return shortHash(status.audit.rootHex);
+    return "—";
+  }, [committedEpochNum, epochs, lastClosedEpoch, status]);
+
   const committed = !!commitResult;
   const hasRecordedChanges = epochEvents > 0 || closed || lastClosedEpoch !== null;
   const hasSealedBatch = closed || lastClosedEpoch !== null;
@@ -997,14 +1007,13 @@ function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
               <div className="audit-stage__stats">
                 <Stat label="Batch" value={current?.epochNumber ?? 0} />
                 <Stat label="Events captured" value={`${epochEvents} / ${EPOCH_THRESHOLD}`} />
-                <Stat label="Fingerprint" value={current?.rootHex ? shortHash(current.rootHex) : "—"} mono />
+                <Stat label="Fingerprint" value={displayFingerprint} mono />
               </div>
 
               <ProgressBar current={epochEvents} max={EPOCH_THRESHOLD} tone={hasSealedBatch ? "success" : "accent"} />
 
               <div className="audit-stage__meta">
                 <span>{hasSealedBatch ? "Sealed and ready" : "Recording MongoDB changes"}</span>
-                <span>{activeStep === 1 ? auditedMongoUri : `fingerprint ${current?.rootHex ? shortHash(current.rootHex) : "—"}`}</span>
               </div>
 
               {epochEvents === 0 && !closed && activeStep === 1 && (

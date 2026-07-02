@@ -74,7 +74,7 @@
   width: 100%;
   padding: 6px 10px 6px 28px;
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
+  border-radius: 0px;
   background: var(--bg-secondary);
   color: var(--fg-primary);
   font-size: 13px;
@@ -82,7 +82,7 @@
 }
 
 .timeline-panel__search-input:focus {
-  border-color: var(--accent);
+  border-color: var(--border-strong);
 }
 
 .timeline-panel__filter {
@@ -95,7 +95,7 @@
 .timeline-panel__filter-select {
   padding: 6px 10px;
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
+  border-radius: 0px;
   background: var(--bg-secondary);
   color: var(--fg-primary);
   font-size: 13px;
@@ -110,7 +110,7 @@
   width: 32px;
   height: 32px;
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
+  border-radius: 0px;
   background: var(--bg-secondary);
   color: var(--fg-muted);
   cursor: pointer;
@@ -145,7 +145,7 @@
 
 .timeline-entry {
   border: 1px solid var(--border-subtle);
-  border-radius: 8px;
+  border-radius: 0px;
   margin-bottom: 6px;
   background: var(--bg-secondary);
   overflow: hidden;
@@ -187,7 +187,7 @@
   display: inline-flex;
   align-items: center;
   padding: 2px 8px;
-  border-radius: 4px;
+  border-radius: 0px;
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
@@ -330,7 +330,7 @@
 .timeline-entry__code {
   background: var(--bg-code);
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
+  border-radius: 0px;
   padding: 8px 10px;
   font-family: var(--font-mono);
   font-size: 12px;
@@ -350,7 +350,7 @@
   color: var(--warning);
   background: rgba(234, 179, 8, 0.08);
   border: 1px solid rgba(234, 179, 8, 0.2);
-  border-radius: 6px;
+  border-radius: 0px;
   padding: 6px 10px;
 }
 
@@ -369,7 +369,7 @@
   color: #22c55e;
   background: rgba(34, 197, 94, 0.08);
   border: 1px solid rgba(34, 197, 94, 0.2);
-  border-radius: 6px;
+  border-radius: 0px;
   padding: 6px 10px;
 }
 
@@ -386,7 +386,7 @@
   font-size: 13px;
   color: var(--fg-secondary);
   background: var(--bg-tertiary);
-  border-radius: 6px;
+  border-radius: 0px;
   padding: 8px 10px;
 }
 
@@ -399,7 +399,7 @@
   flex: 1;
   padding: 6px 10px;
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
+  border-radius: 0px;
   background: var(--bg-primary);
   color: var(--fg-primary);
   font-size: 13px;
@@ -408,13 +408,13 @@
 }
 
 .timeline-entry__note-input:focus {
-  border-color: var(--accent);
+  border-color: var(--border-strong);
 }
 
 .timeline-entry__note-save {
   padding: 6px 12px;
   border: 1px solid var(--accent);
-  border-radius: 6px;
+  border-radius: 0px;
   background: var(--accent);
   color: var(--accent-fg);
   font-size: 12px;
@@ -442,7 +442,7 @@
   gap: 4px;
   padding: 4px 10px;
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
+  border-radius: 0px;
   background: var(--bg-secondary);
   color: var(--fg-muted);
   font-size: 12px;

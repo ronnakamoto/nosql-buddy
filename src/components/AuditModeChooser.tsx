@@ -326,7 +326,7 @@ function HowItWorks({ step, label, detail }: { step: string; label: string; deta
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            borderRadius: "50%",
+            borderRadius: 0,
             fontSize: "10px",
             fontWeight: 700,
             background: "var(--accent-100)",

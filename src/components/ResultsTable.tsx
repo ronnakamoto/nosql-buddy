@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EditableCell } from "./EditableCell";
 import { detectKind, displayValue, getByPath, kindClassName } from "./resultsDisplay";
+import { ColumnResizeHandle, useResizableColumns } from "./useResizableColumns";
+
+const SELECT_COL = "__select";
+const ACTIONS_COL = "__actions";
 
 export type ResultsViewMode = "table" | "tree" | "json";
 
@@ -355,12 +359,34 @@ function TableView({
   // perturbing the auto column widths.
   const spacerSpan = columns.length + (selectionActive ? 1 : 0) + (onDeleteRow ? 1 : 0);
 
+  // Header keys in DOM order, including the structural selection/actions
+  // columns, so the resize hook can freeze every column's width once ready
+  // (table-layout: fixed sizes columns from the header row only). Resize
+  // handles are only rendered on the data columns below.
+  const headerKeys = useMemo(
+    () => [
+      ...(selectionActive ? [SELECT_COL] : []),
+      ...columns,
+      ...(onDeleteRow ? [ACTIONS_COL] : []),
+    ],
+    [selectionActive, columns, onDeleteRow],
+  );
+  const { ready, widths, headerCellProps, startResize, onKeyDown } = useResizableColumns(headerKeys);
+  const tableWidth = ready ? headerKeys.reduce((sum, key) => sum + (widths[key] ?? 0), 0) : undefined;
+
   return (
-    <table className="results-grid" role="grid" aria-label="Query results">
+    <table
+      className="results-grid"
+      role="grid"
+      aria-label="Query results"
+      style={
+        ready ? { tableLayout: "fixed", width: tableWidth, minWidth: tableWidth } : undefined
+      }
+    >
       <thead>
         <tr>
           {selectionActive && (
-            <th className="results-grid__select" scope="col">
+            <th className="results-grid__select" scope="col" {...headerCellProps(SELECT_COL)}>
               <input
                 type="checkbox"
                 aria-label="Select all rows"
@@ -370,12 +396,24 @@ function TableView({
             </th>
           )}
           {columns.map((c) => (
-            <th key={c} scope="col">
-              {c}
+            <th key={c} scope="col" {...headerCellProps(c)}>
+              <span className="results-grid__th-label">{c}</span>
+              <ColumnResizeHandle
+                column={c}
+                label={c}
+                width={widths[c]}
+                onPointerDown={startResize(c)}
+                onKeyDown={onKeyDown(c)}
+              />
             </th>
           ))}
           {onDeleteRow && (
-            <th className="results-grid__actions" scope="col" aria-label="Row actions" />
+            <th
+              className="results-grid__actions"
+              scope="col"
+              aria-label="Row actions"
+              {...headerCellProps(ACTIONS_COL)}
+            />
           )}
         </tr>
       </thead>

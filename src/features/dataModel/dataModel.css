@@ -440,7 +440,7 @@
 
 .data-model__confidence-bar {
   height: 4px;
-  border-radius: 2px;
+  border-radius: 0px;
   background: var(--accent-500);
   min-width: 2px;
 }
@@ -506,6 +506,7 @@
   background: var(--surface);
   color: var(--ink);
   border-bottom: 1px solid var(--border);
+  cursor: pointer;
 }
 
 .diagram-canvas .react-flow__controls-button:hover {
@@ -610,7 +611,7 @@
 .collection-node__handle {
   width: 8px;
   height: 8px;
-  border-radius: 50%;
+  border-radius: 0px;
   background: var(--accent-500);
   border: 1px solid var(--accent-600);
 }
@@ -1016,7 +1017,7 @@
   flex: 1;
   height: 4px;
   background: var(--surface-2);
-  border-radius: 2px;
+  border-radius: 0px;
   overflow: hidden;
 }
 

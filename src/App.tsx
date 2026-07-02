@@ -31,6 +31,7 @@ import type { CollectionItem } from "./features/backupRestore/CollectionCheckLis
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { ShortcutsMap } from "./components/ShortcutsMap";
 import { ShortcutButton } from "./components/ShortcutButton";
+import logoUrl from "./assets/logo.png";
 import {
   Search,
   Terminal,
@@ -602,7 +603,32 @@ export default function App() {
   const [refreshingConn, setRefreshingConn] = useState(false);
   const [refreshingDb, setRefreshingDb] = useState<string | null>(null);
   const [pendingDeleteProfile, setPendingDeleteProfile] = useState<ProfileSummary | null>(null);
+  const [sidebarWidth, setSidebarWidth] = useState(300);
+  const sidebarResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const toasts = useToasts();
+
+  // ─── Sidebar resize ─────────────────────────────────────────────────
+  const startSidebarResize = useCallback((e: React.MouseEvent) => {
+    sidebarResizeRef.current = { startX: e.clientX, startWidth: sidebarWidth };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const onMove = (ev: MouseEvent) => {
+      const ref = sidebarResizeRef.current;
+      if (!ref) return;
+      const dx = ev.clientX - ref.startX;
+      const next = Math.min(600, Math.max(200, ref.startWidth + dx));
+      setSidebarWidth(next);
+    };
+    const onUp = () => {
+      sidebarResizeRef.current = null;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [sidebarWidth]);
 
   // Initial load
   useEffect(() => {
@@ -1143,6 +1169,7 @@ export default function App() {
     <ToastProvider value={toasts}>
     <div className="app">
       <header className="app__titlebar">
+        <img className="app__titlebar-logo" src={logoUrl} alt="NoSQLBuddy" draggable={false} />
         <span className="app__titlebar-brand">NoSQLBuddy</span>
         <span className="kbd">v{info?.appVersion ?? "0.1.0"}</span>
       </header>
@@ -1207,7 +1234,7 @@ export default function App() {
           </button>
         </div>
       </nav>
-      <aside className="app__sidebar" aria-label="Connections">
+      <aside className="app__sidebar" aria-label="Connections" style={{ width: sidebarWidth }}>
         <ConnectionSwitcher
           active={active}
           profiles={profiles}
@@ -1290,6 +1317,12 @@ export default function App() {
           </span>
         </div>
       </aside>
+      <div
+        className="app__sidebar-resizer"
+        onMouseDown={startSidebarResize}
+        aria-hidden="true"
+        title="Drag to resize sidebar"
+      />
       <main className="app__workspace" aria-label="Workspace">
         <div className="tabs" role="tablist" aria-label="Open tabs">
           {tabs.map((t) => (

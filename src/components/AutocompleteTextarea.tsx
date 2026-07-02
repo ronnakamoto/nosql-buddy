@@ -195,7 +195,7 @@ export function AutocompleteTextarea({
             overflowY: "auto",
             background: "var(--surface-2)",
             border: "1px solid var(--border)",
-            borderRadius: 4,
+            borderRadius: 0,
             boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
             fontFamily: "var(--font-mono)",
             fontSize: 12,
@@ -224,7 +224,7 @@ export function AutocompleteTextarea({
                 style={{
                   width: 14,
                   height: 14,
-                  borderRadius: 2,
+                  borderRadius: 0,
                   display: "inline-flex",
                   alignItems: "center",
                   justifyContent: "center",
