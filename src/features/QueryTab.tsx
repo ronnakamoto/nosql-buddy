@@ -584,6 +584,60 @@ export function QueryTab({
     window.addEventListener("mouseup", onUp);
   }, [updateFrs]);
 
+  // ─── SQL mode section resize ───────────────────────────────────────
+  // Default 25/35/40 split gives the SQL editor enough room to write
+  // without crowding, while the Query code pane (the longest output) gets
+  // the largest share. Matches the resize behavior used by Find and Update
+  // tabs so users have one consistent UX.
+  const sqlResizeRef = useRef<HTMLDivElement>(null);
+  const [sqlFrs, setSqlFrs] = useState([25, 35, 40]);
+
+  const startSqlResize = useCallback((e: React.MouseEvent, handleIndex: number) => {
+    const container = sqlResizeRef.current;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+    const handleHeight = 6;
+    const contentHeight = rect.height - 2 * handleHeight;
+    const state = {
+      startY: e.clientY,
+      contentHeight,
+      initialFrs: [...sqlFrs],
+      handleIndex,
+    };
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    const onMove = (ev: MouseEvent) => {
+      const dy = ev.clientY - state.startY;
+      const deltaFr = Math.round((dy / state.contentHeight) * 100);
+      const minFr = 10;
+      setSqlFrs(() => {
+        const next = [...state.initialFrs];
+        if (state.handleIndex === 0) {
+          next[0] = Math.min(
+            state.initialFrs[0] + state.initialFrs[1] - minFr,
+            Math.max(minFr, state.initialFrs[0] + deltaFr),
+          );
+          next[1] = state.initialFrs[0] + state.initialFrs[1] - next[0];
+        } else {
+          next[1] = Math.min(
+            state.initialFrs[1] + state.initialFrs[2] - minFr,
+            Math.max(minFr, state.initialFrs[1] + deltaFr),
+          );
+          next[2] = state.initialFrs[1] + state.initialFrs[2] - next[1];
+        }
+        return next;
+      });
+    };
+    const onUp = () => {
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [sqlFrs]);
+
   // ─── Schema for autocomplete ────────────────────────────────────────
   const schema = useCollectionSchema(connectionId, database, collection);
 
@@ -1789,7 +1843,11 @@ export function QueryTab({
             </div>
           )}
           {mode === "sql" && (
-            <div className="pane__body" style={{ display: "grid", gridTemplateRows: "auto minmax(160px, 1fr) minmax(120px, 1fr) minmax(120px, 1fr)" }}>
+            <div
+              ref={sqlResizeRef}
+              className="pane__body"
+              style={{ display: "grid", gridTemplateRows: `auto ${sqlFrs[0]}fr 6px ${sqlFrs[1]}fr 6px ${sqlFrs[2]}fr` }}
+            >
               <div className="sql-toolbar" style={{ display: "flex", gap: 8, alignItems: "center", padding: "var(--space-2) var(--space-3)", flexWrap: "wrap" }}>
                 <button
                   className="btn btn--sm"
@@ -1816,6 +1874,12 @@ export function QueryTab({
                   ariaLabel="SQL query"
                 />
               </div>
+              <div
+                className="find-sections__handle"
+                onMouseDown={(e) => startSqlResize(e, 0)}
+                aria-hidden="true"
+                title="Drag to resize"
+              />
               <div className="editor__pane">
                 <div className="editor__toolbar">
                   <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>
@@ -1840,6 +1904,12 @@ export function QueryTab({
                   </div>
                 )}
               </div>
+              <div
+                className="find-sections__handle"
+                onMouseDown={(e) => startSqlResize(e, 1)}
+                aria-hidden="true"
+                title="Drag to resize"
+              />
               <div className="editor__pane">
                 <div className="editor__toolbar" style={{ display: "flex", gap: 8, alignItems: "center" }}>
                   <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>
