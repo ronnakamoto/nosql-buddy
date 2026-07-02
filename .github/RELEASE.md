@@ -6,6 +6,11 @@ native `.dmg`s — Apple Silicon and Intel, see note below), Windows
 whenever a `v*` tag is pushed, and publishes them as a GitHub Release. The
 updater manifest (`latest.json`) is generated and attached automatically so
 the in-app "Check for updates" button (About screen) can find new versions.
+This requires `bundle.createUpdaterArtifacts: true` in `tauri.conf.json` —
+it defaults to `false` in Tauri v2 (see `tauri-utils`' `BundleConfig`), so
+without it `cargo tauri build` silently skips generating the signed
+`.tar.gz`/`.sig` updater bundles even with the updater plugin configured
+and signing keys present.
 
 **Why two DMGs instead of one universal binary:** mainly to keep the two
 architectures' builds independent while the Rust toolchain pin below is in
