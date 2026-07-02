@@ -33,7 +33,13 @@ fn build_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Men
         ..Default::default()
     };
     let app_submenu = SubmenuBuilder::new(app, APP_NAME)
-        .about(Some(app_meta))
+        .item(&MenuItem::with_id(
+            app,
+            "about",
+            "About NoSQLBuddy",
+            true,
+            None::<&str>,
+        )?)
         .separator()
         .services()
         .separator()

@@ -31,6 +31,7 @@ import type { CollectionItem } from "./features/backupRestore/CollectionCheckLis
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { ShortcutsMap } from "./components/ShortcutsMap";
 import { ShortcutButton } from "./components/ShortcutButton";
+import { AboutScreen } from "./components/AboutScreen";
 import logoUrl from "./assets/logo.png";
 import {
   Search,
@@ -55,6 +56,7 @@ import {
   RefreshCw,
   Network,
   History,
+  Info,
 } from "lucide-react";
 
 type AuditView = "chooser" | "dev" | "production" | "settings";
@@ -593,6 +595,7 @@ export default function App() {
   const [connSwitcherOpen, setConnSwitcherOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutsMapOpen, setShortcutsMapOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -677,6 +680,9 @@ export default function App() {
           const db = active.databases[0]?.name ?? "admin";
           openQueryTab(active.handle.connectionId, db, db + "_new");
         }
+      }
+      else if (action === "about") {
+        setAboutOpen(true);
       }
     }).then((u) => (unlisten = u));
     return () => unlisten?.();
@@ -1034,6 +1040,12 @@ export default function App() {
         }
       }
     }
+    items.push({
+      id: "about",
+      label: "About NoSQLBuddy",
+      hint: "App version, system info, and credits",
+      run: () => setAboutOpen(true),
+    });
     return items;
   }, [active, tabs, closeConnection, openDiagramTab, openQueryTab]);
 
@@ -1315,6 +1327,15 @@ export default function App() {
           <span className="kbd-bar">
             <span className="kbd">Cmd</span>+<span className="kbd">K</span> palette
           </span>
+          <span className="app__sidebar-footer-spacer" />
+          <button
+            className="btn btn--sm btn--ghost"
+            onClick={() => setAboutOpen(true)}
+            title="About NoSQLBuddy"
+            aria-label="About NoSQLBuddy"
+          >
+            <Info size={14} />
+          </button>
         </div>
       </aside>
       <div
@@ -1524,6 +1545,12 @@ export default function App() {
         confirmLabel="Delete connection"
         onConfirm={() => void confirmDeleteProfile()}
         onCancel={() => setPendingDeleteProfile(null)}
+      />
+      <AboutScreen
+        open={aboutOpen}
+        onClose={() => setAboutOpen(false)}
+        info={info}
+        onOpenShortcuts={() => setShortcutsMapOpen(true)}
       />
     </div>
     </ToastProvider>
