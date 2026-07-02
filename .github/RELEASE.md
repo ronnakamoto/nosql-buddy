@@ -26,6 +26,12 @@ pin (and re-allow `notify-rust` to float) once `ark-circom`/`wasmer` are
 upgraded past the fix (wasmer >= 6, see
 https://github.com/wasmerio/wasmer/pull/5690).
 
+The `zk-audit/soroban-contract` wasm build (a separate, isolated-workspace
+crate — see its own `Cargo.toml`) needs rustc >= 1.89 (soroban-sdk 25.x),
+which conflicts with the 1.88.0 pin above. It's built with its own `stable`
+toolchain (`cargo +stable`), installed alongside the pinned one in the same
+job, rather than sharing the app's toolchain.
+
 ## One-time setup: GitHub Secrets
 
 Add these under **Settings → Secrets and variables → Actions**:

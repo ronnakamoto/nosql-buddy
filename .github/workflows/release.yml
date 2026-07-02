@@ -127,12 +127,18 @@ jobs:
       # `src-tauri/resources/contract/zk_audit_commitment.wasm` is a build
       # artifact (gitignored, same as the Docker image build in
       # audit-service/Dockerfile.audit) that tauri.conf.json bundles as a
-      # resource, so it must exist before `cargo tauri build` runs.
+      # resource, so it must exist before `cargo tauri build` runs. This is
+      # an independent, isolated-workspace crate (see its Cargo.toml) that
+      # requires rustc >= 1.89 (soroban-sdk 25.x), which conflicts with the
+      # 1.88.0 pin the main app build needs (see the "Install Rust" step
+      # above). It's built with its own separate `stable` toolchain via
+      # `cargo +stable` rather than the job's default 1.88.0 toolchain.
       - name: Build Soroban audit contract wasm
         shell: bash
         run: |
-          rustup target add wasm32v1-none
-          cargo build --release --locked --target wasm32v1-none \
+          rustup toolchain install stable --profile minimal
+          rustup target add wasm32v1-none --toolchain stable
+          cargo +stable build --release --locked --target wasm32v1-none \
             --manifest-path zk-audit/soroban-contract/Cargo.toml
           mkdir -p src-tauri/resources/contract
           cp zk-audit/soroban-contract/target/wasm32v1-none/release/zk_audit_commitment.wasm \
