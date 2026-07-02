@@ -187,6 +187,8 @@ const editorTheme = EditorView.theme({
   ".cm-lint-marker-error": { content: "'!'", color: "var(--danger-500)" },
   ".cm-lintRange-error": { backgroundImage: "none", textDecoration: "wavy underline var(--danger-500)" },
   ".cm-gutter-lint": { width: "1.2em" },
+  ".cm-gutters": { backgroundColor: "var(--bg)", color: "var(--ink-muted)", borderRight: "1px solid var(--border)" },
+  ".cm-gutterElement": { color: "var(--ink-muted)" },
 });
 
 const compactTheme = EditorView.theme({
