@@ -105,7 +105,7 @@ jobs:
         shell: bash
         run: |
           rustup target add wasm32v1-none
-          cargo build --release --target wasm32v1-none \
+          cargo build --release --locked --target wasm32v1-none \
             --manifest-path zk-audit/soroban-contract/Cargo.toml
           mkdir -p src-tauri/resources/contract
           cp zk-audit/soroban-contract/target/wasm32v1-none/release/zk_audit_commitment.wasm \
