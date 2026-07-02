@@ -112,6 +112,7 @@ export interface ProfileSummary {
   notes: string | null;
   sshTunnel: SshTunnelConfig | null;
   socks5: Socks5Config | null;
+  tls: TlsConfig | null;
 }
 
 export interface SshTunnelConfig {
@@ -129,6 +130,13 @@ export interface Socks5Config {
   password: string | null;
 }
 
+export interface TlsConfig {
+  enabled: boolean | null;
+  certKeyFile: string | null;
+  caFile: string | null;
+  allowInvalidCertificates: boolean | null;
+}
+
 export interface SaveProfileRequest {
   id?: string;
   name: string;
@@ -140,6 +148,7 @@ export interface SaveProfileRequest {
   notes?: string | null;
   sshTunnel?: SshTunnelConfig | null;
   socks5?: Socks5Config | null;
+  tls?: TlsConfig | null;
 }
 
 export interface TestResult {

@@ -31,7 +31,7 @@ tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 log = "0.4"
-mongodb = { version = "3", default-features = false, features = ["rustls-tls", "compat-3-0-0"] }
+mongodb = { version = "3", default-features = false, features = ["rustls-tls", "compat-3-0-0", "aws-auth"] }
 bson = { version = "2", features = ["chrono-0_4", "uuid-1"] }
 futures-util = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }

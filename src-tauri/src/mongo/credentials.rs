@@ -1,7 +1,9 @@
 //! Secure credential storage backed by the OS keychain via the `keyring`
 //! crate. Connections store non-secret metadata in the profile store, and
 //! any password / SCRAM secret lives only in the OS keychain under the
-//! profile id. No credential ever lands in the on-disk profile JSON.
+//! profile id. A password embedded in a connection URI is moved into the
+//! keychain on save (see `profiles::split_uri_and_secret`) and the URI is
+//! persisted without it, so no password ever lands in the on-disk profile JSON.
 
 use std::sync::Arc;
 

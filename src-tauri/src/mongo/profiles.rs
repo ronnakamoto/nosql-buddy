@@ -17,6 +17,28 @@ use crate::mongo::types::{AuthMechanism, ConnectionProfile, ProfileSummary};
 const STORE_FILE: &str = "nosqlbuddy.profiles.json";
 const PROFILES_KEY: &str = "profiles";
 
+/// Split a connection URI into a password-less URI and the effective secret to
+/// persist, so a password embedded in the URI never lands on disk in plaintext.
+///
+/// Precedence for the resulting secret:
+/// 1. An explicit, non-empty `secret` field (the dedicated password input).
+/// 2. A password extracted from the URI userinfo (percent-decoded).
+/// 3. The original `secret` value (`None` = keep existing, `Some("")` = clear),
+///    preserved only when the URI carries no password.
+///
+/// The username, hosts, database, and query options in the URI are preserved.
+fn split_uri_and_secret(uri: String, secret: Option<String>) -> (String, Option<String>) {
+    let stripped = mongo_uri::strip_password(&uri);
+    let secret = match secret {
+        Some(s) if !s.is_empty() => Some(s),
+        other => match stripped.password {
+            Some(pw) => Some(pw),
+            None => other,
+        },
+    };
+    (stripped.uri, secret)
+}
+
 /// On-disk representation of a profile. Never contains the secret.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,6 +53,8 @@ struct StoredProfile {
     notes: Option<String>,
     ssh_tunnel: Option<crate::mongo::types::SshTunnelConfig>,
     socks5: Option<crate::mongo::types::Socks5Config>,
+    #[serde(default)]
+    tls: Option<crate::mongo::types::TlsConfig>,
 }
 
 impl From<&ConnectionProfile> for StoredProfile {
@@ -46,6 +70,7 @@ impl From<&ConnectionProfile> for StoredProfile {
             notes: p.notes.clone(),
             ssh_tunnel: p.ssh_tunnel.clone(),
             socks5: p.socks5.clone(),
+            tls: p.tls.clone(),
         }
     }
 }
@@ -63,6 +88,7 @@ impl From<StoredProfile> for ProfileSummary {
             s.notes,
             s.ssh_tunnel,
             s.socks5,
+            s.tls,
         )
     }
 }
@@ -124,6 +150,11 @@ impl ProfileRepository {
         if profile.id.is_empty() {
             profile.id = Uuid::new_v4().to_string();
         }
+        // Never let a password embedded in the URI reach on-disk metadata:
+        // move it into the secret store and persist a password-less URI.
+        let (sanitized_uri, secret) = split_uri_and_secret(profile.uri, profile.secret);
+        profile.uri = sanitized_uri;
+        profile.secret = secret;
         let mut profiles = self.load_all(app)?;
         if let Some(existing) = profiles.iter().find(|p| p.id == profile.id).cloned() {
             if existing.name != profile.name
@@ -192,6 +223,7 @@ impl ProfileRepository {
             notes: stored.notes,
             ssh_tunnel: stored.ssh_tunnel,
             socks5: stored.socks5,
+            tls: stored.tls,
         })
     }
 
@@ -232,11 +264,66 @@ mod tests {
             notes: None,
             ssh_tunnel: None,
             socks5: None,
+            tls: None,
         }
     }
 
     // ── persist_secret: the has_secret invariant (regression for the bug where
     //    has_secret was always persisted as false) ───────────────────────────
+
+    // ── split_uri_and_secret: URI passwords never persist in plaintext ───────
+
+    #[test]
+    fn split_moves_uri_password_into_secret_and_sanitizes_uri() {
+        let (uri, secret) = split_uri_and_secret(
+            "mongodb://alice:hunter2@127.0.0.1:27017/db?authSource=admin".to_string(),
+            None,
+        );
+        assert_eq!(uri, "mongodb://alice@127.0.0.1:27017/db?authSource=admin");
+        assert_eq!(secret.as_deref(), Some("hunter2"));
+    }
+
+    #[test]
+    fn split_explicit_secret_field_beats_uri_password() {
+        let (uri, secret) = split_uri_and_secret(
+            "mongodb://alice:uri-pw@127.0.0.1:27017".to_string(),
+            Some("field-pw".to_string()),
+        );
+        assert_eq!(uri, "mongodb://alice@127.0.0.1:27017");
+        assert_eq!(secret.as_deref(), Some("field-pw"));
+    }
+
+    #[test]
+    fn split_no_password_preserves_keep_existing_semantics() {
+        // Metadata-only edit: no field secret, no URI password -> keep existing.
+        let (uri, secret) =
+            split_uri_and_secret("mongodb://alice@127.0.0.1:27017".to_string(), None);
+        assert_eq!(uri, "mongodb://alice@127.0.0.1:27017");
+        assert_eq!(secret, None);
+    }
+
+    #[test]
+    fn split_no_password_preserves_clear_semantics() {
+        // Explicit empty secret with no URI password -> clear the secret.
+        let (uri, secret) = split_uri_and_secret(
+            "mongodb://127.0.0.1:27017".to_string(),
+            Some(String::new()),
+        );
+        assert_eq!(uri, "mongodb://127.0.0.1:27017");
+        assert_eq!(secret.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn split_uri_password_overrides_empty_clear_field() {
+        // A password typed into the URI is an explicit credential and wins over
+        // an empty (clearing) secret field.
+        let (uri, secret) = split_uri_and_secret(
+            "mongodb://alice:hunter2@127.0.0.1:27017".to_string(),
+            Some(String::new()),
+        );
+        assert_eq!(uri, "mongodb://alice@127.0.0.1:27017");
+        assert_eq!(secret.as_deref(), Some("hunter2"));
+    }
 
     #[test]
     fn persist_secret_stores_and_reports_true() {
@@ -307,6 +394,7 @@ mod tests {
             notes: None,
             ssh_tunnel: None,
             socks5: None,
+            tls: None,
         };
         let summary = ProfileSummary::from(stored);
         assert!(summary.has_secret);

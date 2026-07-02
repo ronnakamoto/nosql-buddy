@@ -796,6 +796,7 @@ export default function App() {
       authMechanism: profile.authMechanism,
       group: profile.group,
       notes: profile.notes,
+      tls: profile.tls,
     });
     setConnFormKey((k) => k + 1);
     setConnectionFormOpen(true);
@@ -814,6 +815,7 @@ export default function App() {
       authMechanism: profile.authMechanism,
       group: profile.group,
       notes: profile.notes,
+      tls: profile.tls,
     });
     setConnFormKey((k) => k + 1);
     setConnectionFormOpen(true);

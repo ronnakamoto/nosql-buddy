@@ -518,6 +518,8 @@ fn auth_mechanism_variants_are_kebab_case() {
     assert_eq!(ser(&AuthMechanism::ScramSha256),  json!("scram-sha-256"));
     assert_eq!(ser(&AuthMechanism::X509),         json!("x509"));
     assert_eq!(ser(&AuthMechanism::Ldap),         json!("ldap"));
+    // Kerberos remains in the enum for backward compatibility with stored
+    // profiles but is hidden from the UI (no gssapi-auth build feature).
     assert_eq!(ser(&AuthMechanism::Kerberos),     json!("kerberos"));
     assert_eq!(ser(&AuthMechanism::AwsIam),       json!("aws-iam"));
 }

@@ -19,7 +19,7 @@ use tokio::time::{interval, sleep};
 use crate::commands::dump::{run_dump, DumpRequest};
 use crate::commands::export::{run_export, ExportRequest};
 use crate::events::{chrono_now, emit_job_status_changed};
-use crate::mongo::client_registry::{build_client, ClientEntry};
+use crate::mongo::client_registry::{build_client_with_auth, ClientEntry};
 use crate::mongo::job_store::{JobKind, JobMeta, JobStatus};
 use crate::state::AppState;
 
@@ -320,9 +320,15 @@ async fn resolve_connection(
         .profiles
         .get(app, &meta.profile_id)
         .map_err(|e| SchedulerError::Connection(format!("profile {}: {e}", meta.profile_id)))?;
-    let client = build_client(&profile.uri, "NoSQLBuddy-scheduler")
-        .await
-        .map_err(|e| SchedulerError::Connection(e.to_string()))?;
+    let client = build_client_with_auth(
+        &profile.uri,
+        "NoSQLBuddy-scheduler",
+        profile.auth_mechanism,
+        profile.secret.as_deref(),
+        profile.tls.as_ref(),
+    )
+    .await
+    .map_err(|e| SchedulerError::Connection(e.to_string()))?;
     let connection_id = uuid::Uuid::new_v4().to_string();
     let deployment_id = crate::audit::change_stream::fetch_deployment_id(&client).await;
     state

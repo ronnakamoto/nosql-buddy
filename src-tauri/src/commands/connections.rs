@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::events::{emit_connection_closed, emit_connection_opened};
-use crate::mongo::client_registry::{build_client, describe_connection, ClientEntry};
+use crate::mongo::client_registry::{build_client_with_auth, describe_connection, ClientEntry};
 use crate::mongo::types::{ConnectionHandle, ConnectionProfile, ProfileSummary};
 use crate::state::AppState;
 
@@ -29,6 +29,8 @@ pub struct SaveProfileRequest {
     pub notes: Option<String>,
     pub ssh_tunnel: Option<crate::mongo::types::SshTunnelConfig>,
     pub socks5: Option<crate::mongo::types::Socks5Config>,
+    #[serde(default)]
+    pub tls: Option<crate::mongo::types::TlsConfig>,
 }
 
 #[tauri::command]
@@ -67,6 +69,7 @@ pub async fn save_profile(
         notes: request.notes,
         ssh_tunnel: request.ssh_tunnel,
         socks5: request.socks5,
+        tls: request.tls,
     };
     let saved = state.profiles.upsert(&app, profile)?;
     let has_secret = saved.secret.is_some() || state.secrets.get(&saved.id)?.is_some();
@@ -81,6 +84,7 @@ pub async fn save_profile(
         saved.notes,
         saved.ssh_tunnel,
         saved.socks5,
+        saved.tls,
     ))
 }
 
@@ -127,8 +131,16 @@ pub async fn test_profile(
         notes: request.notes,
         ssh_tunnel: request.ssh_tunnel,
         socks5: request.socks5,
+        tls: request.tls,
     };
-    let client = build_client(&profile.uri, "NoSQLBuddy-test").await?;
+    let client = build_client_with_auth(
+        &profile.uri,
+        "NoSQLBuddy-test",
+        profile.auth_mechanism,
+        profile.secret.as_deref(),
+        profile.tls.as_ref(),
+    )
+    .await?;
     let database = client.database("admin");
     let cmd = bson::doc! { "ping": 1 };
     let started = std::time::Instant::now();
@@ -175,7 +187,14 @@ pub async fn open_connection(
             profile.secret = Some(override_secret);
         }
     }
-    let client = build_client(&profile.uri, "NoSQLBuddy").await?;
+    let client = build_client_with_auth(
+        &profile.uri,
+        "NoSQLBuddy",
+        profile.auth_mechanism,
+        profile.secret.as_deref(),
+        profile.tls.as_ref(),
+    )
+    .await?;
     // Confirm we can actually reach the server before publishing the handle.
     tokio::time::timeout(
         std::time::Duration::from_secs(8),

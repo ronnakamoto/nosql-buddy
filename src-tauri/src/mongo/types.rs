@@ -48,6 +48,38 @@ pub struct Socks5Config {
     pub password: Option<String>,
 }
 
+/// TLS / SSL configuration for a connection. TLS is an independent section
+/// (like SSH or SOCKS5): it is independent of the auth mechanism. X.509 authentication consumes the client certificate defined
+/// here; other mechanisms may also use TLS with a private CA. All fields are
+/// file paths or flags — there are no secrets — so this is safe to persist in
+/// the profile metadata and to return in a `ProfileSummary`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TlsConfig {
+    /// Whether TLS is explicitly enabled. TLS is also implicitly enabled when
+    /// a certificate / CA file is set, or when the auth mechanism is X.509.
+    pub enabled: Option<bool>,
+    /// Path to a PEM file containing the client certificate and private key
+    /// the driver presents to the server. Required for X.509 authentication.
+    pub cert_key_file: Option<String>,
+    /// Path to a PEM file with the root CA used to validate the server
+    /// certificate. When unset, the bundled Mozilla root store is used.
+    pub ca_file: Option<String>,
+    /// When true, the driver accepts invalid server certificates. This is
+    /// insecure and intended only for local testing.
+    pub allow_invalid_certificates: Option<bool>,
+}
+
+impl TlsConfig {
+    /// Whether this config carries any meaningful TLS setting.
+    pub fn is_active(&self) -> bool {
+        self.enabled.unwrap_or(false)
+            || self.cert_key_file.is_some()
+            || self.ca_file.is_some()
+            || self.allow_invalid_certificates.is_some()
+    }
+}
+
 /// Full profile as seen by the command layer. The `secret` is the only
 /// place a credential lives in Rust memory, and only briefly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +100,8 @@ pub struct ConnectionProfile {
     pub notes: Option<String>,
     pub ssh_tunnel: Option<SshTunnelConfig>,
     pub socks5: Option<Socks5Config>,
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
 }
 
 /// Redacted summary returned to the frontend. The raw URI is masked so a
@@ -85,6 +119,8 @@ pub struct ProfileSummary {
     pub notes: Option<String>,
     pub ssh_tunnel: Option<SshTunnelConfig>,
     pub socks5: Option<Socks5Config>,
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
 }
 
 impl ProfileSummary {
@@ -100,6 +136,7 @@ impl ProfileSummary {
         notes: Option<String>,
         ssh_tunnel: Option<SshTunnelConfig>,
         socks5: Option<Socks5Config>,
+        tls: Option<TlsConfig>,
     ) -> Self {
         Self {
             id,
@@ -112,6 +149,7 @@ impl ProfileSummary {
             notes,
             ssh_tunnel,
             socks5,
+            tls,
         }
     }
 }

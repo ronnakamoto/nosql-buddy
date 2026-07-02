@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import commands, { formatError, type SaveProfileRequest, type TestResult } from "../ipc/commands";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import commands, { formatError, type SaveProfileRequest, type TestResult, type TlsConfig } from "../ipc/commands";
 import { Modal } from "./Modal";
 import { InfoPopover } from "./InfoPopover";
 import { ShortcutButton } from "./ShortcutButton";
@@ -19,14 +20,45 @@ export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFo
     initial?.uri ?? "mongodb://127.0.0.1:27017/?retryWrites=true",
   );
   const [authMechanism, setAuthMechanism] = useState<SaveProfileRequest["authMechanism"]>(
-    initial?.authMechanism ?? "scram-sha-256",
+    initial?.authMechanism ?? "none",
   );
   const [secret, setSecret] = useState("");
   const [group, setGroup] = useState(initial?.group ?? "");
   const [notes, setNotes] = useState(initial?.notes ?? "");
+  const [tlsEnabled, setTlsEnabled] = useState(initial?.tls?.enabled ?? false);
+  const [tlsCertFile, setTlsCertFile] = useState(initial?.tls?.certKeyFile ?? "");
+  const [tlsCaFile, setTlsCaFile] = useState(initial?.tls?.caFile ?? "");
+  const [tlsAllowInvalid, setTlsAllowInvalid] = useState(
+    initial?.tls?.allowInvalidCertificates ?? false,
+  );
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
   const [saving, setSaving] = useState(false);
+  const storesPasswordSecret = (
+    ["scram-sha-1", "scram-sha-256", "ldap", "aws-iam"] as const
+  ).includes(authMechanism as "scram-sha-1" | "scram-sha-256" | "ldap" | "aws-iam");
+  const isX509 = authMechanism === "x509";
+  const tlsEffective = tlsEnabled || isX509;
+  const tlsSectionVisible = tlsEffective;
+
+  function buildTlsConfig(): TlsConfig | null {
+    if (!tlsEffective && !tlsCertFile && !tlsCaFile) return null;
+    return {
+      enabled: tlsEffective,
+      certKeyFile: tlsCertFile || null,
+      caFile: tlsCaFile || null,
+      allowInvalidCertificates: tlsAllowInvalid || null,
+    };
+  }
+
+  async function pickFile(setter: (v: string) => void) {
+    const chosen = await openFileDialog({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "PEM certificates", extensions: ["pem", "crt", "cert", "key"] }],
+    });
+    if (typeof chosen === "string") setter(chosen);
+  }
 
   // Keyboard shortcuts for the connection form
   useEffect(() => {
@@ -60,7 +92,8 @@ export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFo
         name: name || "test",
         uri,
         authMechanism,
-        secret: secret || undefined,
+        secret: storesPasswordSecret ? secret || undefined : undefined,
+        tls: buildTlsConfig(),
       });
       setTestResult(result);
     } catch (e) {
@@ -86,9 +119,10 @@ export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFo
         name: name.trim(),
         uri: uri.trim(),
         authMechanism,
-        secret: secret || undefined,
+        secret: storesPasswordSecret ? secret || undefined : "",
         group: group || null,
         notes: notes || null,
+        tls: buildTlsConfig(),
       });
       onSaved();
       onClose();
@@ -133,13 +167,14 @@ export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFo
       {testResult && (
         <div
           role="status"
-          className="toast"
           style={{
-            position: "static",
             margin: 0,
             marginBottom: 12,
+            padding: "8px 12px",
+            borderRadius: "var(--radius-sm)",
             background: testResult.ok ? "var(--success-500)" : "var(--danger-500)",
             color: "oklch(0.99 0.002 240)",
+            fontSize: "var(--font-size-sm)",
           }}
         >
           {testResult.ok ? "Connection works." : `Failed: ${testResult.message}`}
@@ -171,8 +206,8 @@ export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFo
           autoComplete="off"
         />
         <div className="field__hint">
-          Credentials in the URI are accepted, but the password is also stored
-          in the OS keychain and never sent back to the UI after save.
+          Credentials in the URI are accepted. For password-based authentication,
+          put the username in the URI and the password below to keep it in the OS keychain.
         </div>
       </div>
       <div className="field">
@@ -181,9 +216,8 @@ export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFo
             <p>Choose how MongoDB validates your identity.</p>
             <ul>
               <li><strong>SCRAM-SHA-256</strong>: modern default for username and password.</li>
-              <li><strong>x.509</strong>: certificate-based authentication.</li>
+              <li><strong>x.509</strong>: certificate-based authentication (requires TLS section below).</li>
               <li><strong>LDAP</strong>: enterprise directory integration.</li>
-              <li><strong>Kerberos</strong>: Active Directory integration.</li>
               <li><strong>AWS IAM</strong>: MongoDB Atlas IAM roles.</li>
             </ul>
           </InfoPopover>
@@ -199,11 +233,10 @@ export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFo
           <option value="scram-sha-256">SCRAM-SHA-256</option>
           <option value="x509">x.509 certificate</option>
           <option value="ldap">LDAP</option>
-          <option value="kerberos">Kerberos</option>
           <option value="aws-iam">AWS IAM</option>
         </select>
       </div>
-      {authMechanism !== "none" && (
+      {storesPasswordSecret && (
         <div className="field">
           <label className="field__label" htmlFor="conn-secret">
             Password / secret (stored in OS keychain)
@@ -218,6 +251,108 @@ export function ConnectionForm({ open, onClose, onSaved, initial }: ConnectionFo
             autoComplete="off"
           />
         </div>
+      )}
+      {isX509 && (
+        <div style={{
+          marginBottom: 12,
+          padding: "8px 12px",
+          borderRadius: "var(--radius-sm)",
+          background: "var(--accent-100)",
+          color: "var(--ink)",
+          fontSize: "var(--font-size-sm)",
+          lineHeight: 1.5,
+        }}>
+          x.509 authentication requires a client certificate. Provide one in the TLS section below.
+        </div>
+      )}
+      <div className="field">
+        <label className="field__label" htmlFor="conn-tls-enabled">
+          TLS / SSL <InfoPopover label="What is TLS?" title="TLS / SSL configuration"><p>Enable TLS to encrypt the connection. Required for x.509 authentication. Provide a client certificate (PEM with cert and private key) and optionally a root CA file to validate the server certificate.</p></InfoPopover>
+        </label>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input
+            id="conn-tls-enabled"
+            type="checkbox"
+            checked={tlsEffective}
+            onChange={(e) => setTlsEnabled(e.target.checked)}
+            disabled={isX509}
+          />
+          <span style={{ fontSize: "var(--font-size-sm)", color: "var(--ink-muted)" }}>
+            Use TLS protocol to connect{isX509 ? " (required for x.509)" : ""}
+          </span>
+        </div>
+      </div>
+      {tlsSectionVisible && (
+        <>
+          <div className="field">
+            <label className="field__label" htmlFor="conn-tls-cert">
+              Client certificate (PEM)
+            </label>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                id="conn-tls-cert"
+                className="field__input"
+                value={tlsCertFile}
+                onChange={(e) => setTlsCertFile(e.target.value)}
+                placeholder="/path/to/client.pem"
+                spellCheck={false}
+                autoComplete="off"
+                style={{ flex: 1 }}
+              />
+              <button
+                type="button"
+                className="btn"
+                onClick={() => pickFile(setTlsCertFile)}
+                disabled={saving || testing}
+              >
+                Browse
+              </button>
+            </div>
+            {isX509 && !tlsCertFile && (
+              <div className="field__hint" style={{ color: "var(--warning-500)" }}>
+                A client certificate is required for x.509 authentication.
+              </div>
+            )}
+          </div>
+          <div className="field">
+            <label className="field__label" htmlFor="conn-tls-ca">
+              Root CA file (optional)
+            </label>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                id="conn-tls-ca"
+                className="field__input"
+                value={tlsCaFile}
+                onChange={(e) => setTlsCaFile(e.target.value)}
+                placeholder="/path/to/ca.pem"
+                spellCheck={false}
+                autoComplete="off"
+                style={{ flex: 1 }}
+              />
+              <button
+                type="button"
+                className="btn"
+                onClick={() => pickFile(setTlsCaFile)}
+                disabled={saving || testing}
+              >
+                Browse
+              </button>
+            </div>
+          </div>
+          <div className="field">
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input
+                id="conn-tls-invalid"
+                type="checkbox"
+                checked={tlsAllowInvalid}
+                onChange={(e) => setTlsAllowInvalid(e.target.checked)}
+              />
+              <label htmlFor="conn-tls-invalid" style={{ fontSize: "var(--font-size-sm)", color: "var(--ink-muted)" }}>
+                Accept invalid server certificates (insecure, testing only)
+              </label>
+            </div>
+          </div>
+        </>
       )}
       <div className="field">
         <label className="field__label" htmlFor="conn-group">

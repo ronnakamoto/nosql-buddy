@@ -10,5 +10,6 @@ description = "Canonical MongoDB connection-string normalization shared by the N
 name = "mongo_uri"
 
 [dependencies]
+percent-encoding = "2"
 
 [dev-dependencies]
