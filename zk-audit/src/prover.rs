@@ -20,7 +20,10 @@ pub struct Groth16Proof {
     pub proof: ark_groth16::Proof<Bn254>,
     /// The verifying key.
     pub vk: ark_groth16::VerifyingKey<Bn254>,
-    /// The public inputs (the Merkle root, as a field element).
+    /// The public signals, in circuit witness order: `[root, leaf]`. `root`
+    /// comes first because Circom orders `main`'s outputs before its public
+    /// inputs in the witness vector, and `root` is an output while `leaf` is
+    /// declared `public` as an input (see `merkle_inclusion.circom`).
     pub public_inputs: Vec<Fr>,
 }
 
@@ -355,9 +358,11 @@ mod tests {
         let prover = AuditProver::new(R1CS_PATH, WASM_PATH).unwrap();
         let groth16_proof = prover.prove(&inclusion).unwrap();
 
-        // The public input (root) must match.
-        assert_eq!(groth16_proof.public_inputs.len(), 1);
+        // The public signals are [root, leaf] (Circom orders `main`'s
+        // outputs before its public inputs in the witness vector).
+        assert_eq!(groth16_proof.public_inputs.len(), 2);
         assert_eq!(groth16_proof.public_inputs[0], root);
+        assert_eq!(groth16_proof.public_inputs[1], inclusion.leaf);
 
         // Serialize to Soroban format.
         let soroban_args = AuditProver::serialize_for_soroban(&groth16_proof).unwrap();
@@ -370,11 +375,12 @@ mod tests {
         assert_eq!(soroban_args.vk.beta.len(), 256);   // G2: 128 bytes
         assert_eq!(soroban_args.vk.gamma.len(), 256);  // G2: 128 bytes
         assert_eq!(soroban_args.vk.delta.len(), 256);  // G2: 128 bytes
-        assert!(!soroban_args.vk.ic.is_empty());
+        assert_eq!(soroban_args.vk.ic.len(), 3);       // ic.len() == pub_signals.len() + 1
 
-        // Public signals must contain the root as a decimal string.
-        assert_eq!(soroban_args.pub_signals.len(), 1);
+        // Public signals must be [root, leaf] as decimal strings.
+        assert_eq!(soroban_args.pub_signals.len(), 2);
         assert_eq!(soroban_args.pub_signals[0], root.to_string());
+        assert_eq!(soroban_args.pub_signals[1], inclusion.leaf.to_string());
     }
 
     #[test]
@@ -417,9 +423,10 @@ mod tests {
 
         let groth16_proof = prover.prove(&inclusion).expect("proof generation failed");
 
-        // Verify the proof is valid.
-        assert_eq!(groth16_proof.public_inputs.len(), 1);
+        // Verify the proof is valid: public signals are [root, leaf].
+        assert_eq!(groth16_proof.public_inputs.len(), 2);
         assert_eq!(groth16_proof.public_inputs[0], tree.root().unwrap());
+        assert_eq!(groth16_proof.public_inputs[1], inclusion.leaf);
 
         // Serialize and check format.
         let soroban_args = AuditProver::serialize_for_soroban(&groth16_proof).unwrap();

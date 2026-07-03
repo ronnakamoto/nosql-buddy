@@ -187,17 +187,96 @@ fn run_compose(
     Ok(stdout)
 }
 
-/// Run the one-off setup wizard service, streaming its output to the UI.
+/// Spawn `cmd`, stream its stdout/stderr line-by-line (secret-redacted)
+/// through `emit` as it runs, and return the combined stdout once it exits.
 ///
-/// Behaves like [`run_compose`] for the `run --rm setup …` command, but instead
-/// of buffering the whole run it reads stdout/stderr line-by-line, redacts
-/// secrets, and emits each line as an `audit-setup-progress` event so the
-/// frontend can show live progress. On failure it produces the same concise,
-/// secret-free message as [`run_compose`] (full detail goes to the log).
-fn run_setup_streaming(ctx: &StackCtx, app: &AppHandle) -> AppResult<String> {
+/// This is what turns a "the app might be hanging" multi-minute subprocess
+/// (a cold `docker compose build`, the setup wizard's contract deploy) into
+/// visible progress: the caller sees the same lines a terminal would show,
+/// as they happen, instead of waiting for one buffered result at the end.
+/// On failure, `friendly_compose_error(error_args, ...)` produces the
+/// concise, secret-free message the UI sees; full detail still goes to the
+/// log.
+fn stream_command(
+    mut cmd: Command,
+    app: &AppHandle,
+    emit: fn(&AppHandle, &str),
+    error_context: &str,
+    error_args: &[&str],
+) -> AppResult<String> {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
 
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| AppError::Internal(format!("failed to run docker: {e}")))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| AppError::Internal(format!("failed to capture {error_context} stdout")))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| AppError::Internal(format!("failed to capture {error_context} stderr")))?;
+
+    // Drain stderr on a side thread so a full pipe can't deadlock the run.
+    let app_err = app.clone();
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = String::new();
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            let red = redact_secrets(&line);
+            if !red.trim().is_empty() {
+                emit(&app_err, &red);
+            }
+            buf.push_str(&red);
+            buf.push('\n');
+        }
+        buf
+    });
+
+    let mut stdout_buf = String::new();
+    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+        let red = redact_secrets(&line);
+        if !red.trim().is_empty() {
+            emit(app, &red);
+        }
+        stdout_buf.push_str(&red);
+        stdout_buf.push('\n');
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| AppError::Internal(format!("wait for {error_context}: {e}")))?;
+    let stderr_buf = stderr_handle.join().unwrap_or_default();
+
+    if !status.success() {
+        let raw = format!(
+            "{error_context} failed (exit {:?}): {}",
+            status.code(),
+            stderr_buf.trim()
+        );
+        log::error!("{}", redact_secrets(&raw));
+        return Err(AppError::Internal(friendly_compose_error(
+            error_args,
+            &stderr_buf,
+        )));
+    }
+
+    Ok(stdout_buf)
+}
+
+/// Run the one-off setup wizard service, streaming its output to the UI.
+///
+/// Behaves like [`run_compose`] for the `run --rm setup …` command, but instead
+/// of buffering the whole run it emits each line as an `audit-setup-progress`
+/// event so the frontend can show live progress. On failure it produces the
+/// same concise, secret-free message as [`run_compose`] (full detail goes to
+/// the log).
+fn run_setup_streaming(ctx: &StackCtx, app: &AppHandle) -> AppResult<String> {
     let has_env = ctx.dir.join(".env.audit").exists();
 
     let mut cmd = Command::new("docker");
@@ -212,66 +291,51 @@ fn run_setup_streaming(ctx: &StackCtx, app: &AppHandle) -> AppResult<String> {
         cmd.args(["--env-file", ".env.audit"]);
     }
     cmd.args(["run", "--rm", "setup", "setup", "--non-interactive"]);
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| AppError::Internal(format!("failed to run docker: {e}")))?;
+    stream_command(
+        cmd,
+        app,
+        crate::events::emit_audit_setup_progress,
+        "docker compose run setup",
+        &["run"],
+    )
+}
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| AppError::Internal("failed to capture setup stdout".into()))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| AppError::Internal("failed to capture setup stderr".into()))?;
+/// Run a `docker compose` command against one Compose file, streaming its
+/// output to the UI as an `audit-stack-progress` event per line. Used by
+/// [`stack_up`], where a cold source build recompiles the whole Rust
+/// workspace inside the container and can otherwise look like a hang.
+fn run_compose_streaming(
+    ctx: &StackCtx,
+    app: &AppHandle,
+    project: Option<&str>,
+    file: &str,
+    args: &[&str],
+) -> AppResult<String> {
+    let has_env = ctx.dir.join(".env.audit").exists();
 
-    // Drain stderr on a side thread so a full pipe can't deadlock the run.
-    let app_err = app.clone();
-    let stderr_handle = std::thread::spawn(move || {
-        let mut buf = String::new();
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            let red = redact_secrets(&line);
-            if !red.trim().is_empty() {
-                crate::events::emit_audit_setup_progress(&app_err, &red);
-            }
-            buf.push_str(&red);
-            buf.push('\n');
-        }
-        buf
-    });
-
-    let mut stdout_buf = String::new();
-    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-        let red = redact_secrets(&line);
-        if !red.trim().is_empty() {
-            crate::events::emit_audit_setup_progress(app, &red);
-        }
-        stdout_buf.push_str(&red);
-        stdout_buf.push('\n');
+    let mut cmd = Command::new("docker");
+    cmd.current_dir(&ctx.dir);
+    if ctx.packaged {
+        cmd.env("AUDIT_IMAGE", published_image_ref());
     }
-
-    let status = child
-        .wait()
-        .map_err(|e| AppError::Internal(format!("wait for docker setup: {e}")))?;
-    let stderr_buf = stderr_handle.join().unwrap_or_default();
-
-    if !status.success() {
-        let raw = format!(
-            "docker compose run setup failed (exit {:?}): {}",
-            status.code(),
-            stderr_buf.trim()
-        );
-        log::error!("{}", redact_secrets(&raw));
-        return Err(AppError::Internal(friendly_compose_error(
-            &["run"],
-            &stderr_buf,
-        )));
+    cmd.arg("compose");
+    if let Some(p) = project {
+        cmd.args(["-p", p]);
     }
+    cmd.args(["-f", file]);
+    if has_env {
+        cmd.args(["--env-file", ".env.audit"]);
+    }
+    cmd.args(args);
 
-    Ok(stdout_buf)
+    stream_command(
+        cmd,
+        app,
+        crate::events::emit_audit_stack_progress,
+        &format!("docker compose {}", args.join(" ")),
+        args,
+    )
 }
 
 /// Translate a raw `docker compose` failure into a concise, user-facing message
@@ -619,23 +683,41 @@ fn parse_compose_ps(output: &str) -> Vec<DevStackService> {
 /// Bring up the audit stack.
 ///
 /// Ensures the 3-node replica set is running first, then starts the audit
-/// services. Source builds rebuild the image locally (`--build`); packaged
-/// builds pull the published image.
+/// services. Source builds rebuild the image locally (`--build`, which
+/// recompiles the whole Rust workspace on a cold cache and can take minutes);
+/// packaged builds pull the published image. Both steps stream their output
+/// live via `audit-stack-progress` events, with a marker line announcing each
+/// step, so the UI can show real progress instead of a bare spinner for
+/// however long this takes.
 pub fn stack_up(app: &AppHandle) -> AppResult<String> {
     let ctx = stack_ctx(app)?;
+
+    crate::events::emit_audit_stack_progress(app, "── Starting MongoDB replica set ──");
     // The DB Compose declares its own project name, so do not override it.
-    let mut log = run_compose(&ctx, None, AUDIT_DB_COMPOSE_FILE, &["up", "-d"])?;
+    let mut log = run_compose_streaming(&ctx, app, None, AUDIT_DB_COMPOSE_FILE, &["up", "-d"])?;
+
     let audit_args: &[&str] = if ctx.packaged {
         &["up", "-d"]
     } else {
         &["up", "-d", "--build"]
     };
-    log.push_str(&run_compose(
+    crate::events::emit_audit_stack_progress(
+        app,
+        if ctx.packaged {
+            "── Starting audit services (publisher, attester, reader) ──"
+        } else {
+            "── Building and starting audit services — first run compiles the whole \
+             workspace and can take a few minutes ──"
+        },
+    );
+    log.push_str(&run_compose_streaming(
         &ctx,
+        app,
         Some(AUDIT_PROJECT),
         AUDIT_COMPOSE_FILE,
         audit_args,
     )?);
+    crate::events::emit_audit_stack_progress(app, "── Stack started ──");
     Ok(log)
 }
 

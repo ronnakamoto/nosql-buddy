@@ -48,6 +48,24 @@ export async function onAuditSetupProgress(
   );
 }
 
+export interface AuditStackProgressPayload {
+  line: string;
+}
+
+/**
+ * Subscribe to live progress lines while the dev audit stack starts
+ * (`docker compose up`, including the source-build compile output on a cold
+ * cache). Lets the UI show what's happening instead of a bare spinner for
+ * however long that takes.
+ */
+export async function onAuditStackProgress(
+  handler: (line: string) => void,
+): Promise<UnlistenFn> {
+  return listen<AuditStackProgressPayload>("audit-stack-progress", (event) =>
+    handler(event.payload.line),
+  );
+}
+
 export interface ImportExportProgressPayload {
   jobId: string;
   phase: string;

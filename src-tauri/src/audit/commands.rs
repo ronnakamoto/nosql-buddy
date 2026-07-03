@@ -178,6 +178,7 @@ pub async fn audit_generate_proof(
 
     let inclusion = state.audit_log.prove_inclusion(index)?;
     let root_for_hex = inclusion.root;
+    let leaf_for_hex = inclusion.leaf;
 
     // Resolve circuit artifact paths: use explicit paths if provided,
     // otherwise fall back to bundled Tauri resources.
@@ -199,6 +200,7 @@ pub async fn audit_generate_proof(
     let root_bigint = root_for_hex.into_bigint();
     let root_bytes = root_bigint.to_bytes_be();
     let root_hex = hex::encode(&root_bytes);
+    let leaf_hex = hex::encode(&leaf_for_hex.into_bigint().to_bytes_be());
 
     let mode_config = load_mode_config(&app)?;
     let chain = chain_config_from_mode(&mode_config);
@@ -216,6 +218,7 @@ pub async fn audit_generate_proof(
 
     Ok(ProofResult {
         root_hex,
+        leaf_hex,
         leaf_index: index,
         proof: soroban_args.proof,
         vk: soroban_args.vk,
@@ -232,14 +235,10 @@ pub async fn audit_generate_proof(
 pub async fn audit_verify_proof_onchain(
     app: tauri::AppHandle,
     root_hex: String,
+    leaf_hex: String,
     proof_a: String,
     proof_b: String,
     proof_c: String,
-    vk_alpha: String,
-    vk_beta: String,
-    vk_gamma: String,
-    vk_delta: String,
-    vk_ic: Vec<String>,
 ) -> AppResult<VerifyInclusionResult> {
     use crate::audit::audit_mode::load_production_keypair;
 
@@ -252,14 +251,10 @@ pub async fn audit_verify_proof_onchain(
 
     stellar_native::verify_inclusion_native(
         &root_hex,
+        &leaf_hex,
         &proof_a,
         &proof_b,
         &proof_c,
-        &vk_alpha,
-        &vk_beta,
-        &vk_gamma,
-        &vk_delta,
-        &vk_ic,
         &kp,
         &chain.rpc_url,
         &chain.contract_id,
@@ -337,6 +332,7 @@ fn resolve_circuit_paths_pure(
 #[serde(rename_all = "camelCase")]
 pub struct ProofResult {
     pub root_hex: String,
+    pub leaf_hex: String,
     pub leaf_index: u64,
     pub proof: zk_audit::serialize::SorobanProof,
     pub vk: zk_audit::serialize::SorobanVerifyingKey,
@@ -1081,6 +1077,19 @@ pub async fn audit_provision_testnet_contract(
     let wasm = std::fs::read(&resource)
         .map_err(|e| AppError::Validation(format!("read contract WASM resource: {e}")))?;
 
+    // The verifying key is pinned on-chain at `initialize` and can never be
+    // changed afterwards, so this must be the real ceremony output for the
+    // bundled circuit — not a placeholder.
+    let vkey_resource = app
+        .path()
+        .resolve(
+            "resources/circuits/merkle_inclusion.vkey",
+            tauri::path::BaseDirectory::Resource,
+        )
+        .map_err(|e| AppError::Validation(format!("resolve verifying key resource: {e}")))?;
+    let vk = zk_audit::load_verifying_key_hex(&vkey_resource.to_string_lossy())
+        .map_err(|e| AppError::Validation(format!("load bundled verifying key: {e}")))?;
+
     let chain = ChainConfig::testnet();
     let deployed = stellar_native::deploy_contract_native(
         &wasm,
@@ -1092,6 +1101,11 @@ pub async fn audit_provision_testnet_contract(
     stellar_native::initialize_contract_native(
         &deployed.contract_id,
         &kp,
+        &vk.alpha,
+        &vk.beta,
+        &vk.gamma,
+        &vk.delta,
+        &vk.ic,
         &chain.rpc_url,
         &chain.passphrase,
     )

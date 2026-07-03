@@ -282,11 +282,13 @@ You can inspect committed roots and transactions on [stellar.expert](https://ste
 |---|---|
 | `commit_root(root, metadata)` | Anchor a Merkle root on-chain (admin-gated) |
 | `commit_root_with_oplog(root, oplog_root, metadata)` | Anchor root + oplog completeness hash |
-| `verify_inclusion(root, proof, vk)` | **Verify a Groth16 proof on-chain** via BN254 host functions |
+| `verify_inclusion(root, leaf, proof)` | **Verify a Groth16 proof on-chain** via BN254 host functions, against the verifying key pinned at `initialize` |
 | `get_current_root()` | Read the latest committed root |
 | `attest_oplog(epoch, oplog_root, signature)` | Independent attester signs the oplog hash |
 
-To independently verify a proof: obtain a Groth16 proof and verifying key from the prover (see the [example flow](#example-end-to-end-flow) below), call `verify_inclusion` on the contract with the committed root, and the BN254 pairing check runs on-chain. The full contract source is in [`zk-audit/soroban-contract/`](zk-audit/soroban-contract/), with interface documentation in [`INTERFACE.md`](zk-audit/soroban-contract/INTERFACE.md).
+The verifying key is **not** passed to `verify_inclusion` — it's set once at `initialize(admin, vk)` and can never be changed afterwards, so a compromised admin can't retroactively swap in a different VK. The public signals are `[root, leaf]`: binding `leaf` (not just `root`) is what makes the proof mean "this specific audit entry is included" rather than merely "some leaf hashes up to this root".
+
+To independently verify a proof: obtain a Groth16 proof from the prover (see the [example flow](#example-end-to-end-flow) below), call `verify_inclusion` on the contract with the committed root and the leaf hash, and the BN254 pairing check runs on-chain against the contract's pinned verifying key. The full contract source is in [`zk-audit/soroban-contract/`](zk-audit/soroban-contract/), with interface documentation in [`INTERFACE.md`](zk-audit/soroban-contract/INTERFACE.md).
 
 > **Dev Mode deploys your own contract.** When you run Dev Mode setup, the wizard deploys a fresh per-user contract on testnet (your publisher key becomes admin). The contract ID above is the shared default; your Dev Mode instance will have its own. Check **Advanced → Your contract** in the Audit tab for the active ID.
 

@@ -811,6 +811,7 @@ async fn generate_proof(
 
     let inclusion = state.audit_log.prove_inclusion(index).map_err(ApiError::from)?;
     let root_for_hex = inclusion.root;
+    let leaf_for_hex = inclusion.leaf;
 
     let circuit_dir = state.circuit_dir.as_deref().ok_or_else(|| {
         ApiError(AuditError::Validation(
@@ -842,6 +843,7 @@ async fn generate_proof(
 
     let root_bigint = root_for_hex.into_bigint();
     let root_hex = hex::encode(&root_bigint.to_bytes_be());
+    let leaf_hex = hex::encode(&leaf_for_hex.into_bigint().to_bytes_be());
 
     // Find the epoch that contains this leaf and get its on-chain tx hash.
     let tx_hash = state
@@ -857,6 +859,7 @@ async fn generate_proof(
 
     Ok(Json(ProofResponse {
         root_hex,
+        leaf_hex,
         leaf_index: index,
         proof: soroban_args.proof,
         vk: soroban_args.vk,
@@ -873,14 +876,10 @@ async fn generate_proof(
 #[serde(rename_all = "camelCase")]
 pub struct VerifyOnchainRequest {
     pub root_hex: String,
+    pub leaf_hex: String,
     pub proof_a: String,
     pub proof_b: String,
     pub proof_c: String,
-    pub vk_alpha: String,
-    pub vk_beta: String,
-    pub vk_gamma: String,
-    pub vk_delta: String,
-    pub vk_ic: Vec<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -905,14 +904,10 @@ async fn verify_onchain(
 
     let result = stellar_native::verify_inclusion_native(
         &req.root_hex,
+        &req.leaf_hex,
         &req.proof_a,
         &req.proof_b,
         &req.proof_c,
-        &req.vk_alpha,
-        &req.vk_beta,
-        &req.vk_gamma,
-        &req.vk_delta,
-        &req.vk_ic,
         kp,
         &chain.rpc_url,
         &chain.contract_id,
@@ -931,6 +926,7 @@ async fn verify_onchain(
 #[serde(rename_all = "camelCase")]
 pub struct ProofResponse {
     pub root_hex: String,
+    pub leaf_hex: String,
     pub leaf_index: u64,
     pub proof: zk_audit::serialize::SorobanProof,
     pub vk: zk_audit::serialize::SorobanVerifyingKey,

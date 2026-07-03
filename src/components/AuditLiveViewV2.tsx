@@ -23,6 +23,7 @@ import {
   Spinner,
   EmptyState,
   TxHashLink,
+  IpfsCidLink,
   StatusCard,
 } from "./AuditUi";
 import { CircleDashed } from "lucide-react";
@@ -389,7 +390,12 @@ export function AuditLiveViewV2({
               <Badge tone="success" dot>Committed</Badge>
               <div style={{ marginTop: "var(--space-2)" }}>
                 <KeyValue label="Tx hash" value={<TxHashLink txHash={commitResult.txHash} network={network} />} />
-                {pinataResult && <KeyValue label="IPFS CID" value={pinataResult.cid} />}
+                {pinataResult && (
+                  <KeyValue
+                    label="IPFS CID"
+                    value={<IpfsCidLink cid={pinataResult.cid} gatewayUrl={pinataResult.gatewayUrl} />}
+                  />
+                )}
               </div>
             </div>
           )}
@@ -541,7 +547,12 @@ export function AuditLiveViewV2({
           <KeyValue label="Tree height" value={status?.treeHeight ?? "—"} />
           {onchainRoot && <KeyValue label="On-chain root (full)" value={onchainRoot.rootHex} />}
           {commitResult && <KeyValue label="Tx hash (full)" value={<TxHashLink txHash={commitResult.txHash} network={network} showExternalIcon={true} />} />}
-          {pinataResult && <KeyValue label="IPFS CID (full)" value={pinataResult.cid} />}
+          {pinataResult && (
+            <KeyValue
+              label="IPFS CID (full)"
+              value={<IpfsCidLink cid={pinataResult.cid} gatewayUrl={pinataResult.gatewayUrl} showExternalIcon={true} />}
+            />
+          )}
         </Card>
       )}
       </div>

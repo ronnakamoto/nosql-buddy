@@ -2,13 +2,13 @@ import { useState } from "react";
 import type { ProofResult } from "../ipc/commands";
 
 /**
- * MerklePathViz — SVG visualization of a Merkle inclusion proof path.
+ * MerklePathViz — SVG visualization of a Merkle inclusion proof.
  *
- * Takes a ProofResult and renders the path from leaf → intermediate hashes → root
- * as a left-to-right node graph. Hover any node to see the full hash.
- *
- * The proof's pubSignals contain the path hashes in order (from the Groth16
- * circuit). We use those as the intermediate nodes.
+ * Renders a simple leaf → root graph. The actual sibling path elements are
+ * private circuit witness data and are never returned to the frontend, so
+ * this only shows the two public signals the on-chain verifier checks:
+ * `leafHex` (the audit-entry hash being proven included) and `rootHex` (the
+ * committed Merkle root).
  */
 
 // ─── Layout constants ────────────────────────────────────────────────────────
@@ -69,15 +69,10 @@ function buildGraph(proof: ProofResult): {
   svgW: number;
   svgH: number;
 } {
-  // Path: leaf label → pubSignals (filtered to hex strings) → root
-  const hexSignals = (proof.pubSignals ?? []).filter((s) =>
-    /^[0-9a-fA-F]{16,}$/.test(s),
-  );
-
-  // Build levels left-to-right: each level is one column
+  // Two public signals: leaf → root. The sibling path elements that connect
+  // them are private witness data, never exposed to the frontend.
   const levels: { hash: string; kind: NodeKind }[][] = [
-    [{ hash: `leaf #${proof.leafIndex}`, kind: "leaf" }],
-    ...hexSignals.map((h) => [{ hash: h, kind: "path" as NodeKind }]),
+    [{ hash: proof.leafHex, kind: "leaf" }],
     [{ hash: proof.rootHex, kind: "root" }],
   ];
 
@@ -124,7 +119,7 @@ export function MerklePathViz({ proof }: { proof: ProofResult }) {
   return (
     <div className="merkle-viz">
       <div className="merkle-viz__label">
-        Proof path — leaf #{proof.leafIndex} → root
+        Proof — leaf #{proof.leafIndex} → root
       </div>
 
       <div className="merkle-viz__scroll">
@@ -205,9 +200,8 @@ export function MerklePathViz({ proof }: { proof: ProofResult }) {
 
       {/* Legend */}
       <div className="merkle-viz__legend">
-        <span className="merkle-viz__legend-item merkle-viz__legend-item--leaf">Leaf</span>
-        <span className="merkle-viz__legend-item merkle-viz__legend-item--path">Path node</span>
-        <span className="merkle-viz__legend-item merkle-viz__legend-item--root">Root</span>
+        <span className="merkle-viz__legend-item merkle-viz__legend-item--leaf">Leaf (public)</span>
+        <span className="merkle-viz__legend-item merkle-viz__legend-item--root">Root (public)</span>
       </div>
     </div>
   );

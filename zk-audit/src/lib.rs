@@ -26,4 +26,4 @@ pub mod serialize;
 pub use error::ZkAuditError;
 pub use merkle::{AuditMerkleTree, InclusionProof};
 pub use prover::{AuditProver, Groth16Proof, VerifyingKey, generate_and_save_parameters};
-pub use serialize::SorobanProofArgs;
+pub use serialize::{load_verifying_key_hex, SorobanProofArgs, SorobanVerifyingKey};

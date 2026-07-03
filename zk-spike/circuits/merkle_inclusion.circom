@@ -13,11 +13,15 @@ include "node_modules/circomlib/circuits/poseidon.circom";
 //   - Node = Poseidon(left_child, right_child).
 //   - Leaf = field element (audit entry hash, computed off-circuit).
 //
-// Public inputs:
-//   - root: the Merkle tree root (committed on-chain).
+// Public signals:
+//   - root (output): the Merkle tree root (committed on-chain).
+//   - leaf (public input): the audit-entry hash being proven included. This
+//     MUST be public — otherwise a prover can satisfy the circuit with an
+//     unconstrained leaf (e.g. 0, whose path to any non-full tree's root is
+//     publicly derivable from the zero-hash ladder), and the proof would
+//     convey no information about which entry, if any, was included.
 //
 // Private inputs:
-//   - leaf: the leaf value being proven included.
 //   - pathElements[height]: sibling hashes at each level.
 //   - pathIndices[height]: direction bit (0 = leaf is left child, 1 = right).
 //
@@ -70,4 +74,7 @@ template MerkleInclusion(height) {
 
 // Main circuit: 20-level Merkle tree (supports up to 2^20 = ~1M entries).
 // The depth is a compile-time constant; change and recompile for different sizes.
-component main = MerkleInclusion(20);
+//
+// `leaf` is declared public so the verifier can bind the proof to a specific
+// audit entry hash instead of merely "some leaf hashes up to this root".
+component main {public [leaf]} = MerkleInclusion(20);

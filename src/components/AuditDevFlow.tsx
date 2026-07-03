@@ -20,6 +20,7 @@ import {
   EmptyState,
   TxHashLink,
   ContractLink,
+  IpfsCidLink,
   LogsModal,
   Modal,
 } from "./AuditUi";
@@ -27,7 +28,7 @@ import { LogViewer } from "./LogViewer";
 import type { ProofResult, DevSetupParams } from "../ipc/commands";
 import { InfoPopover } from "./InfoPopover";
 import { KeyRound, ShieldCheck, Users } from "lucide-react";
-import { onAuditSetupProgress } from "../ipc/events";
+import { onAuditSetupProgress, onAuditStackProgress } from "../ipc/events";
 import { useToast } from "../context/ToastContext";
 import { FlaskConical, CircleDashed, X, CheckCircle, ExternalLink, ChevronDown, Copy, Check } from "lucide-react";
 
@@ -99,6 +100,11 @@ export function AuditDevFlow(_: { onShowSettings: () => void; onSwitchMode: () =
   const [setupBusy, setSetupBusy] = useState(false);
   const [setupResultLog, setSetupResultLog] = useState<string | null>(null);
   const [setupProgress, setSetupProgress] = useState<string[]>([]);
+  const [stackProgress, setStackProgress] = useState<string[]>([]);
+  // `busy` is shared with stop/reset (drives the button spinner for both);
+  // this tracks specifically whether a start is in flight, so the live
+  // progress panel below only appears while starting, never while stopping.
+  const [startingUp, setStartingUp] = useState(false);
 
   const refreshInfra = useCallback(async () => {
     try {
@@ -119,15 +125,22 @@ export function AuditDevFlow(_: { onShowSettings: () => void; onSwitchMode: () =
 
   const stackUp = async () => {
     setBusy(true);
+    setStartingUp(true);
 
     setLogs(null);
+    setStackProgress([]);
+    const unlisten = await onAuditStackProgress((line) =>
+      setStackProgress((prev) => [...prev, line]),
+    );
     try {
       await commands.auditDevStackUp();
       await refreshInfra();
     } catch (e) {
       toast.push(formatError(e), "error");
     } finally {
+      unlisten();
       setBusy(false);
+      setStartingUp(false);
     }
   };
 
@@ -257,9 +270,31 @@ export function AuditDevFlow(_: { onShowSettings: () => void; onSwitchMode: () =
           progress={setupProgress}
         />
 
-        {/* ─── Live view or empty state ──────────────────────────────── */}
+        {/* ─── Live view, starting progress, or empty state ─────────────── */}
         {ready ? (
           <DevLiveView auditedMongoUri={stack?.publisherMongoUri || AUDITED_MONGO_URI} />
+        ) : startingUp ? (
+          <Card>
+            <CardHeader
+              title="Starting the audit stack…"
+              subtitle="First run builds the containers locally and can take a few minutes. Subsequent starts are fast."
+            />
+            <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", marginBottom: "var(--space-2)" }}>
+              <Spinner size={16} />
+              <span style={{ fontSize: "var(--font-size-sm)", color: "var(--ink-muted)" }}>
+                Starting MongoDB, then the publisher, attester, and reader containers.
+              </span>
+            </div>
+            <LogViewer
+              lines={stackProgress}
+              loading={stackProgress.length === 0}
+              loadingLabel="Waiting for Docker to start…"
+              live
+              showLineNumbers={false}
+              minHeight={160}
+              maxHeight={320}
+            />
+          </Card>
         ) : (
           <Card>
             <EmptyState
@@ -624,7 +659,7 @@ function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
   const [closeBusy, setCloseBusy] = useState(false);
   const [commitBusy, setCommitBusy] = useState(false);
   const [commitStep, setCommitStep] = useState("");
-  const [commitResult, setCommitResult] = useState<{ txHash: string; cid: string } | null>(null);
+  const [commitResult, setCommitResult] = useState<{ txHash: string; cid: string; gatewayUrl?: string } | null>(null);
   const toast = useToast();
   // Track the most recently committed epoch so attestation queries the
   // right epoch number (not `current`, which becomes the new open epoch).
@@ -768,6 +803,7 @@ function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
 
     setCommitResult(null);
     let cid = "";
+    let gatewayUrl: string | undefined;
     try {
       const num = lastClosedEpoch.epochNumber;
 
@@ -777,8 +813,9 @@ function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
           PUBLISHER_PORT,
           `epoch/${num}/publish-ipfs`,
           {},
-        )) as { cid?: string };
+        )) as { cid?: string; gatewayUrl?: string };
         cid = pub?.cid ?? "";
+        gatewayUrl = pub?.gatewayUrl;
       } catch (e) {
         // IPFS publishing is optional. Continue to on-chain commit without a
         // CID so the root is still anchored even if no IPFS backend is up.
@@ -792,7 +829,7 @@ function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
         {},
       )) as { txHash?: string };
 
-      setCommitResult({ txHash: res?.txHash ?? "", cid });
+      setCommitResult({ txHash: res?.txHash ?? "", cid, gatewayUrl });
       setCommitStep("Confirmed");
       setCommittedEpochNum(num);
       setPollingOnchain(true);
@@ -838,14 +875,10 @@ function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
     try {
       const res = await commands.auditDevProxyPost(PUBLISHER_PORT, "verify-onchain", {
         rootHex: proofResult.rootHex,
+        leafHex: proofResult.leafHex,
         proofA: proofResult.proof.a,
         proofB: proofResult.proof.b,
         proofC: proofResult.proof.c,
-        vkAlpha: proofResult.vk.alpha,
-        vkBeta: proofResult.vk.beta,
-        vkGamma: proofResult.vk.gamma,
-        vkDelta: proofResult.vk.delta,
-        vkIc: proofResult.vk.ic,
       });
       const result = res as { txHash: string; verified: boolean };
       setVerifyTxHash(result.txHash);
@@ -1050,7 +1083,12 @@ function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
                     <div className="audit-stage__result">
                       <Badge tone="success" dot>Committed</Badge>
                       {commitResult.txHash && <KeyValue label="Tx hash" value={<TxHashLink txHash={commitResult.txHash} network="testnet" />} />}
-                      {commitResult.cid && <KeyValue label="IPFS CID" value={commitResult.cid} />}
+                      {commitResult.cid && (
+                        <KeyValue
+                          label="IPFS CID"
+                          value={<IpfsCidLink cid={commitResult.cid} gatewayUrl={commitResult.gatewayUrl} />}
+                        />
+                      )}
                     </div>
                   )}
                   {!committed && (
@@ -1327,7 +1365,7 @@ function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
                     </span>
                   </div>
                   <div className="audit-proof-field">
-                    <span className="audit-proof-field__label">Public signal</span>
+                    <span className="audit-proof-field__label">Public signals (root, leaf)</span>
                     <span className="audit-proof-field__value" title={proofResult.pubSignals.join(", ")}>
                       {proofResult.pubSignals.join(", ")}
                     </span>

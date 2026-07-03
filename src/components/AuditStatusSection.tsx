@@ -11,6 +11,7 @@ import {
   Alert,
   Badge,
   Button,
+  IpfsCidLink,
   KeyValue,
   Spinner,
   TxHashLink,
@@ -382,7 +383,12 @@ export function AuditStatusSection({
         <div className="audit-status-commit-result" style={{ animation: "audit-fade-in 0.2s ease" }}>
           <Badge tone="success" dot>Committed</Badge>
           <KeyValue label="Tx hash" value={<TxHashLink txHash={commitResult.txHash} network={network} />} />
-          {pinataResult && <KeyValue label="IPFS CID" value={pinataResult.cid} />}
+          {pinataResult && (
+            <KeyValue
+              label="IPFS CID"
+              value={<IpfsCidLink cid={pinataResult.cid} gatewayUrl={pinataResult.gatewayUrl} />}
+            />
+          )}
         </div>
       )}
 

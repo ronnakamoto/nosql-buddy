@@ -31,6 +31,22 @@
 //! Points are received as raw `Bytes` (matching the off-chain hex format from
 //! `zk-audit/src/serialize.rs`) and converted to `Bn254G1Affine`/`Bn254G2Affine`
 //! internally.
+//!
+//! The verifying key is **not** a caller-supplied argument. It is pinned once
+//! at `initialize` and read from storage by `verify_inclusion`; there is no
+//! entrypoint to change it afterwards. Accepting a caller-supplied VK would
+//! let anyone verify a proof against a VK of their own choosing (e.g. from a
+//! trivial circuit with no real constraints), which makes the pairing check
+//! meaningless — the only thing actually verified would be `commit_root`'s
+//! dedup index, which is already public via `get_root_history`.
+//!
+//! The public signals are `[root, leaf]`, matching the witness order Circom
+//! produces for `merkle_inclusion.circom` (outputs before public inputs).
+//! Binding `leaf` publicly is required for soundness of the statement: if
+//! only `root` were public, a prover could satisfy the circuit with an
+//! unconstrained `leaf` (e.g. `0`, whose path to any non-full tree's root is
+//! derivable without ever having seen a real audit entry), so a "valid"
+//! proof would show nothing about which entry, if any, was included.
 
 #![no_std]
 
@@ -182,6 +198,11 @@ pub enum InstanceKey {
     AuthorizedAttesters,
     /// K-of-N attestation threshold (u32, minimum 1).
     Threshold,
+    /// The Groth16 verifying key for the `merkle_inclusion` circuit, pinned
+    /// once at `initialize` and immutable thereafter. `verify_inclusion`
+    /// always uses this key; callers cannot supply their own, which would
+    /// let anyone verify proofs against a VK of their own choosing.
+    VerifyingKey,
 }
 
 #[contracttype]
@@ -205,8 +226,14 @@ pub struct ZkAuditCommitment;
 
 #[contractimpl]
 impl ZkAuditCommitment {
-    /// Initialize the contract with an admin address.
-    pub fn initialize(env: Env, admin: Address) {
+    /// Initialize the contract with an admin address and the Groth16
+    /// verifying key for the `merkle_inclusion` circuit.
+    ///
+    /// The verifying key is the trust anchor for `verify_inclusion`: it is
+    /// stored once here and can never be changed afterwards (there is no
+    /// `set_verifying_key`), so a compromised or malicious admin cannot
+    /// retroactively swap in a VK for a different circuit/statement.
+    pub fn initialize(env: Env, admin: Address, vk: VerifyingKey) {
         if env.storage().instance().has(&InstanceKey::Admin) {
             panic!("contract already initialized");
         }
@@ -216,6 +243,15 @@ impl ZkAuditCommitment {
         // Default threshold is 1 (any single authorized attester verifies an
         // epoch). Admins raise this via `set_threshold` for multi-auditor trust.
         env.storage().instance().set(&InstanceKey::Threshold, &1u32);
+        env.storage().instance().set(&InstanceKey::VerifyingKey, &vk);
+    }
+
+    /// Get the pinned Groth16 verifying key.
+    pub fn get_verifying_key(env: Env) -> Result<VerifyingKey, CommitmentError> {
+        env.storage()
+            .instance()
+            .get(&InstanceKey::VerifyingKey)
+            .ok_or(CommitmentError::NotInitialized)
     }
 
     /// Set a new admin. Only the current admin can call this.
@@ -628,12 +664,24 @@ impl ZkAuditCommitment {
         })
     }
 
-    /// Verify a Groth16 inclusion proof against a committed root.
+    /// Verify a Groth16 inclusion proof that `leaf` is included in the
+    /// Merkle tree identified by the committed `root`.
+    ///
+    /// The verifying key is never taken from the caller — it is read from
+    /// the pinned `VerifyingKey` set at `initialize`. Accepting a
+    /// caller-supplied VK here would let anyone produce a "valid" proof for
+    /// an arbitrary (or trivial) circuit and statement, defeating the point
+    /// of on-chain verification entirely.
+    ///
+    /// `leaf` is a public signal (not just `root`) so the proof is bound to
+    /// a specific audit-entry hash rather than merely "some leaf hashes up
+    /// to this root" — see `merkle_inclusion.circom` for why an unbound
+    /// leaf makes the statement vacuous.
     pub fn verify_inclusion(
         env: Env,
         root: Bytes,
+        leaf: Bytes,
         proof: Proof,
-        vk: VerifyingKey,
     ) -> Result<bool, CommitmentError> {
         // 1. Verify the root was committed.
         let root_index: Map<Bytes, u64> = env
@@ -646,11 +694,21 @@ impl ZkAuditCommitment {
             return Err(CommitmentError::RootNotCommitted);
         }
 
-        // 2. Validate byte lengths.
+        // 2. Load the pinned verifying key.
+        let vk: VerifyingKey = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::VerifyingKey)
+            .ok_or(CommitmentError::NotInitialized)?;
+
+        // 3. Validate byte lengths.
         if proof.a.len() != 64 || proof.c.len() != 64 {
             return Err(CommitmentError::InvalidProofEncoding);
         }
         if proof.b.len() != 128 {
+            return Err(CommitmentError::InvalidProofEncoding);
+        }
+        if leaf.len() != 32 {
             return Err(CommitmentError::InvalidProofEncoding);
         }
         if vk.alpha.len() != 64 {
@@ -665,7 +723,7 @@ impl ZkAuditCommitment {
             }
         }
 
-        // 3. Convert bytes to BN254 affine points.
+        // 4. Convert bytes to BN254 affine points.
         let bn254 = env.crypto().bn254();
 
         let a = g1_from_bytes(&env, &proof.a);
@@ -677,20 +735,24 @@ impl ZkAuditCommitment {
         let gamma = g2_from_bytes(&env, &vk.gamma);
         let delta = g2_from_bytes(&env, &vk.delta);
 
-        // 4. Construct public inputs: [root] (the only public signal for
-        //    the merkle_inclusion circuit).
+        // 5. Construct public inputs: [root, leaf], matching the witness
+        //    order produced by Circom (`main`'s outputs — here `root` —
+        //    come before its `public` inputs — here `leaf`).
         let root_n32: BytesN<32> = BytesN::<32>::try_from_val(&env, &root.to_val())
             .map_err(|_| CommitmentError::InvalidProofEncoding)?;
+        let leaf_n32: BytesN<32> = BytesN::<32>::try_from_val(&env, &leaf.to_val())
+            .map_err(|_| CommitmentError::InvalidProofEncoding)?;
         let root_fr = Fr::from_bytes(root_n32);
+        let leaf_fr = Fr::from_bytes(leaf_n32);
 
-        let pub_signals = vec![&env, root_fr];
+        let pub_signals = vec![&env, root_fr, leaf_fr];
 
         // ic.len() must be pub_signals.len() + 1.
         if vk.ic.len() != pub_signals.len() as u32 + 1 {
             return Err(CommitmentError::MalformedVerifyingKey);
         }
 
-        // 5. Compute vk_x = ic[0] + sum(pub_signals[i] * ic[i+1])
+        // 6. Compute vk_x = ic[0] + sum(pub_signals[i] * ic[i+1])
         let ic0_bytes = vk.ic.get(0).unwrap();
         let mut vk_x = g1_from_bytes(&env, &ic0_bytes);
 
@@ -701,7 +763,7 @@ impl ZkAuditCommitment {
             vk_x = bn254.g1_add(&vk_x, &prod);
         }
 
-        // 6. Pairing check: e(-A, B) * e(alpha, beta) * e(vk_x, gamma) * e(C, delta) == 1
+        // 7. Pairing check: e(-A, B) * e(alpha, beta) * e(vk_x, gamma) * e(C, delta) == 1
         let neg_a = -a;
         let vp1 = vec![&env, neg_a, alpha, vk_x, c];
         let vp2 = vec![&env, b, beta, gamma, delta];

@@ -30,6 +30,25 @@ fn sign_oplog_attestation(signing_key: &SigningKey, oplog_root: &[u8; 32], oplog
     signing_key.sign(&message_hash).to_bytes()
 }
 
+/// A structurally-valid but not cryptographically meaningful verifying key,
+/// for tests that only exercise storage/dedup/encoding logic and never
+/// actually run the pairing check. `ic` has 3 entries to match the
+/// `[root, leaf]` public-signal arity of `merkle_inclusion.circom`.
+fn dummy_vk(env: &Env) -> VerifyingKey {
+    VerifyingKey {
+        alpha: Bytes::from_array(env, &[0u8; 64]),
+        beta: Bytes::from_array(env, &[0u8; 128]),
+        gamma: Bytes::from_array(env, &[0u8; 128]),
+        delta: Bytes::from_array(env, &[0u8; 128]),
+        ic: vec![
+            env,
+            Bytes::from_array(env, &[0u8; 64]),
+            Bytes::from_array(env, &[0u8; 64]),
+            Bytes::from_array(env, &[0u8; 64]),
+        ],
+    }
+}
+
 #[test]
 fn test_initialize_and_admin() {
     let env = Env::default();
@@ -37,12 +56,15 @@ fn test_initialize_and_admin() {
     let client = ZkAuditCommitmentClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
+    let vk = dummy_vk(&env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    client.initialize(&admin, &vk);
 
     let got_admin = client.get_admin();
     assert_eq!(got_admin, admin);
     assert_eq!(client.get_threshold(), 1);
+    assert_eq!(client.get_verifying_key().alpha, vk.alpha);
+    assert_eq!(client.get_verifying_key().ic.len(), vk.ic.len());
 }
 
 #[test]
@@ -53,7 +75,7 @@ fn test_set_threshold() {
 
     let admin = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    client.initialize(&admin, &dummy_vk(&env));
 
     client.set_threshold(&2u32);
     assert_eq!(client.get_threshold(), 2);
@@ -70,7 +92,7 @@ fn test_commit_root() {
 
     let admin = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    client.initialize(&admin, &dummy_vk(&env));
 
     let root = Bytes::from_array(&env, &[0u8; 32]);
     let metadata = String::from_str(&env, "first commit");
@@ -93,7 +115,7 @@ fn test_commit_multiple_roots() {
 
     let admin = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    client.initialize(&admin, &dummy_vk(&env));
 
     let root1 = Bytes::from_array(&env, &[1u8; 32]);
     let root2 = Bytes::from_array(&env, &[2u8; 32]);
@@ -120,7 +142,7 @@ fn test_duplicate_root_rejected() {
 
     let admin = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    client.initialize(&admin, &dummy_vk(&env));
 
     let root = Bytes::from_array(&env, &[0xAA; 32]);
     client.commit_root(&root, &String::from_str(&env, "first"));
@@ -137,7 +159,7 @@ fn test_root_history() {
 
     let admin = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    client.initialize(&admin, &dummy_vk(&env));
 
     for i in 1..=5u8 {
         let mut arr = [0u8; 32];
@@ -161,7 +183,7 @@ fn test_invalid_page_size() {
 
     let admin = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    client.initialize(&admin, &dummy_vk(&env));
 
     let result = client.try_get_root_history(&0);
     assert!(result.is_err());
@@ -178,23 +200,17 @@ fn test_verify_inclusion_root_not_committed() {
 
     let admin = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    client.initialize(&admin, &dummy_vk(&env));
 
     let root = Bytes::from_array(&env, &[0u8; 32]);
+    let leaf = Bytes::from_array(&env, &[0u8; 32]);
     let proof = Proof {
         a: Bytes::from_array(&env, &[0u8; 64]),
         b: Bytes::from_array(&env, &[0u8; 128]),
         c: Bytes::from_array(&env, &[0u8; 64]),
     };
-    let vk = VerifyingKey {
-        alpha: Bytes::from_array(&env, &[0u8; 64]),
-        beta: Bytes::from_array(&env, &[0u8; 128]),
-        gamma: Bytes::from_array(&env, &[0u8; 128]),
-        delta: Bytes::from_array(&env, &[0u8; 128]),
-        ic: Vec::new(&env),
-    };
 
-    let result = client.try_verify_inclusion(&root, &proof, &vk);
+    let result = client.try_verify_inclusion(&root, &leaf, &proof);
     assert!(result.is_err());
 }
 
@@ -206,25 +222,43 @@ fn test_verify_inclusion_invalid_encoding() {
 
     let admin = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    client.initialize(&admin, &dummy_vk(&env));
 
     let root = Bytes::from_array(&env, &[0u8; 32]);
     client.commit_root(&root, &String::from_str(&env, "test"));
 
+    let leaf = Bytes::from_array(&env, &[0u8; 32]);
     let proof = Proof {
         a: Bytes::from_array(&env, &[0u8; 32]), // wrong: should be 64
         b: Bytes::from_array(&env, &[0u8; 128]),
         c: Bytes::from_array(&env, &[0u8; 64]),
     };
-    let vk = VerifyingKey {
-        alpha: Bytes::from_array(&env, &[0u8; 64]),
-        beta: Bytes::from_array(&env, &[0u8; 128]),
-        gamma: Bytes::from_array(&env, &[0u8; 128]),
-        delta: Bytes::from_array(&env, &[0u8; 128]),
-        ic: Vec::new(&env),
+
+    let result = client.try_verify_inclusion(&root, &leaf, &proof);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_verify_inclusion_not_initialized_with_vk() {
+    // A contract that never called `initialize` has no pinned verifying
+    // key, so `verify_inclusion` must fail closed rather than accepting
+    // any key the caller happens to provide.
+    let env = Env::default();
+    let contract_id = env.register_contract(None, ZkAuditCommitment);
+    let client = ZkAuditCommitmentClient::new(&env, &contract_id);
+
+    let root = Bytes::from_array(&env, &[0u8; 32]);
+    let leaf = Bytes::from_array(&env, &[0u8; 32]);
+    let proof = Proof {
+        a: Bytes::from_array(&env, &[0u8; 64]),
+        b: Bytes::from_array(&env, &[0u8; 128]),
+        c: Bytes::from_array(&env, &[0u8; 64]),
     };
 
-    let result = client.try_verify_inclusion(&root, &proof, &vk);
+    // Root isn't committed either (contract was never initialized), so this
+    // hits RootNotCommitted first — the important invariant is simply that
+    // there is no way to reach the pairing check without a stored VK.
+    let result = client.try_verify_inclusion(&root, &leaf, &proof);
     assert!(result.is_err());
 }
 
@@ -236,7 +270,7 @@ fn test_no_current_root() {
 
     let admin = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    client.initialize(&admin, &dummy_vk(&env));
 
     let current = client.get_current_root();
     assert!(current.is_none());
@@ -252,7 +286,7 @@ fn test_commit_root_with_oplog() {
 
     let admin = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    client.initialize(&admin, &dummy_vk(&env));
 
     let root = Bytes::from_array(&env, &[0xaa; 32]);
     let oplog_root = Bytes::from_array(&env, &[0xbb; 32]);
@@ -291,7 +325,7 @@ fn test_commit_root_with_oplog_invalid_root_length() {
 
     let admin = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    client.initialize(&admin, &dummy_vk(&env));
 
     let root = Bytes::from_array(&env, &[0xaa; 32]);
     let bad_oplog_root = Bytes::from_array(&env, &[0xbb; 16]); // wrong length
@@ -316,7 +350,7 @@ fn test_get_oplog_commitment_not_found() {
 
     let admin = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    client.initialize(&admin, &dummy_vk(&env));
 
     let result = client.try_get_oplog_commitment(&999u64);
     assert!(result.is_err());
@@ -331,7 +365,7 @@ fn test_authorize_and_attest_oplog() {
     let admin = Address::generate(&env);
     let (attester, attester_key, public_key) = generate_attester(&env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    client.initialize(&admin, &dummy_vk(&env));
 
     // Authorize the attester with its registered public key.
     client.authorize_attester(&attester, &public_key);
@@ -371,7 +405,7 @@ fn test_attest_oplog_unauthorized_attester() {
     let admin = Address::generate(&env);
     let (unauthorized_attester, unauthorized_key, _) = generate_attester(&env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    client.initialize(&admin, &dummy_vk(&env));
 
     // Commit a root with oplog hash.
     let root = Bytes::from_array(&env, &[0xaa; 32]);
@@ -402,7 +436,7 @@ fn test_attest_oplog_duplicate_rejected() {
     let admin = Address::generate(&env);
     let (attester, attester_key, public_key) = generate_attester(&env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    client.initialize(&admin, &dummy_vk(&env));
     client.authorize_attester(&attester, &public_key);
 
     // Commit a root with oplog hash.
@@ -437,7 +471,7 @@ fn test_attest_oplog_invalid_signature_length() {
     let admin = Address::generate(&env);
     let (attester, _, public_key) = generate_attester(&env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    client.initialize(&admin, &dummy_vk(&env));
     client.authorize_attester(&attester, &public_key);
 
     let root = Bytes::from_array(&env, &[0xaa; 32]);
@@ -466,7 +500,7 @@ fn test_revoke_attester() {
     let admin = Address::generate(&env);
     let (attester, attester_key, public_key) = generate_attester(&env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    client.initialize(&admin, &dummy_vk(&env));
     client.authorize_attester(&attester, &public_key);
 
     // Commit and attest successfully.
@@ -516,7 +550,7 @@ fn test_verify_attestation() {
     let admin = Address::generate(&env);
     let (attester, attester_key, public_key) = generate_attester(&env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    client.initialize(&admin, &dummy_vk(&env));
 
     // Authorize the attester with its registered public key.
     client.authorize_attester(&attester, &public_key);
@@ -582,7 +616,7 @@ fn test_verify_attestation_threshold_k_of_n() {
     let (attester1, key1, pk1) = generate_attester(&env);
     let (attester2, key2, pk2) = generate_attester(&env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    client.initialize(&admin, &dummy_vk(&env));
     client.authorize_attester(&attester1, &pk1);
     client.authorize_attester(&attester2, &pk2);
 

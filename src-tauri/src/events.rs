@@ -46,6 +46,29 @@ pub fn emit_audit_setup_progress(app: &AppHandle, line: &str) {
     );
 }
 
+/// Payload for the `audit-stack-progress` event: one line of output from
+/// bringing the dev audit stack up (`docker compose up`), streamed live so
+/// the UI can show what's happening instead of a bare spinner. A cold
+/// source build recompiles the whole Rust workspace inside the container,
+/// which can take minutes — without this, users have no way to tell that
+/// from a stalled process.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditStackProgressPayload {
+    pub line: String,
+}
+
+/// Emit a single line of audit-stack-up progress. Best-effort: emission
+/// failures are ignored so they never abort the stack-up run.
+pub fn emit_audit_stack_progress(app: &AppHandle, line: &str) {
+    let _ = app.emit(
+        "audit-stack-progress",
+        AuditStackProgressPayload {
+            line: line.to_string(),
+        },
+    );
+}
+
 /// Payload for the `import-export-progress` event: a periodic snapshot of a
 /// running import or export job. Emitted at most a few times per second
 /// (throttled in the pipeline) so a million-row job never floods the IPC

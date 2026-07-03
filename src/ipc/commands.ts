@@ -1114,6 +1114,7 @@ export interface AuditEvent {
 /** Soroban proof result for on-chain verification. */
 export interface ProofResult {
   rootHex: string;
+  leafHex: string;
   leafIndex: number;
   proof: { a: string; b: string; c: string };
   vk: {
@@ -1389,14 +1390,10 @@ const commands = {
     }),
   auditVerifyProofOnchain: (proof: {
     rootHex: string;
+    leafHex: string;
     proofA: string;
     proofB: string;
     proofC: string;
-    vkAlpha: string;
-    vkBeta: string;
-    vkGamma: string;
-    vkDelta: string;
-    vkIc: string[];
   }) =>
     invoke<{ txHash: string; verified: boolean }>(
       "audit_verify_proof_onchain",

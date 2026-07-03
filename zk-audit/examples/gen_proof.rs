@@ -32,6 +32,11 @@ fn main() {
     let inclusion = tree.prove_inclusion(2).unwrap();
     assert_eq!(inclusion.root, root);
 
+    let leaf_bytes = inclusion.leaf.into_bigint().to_bytes_be();
+    let mut leaf_arr = [0u8; 32];
+    leaf_arr[32 - leaf_bytes.len()..].copy_from_slice(&leaf_bytes);
+    let leaf_hex = hex::encode(leaf_arr);
+
     let r1cs = std::env::args().nth(1).unwrap_or_else(|| {
         "../zk-spike/circuits/build/merkle_inclusion.r1cs".to_string()
     });
@@ -44,8 +49,12 @@ fn main() {
     let soroban_args = AuditProver::serialize_for_soroban(&groth16_proof).unwrap();
 
     // Output as JSON for easy parsing.
+    // NOTE: `verify_inclusion(root, leaf, proof)` reads the verifying key
+    // from on-chain storage (pinned at `initialize`); it is included here
+    // only for reference / for calling `initialize` on a fresh deployment.
     let output = serde_json::json!({
         "root_hex": root_hex,
+        "leaf_hex": leaf_hex,
         "proof": {
             "a": soroban_args.proof.a,
             "b": soroban_args.proof.b,

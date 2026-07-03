@@ -146,13 +146,21 @@ services:
   # and writes ./attester.key + .env.audit into the current dir.
   # Gated behind the "setup" profile so it never starts with `up`.
   #
+  # `docker compose run SERVICE ARGS...` replaces `command:` entirely rather
+  # than appending to it (e.g. `run --rm setup --role publisher` drops the
+  # `command:` below, including any `--vkey-path` on it). So the verifying
+  # key path is passed via `environment:` instead, which survives command
+  # overrides. The verifying key is pinned on-chain forever at `initialize`,
+  # so it must be the real ceremony output baked into the image at
+  # /opt/circuits, not omitted or swapped for a placeholder.
+  #
   # Dev Mode (both keys, one machine):
   #   docker compose --env-file .env.audit run --rm setup
   #
   # Operator (publisher key + contract deploy):
   #   docker compose --env-file .env.audit run --rm setup --role publisher
   #
-  # Auditor (attester keys independently):
+  # Auditor (attester keys independently — no contract deploy, no VK needed):
   #   docker compose --env-file .env.audit run --rm setup --role attester
   setup:
     image: *image
@@ -160,9 +168,11 @@ services:
     working_dir: /work
     volumes:
       - .:/work
+    environment:
+      VKEY_PATH: /opt/circuits/merkle_inclusion.vkey
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    command: ["setup"]
+    command: ["setup", "--vkey-path", "/opt/circuits/merkle_inclusion.vkey"]
 
 volumes:
   audit-publisher-data:

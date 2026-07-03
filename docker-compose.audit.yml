@@ -155,6 +155,15 @@ services:
   # Gated behind the "setup" profile so it never starts with `up`. Run it in
   # an interactive terminal with:
   #   docker compose -f docker-compose.audit.yml run --build --rm setup
+  #
+  # `docker compose run SERVICE ARGS...` replaces `command:` entirely rather
+  # than appending to it (e.g. the desktop app's non-interactive setup flow,
+  # or a manual `run --rm setup --role publisher`, both drop the `command:`
+  # below). So the verifying key path is passed via `environment:` instead,
+  # which survives command overrides. The verifying key is pinned on-chain
+  # forever at `initialize`, so it must be the real ceremony output baked
+  # into the image at /opt/circuits, not omitted or swapped for a
+  # placeholder — hence it's always set here, not left to be forgotten.
   setup:
     image: ${AUDIT_IMAGE:-nosqlbuddy-audit:dev}
     build:
@@ -164,6 +173,8 @@ services:
     working_dir: /work
     volumes:
       - .:/work
+    environment:
+      VKEY_PATH: /opt/circuits/merkle_inclusion.vkey
     # The desktop "Set up" flow writes a temporary .setup.env (Stellar network,
     # optional operator secret keys, Pinata creds) into the stack dir before
     # running this service, then deletes it afterward. Loaded here so the keys
@@ -173,7 +184,7 @@ services:
     env_file:
       - path: .setup.env
         required: false
-    command: ["setup"]
+    command: ["setup", "--vkey-path", "/opt/circuits/merkle_inclusion.vkey"]
 
 volumes:
   audit-publisher-data:

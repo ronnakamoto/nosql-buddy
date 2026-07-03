@@ -1131,40 +1131,36 @@ pub async fn attest_oplog_native(
 
 /// Verify a Groth16 inclusion proof on-chain using the Soroban contract.
 ///
-/// Calls `verify_inclusion(root, proof, vk)` on the contract and returns the
-/// transaction hash plus the boolean verification result.
+/// Calls `verify_inclusion(root, leaf, proof)` on the contract and returns
+/// the transaction hash plus the boolean verification result. The verifying
+/// key is not sent — the contract uses the one pinned at `initialize`.
 pub async fn verify_inclusion_native(
     root_hex: &str,
+    leaf_hex: &str,
     proof_a_hex: &str,
     proof_b_hex: &str,
     proof_c_hex: &str,
-    vk_alpha_hex: &str,
-    vk_beta_hex: &str,
-    vk_gamma_hex: &str,
-    vk_delta_hex: &str,
-    vk_ic_hex: &[String],
     keypair: &StellarKeypair,
     rpc_url: &str,
     contract_id: &str,
     network_passphrase: &str,
 ) -> AuditResult<VerifyInclusionResult> {
-    // Build ScVal args: root (Bytes), proof (Map), vk (Map).
+    // Build ScVal args: root (Bytes), leaf (Bytes), proof (Map).
     let root_bytes = hex::decode(root_hex)
         .map_err(|e| AuditError::Validation(format!("invalid root hex: {e}")))?;
     let root_scval = ScVal::Bytes(ScBytes(root_bytes.clone().try_into().map_err(
         |e: stellar_xdr::curr::Error| AuditError::Validation(format!("invalid root bytes: {e}")),
     )?));
 
-    let proof_scval = build_proof_scval(proof_a_hex, proof_b_hex, proof_c_hex)?;
-    let vk_scval = build_verifying_key_scval(
-        vk_alpha_hex,
-        vk_beta_hex,
-        vk_gamma_hex,
-        vk_delta_hex,
-        vk_ic_hex,
-    )?;
+    let leaf_bytes = hex::decode(leaf_hex)
+        .map_err(|e| AuditError::Validation(format!("invalid leaf hex: {e}")))?;
+    let leaf_scval = ScVal::Bytes(ScBytes(leaf_bytes.try_into().map_err(
+        |e: stellar_xdr::curr::Error| AuditError::Validation(format!("invalid leaf bytes: {e}")),
+    )?));
 
-    let args = vec![root_scval, proof_scval, vk_scval];
+    let proof_scval = build_proof_scval(proof_a_hex, proof_b_hex, proof_c_hex)?;
+
+    let args = vec![root_scval, leaf_scval, proof_scval];
 
     // Submit (serialized per account, confirmed, and retried on txBAD_SEQ).
     let (tx_hash, sim_result) = submit_invoke_with_retry(
@@ -1898,21 +1894,38 @@ fn encode_contract_id(contract_id: &[u8; 32]) -> String {
     encode_strkey(2 << 3, contract_id)
 }
 
-/// Call `initialize(admin)` on the contract via native signing.
+/// Call `initialize(admin, vk)` on the contract via native signing.
 ///
 /// Used by the setup wizard to initialize a newly deployed contract.
-/// The `admin_keypair` becomes the contract admin (authorized to commit roots).
+/// The `admin_keypair` becomes the contract admin (authorized to commit
+/// roots). The verifying key is pinned permanently at this point — the
+/// contract has no `set_verifying_key`, so it must be the real key from the
+/// `merkle_inclusion` circuit's trusted setup (see `zk-audit-ceremony`).
+/// Passing a placeholder key here means `verify_inclusion` will never
+/// succeed against real proofs.
 pub async fn initialize_contract_native(
     contract_id: &str,
     admin_keypair: &StellarKeypair,
+    vk_alpha_hex: &str,
+    vk_beta_hex: &str,
+    vk_gamma_hex: &str,
+    vk_delta_hex: &str,
+    vk_ic_hex: &[String],
     rpc_url: &str,
     network_passphrase: &str,
 ) -> AuditResult<()> {
     let admin_scval = ScVal::Address(ScAddress::Account(AccountId(
         PublicKey::PublicKeyTypeEd25519(Uint256(admin_keypair.public_bytes())),
     )));
+    let vk_scval = build_verifying_key_scval(
+        vk_alpha_hex,
+        vk_beta_hex,
+        vk_gamma_hex,
+        vk_delta_hex,
+        vk_ic_hex,
+    )?;
 
-    let args = vec![admin_scval];
+    let args = vec![admin_scval, vk_scval];
 
     submit_invoke_with_retry(
         rpc_url,
@@ -2350,6 +2363,25 @@ pub fn base32_decode(s: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
+    /// A structurally-valid but not cryptographically meaningful verifying
+    /// key (hex-encoded), for smoke tests that exercise `initialize` and
+    /// deployment plumbing without generating a real Groth16 proof. `ic` has
+    /// 3 entries to match `merkle_inclusion.circom`'s `[root, leaf]` public
+    /// signals.
+    fn dummy_vk_hex() -> (String, String, String, String, Vec<String>) {
+        (
+            hex::encode([0u8; 64]),
+            hex::encode([0u8; 128]),
+            hex::encode([0u8; 128]),
+            hex::encode([0u8; 128]),
+            vec![
+                hex::encode([0u8; 64]),
+                hex::encode([0u8; 64]),
+                hex::encode([0u8; 64]),
+            ],
+        )
+    }
+
     #[test]
     fn test_crc16_xmodem_known_vector() {
         // CRC16-XModem of "123456789" is 0x31C3.
@@ -2723,9 +2755,20 @@ mod tests {
             deployed.create_tx_hash
         );
 
-        initialize_contract_native(&deployed.contract_id, &kp, rpc, TESTNET_PASSPHRASE)
-            .await
-            .expect("initialize contract");
+        let (vk_alpha, vk_beta, vk_gamma, vk_delta, vk_ic) = dummy_vk_hex();
+        initialize_contract_native(
+            &deployed.contract_id,
+            &kp,
+            &vk_alpha,
+            &vk_beta,
+            &vk_gamma,
+            &vk_delta,
+            &vk_ic,
+            rpc,
+            TESTNET_PASSPHRASE,
+        )
+        .await
+        .expect("initialize contract");
 
         let admin = get_admin_native(&kp, rpc, &deployed.contract_id)
             .await
@@ -2796,9 +2839,20 @@ mod tests {
             deployed.contract_id, deployed.wasm_hash_hex
         );
 
-        initialize_contract_native(&deployed.contract_id, &kp, rpc, TESTNET_PASSPHRASE)
-            .await
-            .expect("initialize contract");
+        let (vk_alpha, vk_beta, vk_gamma, vk_delta, vk_ic) = dummy_vk_hex();
+        initialize_contract_native(
+            &deployed.contract_id,
+            &kp,
+            &vk_alpha,
+            &vk_beta,
+            &vk_gamma,
+            &vk_delta,
+            &vk_ic,
+            rpc,
+            TESTNET_PASSPHRASE,
+        )
+        .await
+        .expect("initialize contract");
 
         // Default threshold is 1.
         let default_threshold = get_threshold_native(&kp, rpc, &deployed.contract_id)

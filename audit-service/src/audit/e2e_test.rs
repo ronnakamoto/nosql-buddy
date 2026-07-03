@@ -125,9 +125,11 @@ fn test_e2e_proof_verification_with_circuit() {
     let prover = zk_audit::AuditProver::new(r1cs_path, wasm_path).unwrap();
     let groth16_proof = prover.prove(&inclusion).unwrap();
 
-    // The public input (root) must match the audit log's current root.
-    assert_eq!(groth16_proof.public_inputs.len(), 1);
+    // The public signals are [root, leaf] and must match the audit log's
+    // current root and the proven leaf.
+    assert_eq!(groth16_proof.public_inputs.len(), 2);
     assert_eq!(groth16_proof.public_inputs[0], audit.root().unwrap());
+    assert_eq!(groth16_proof.public_inputs[1], inclusion.leaf);
 
     // Serialize for Soroban.
     let soroban_args = zk_audit::AuditProver::serialize_for_soroban(&groth16_proof).unwrap();
@@ -136,11 +138,12 @@ fn test_e2e_proof_verification_with_circuit() {
     assert_eq!(soroban_args.proof.a.len(), 128); // G1: 64 bytes * 2 hex
     assert_eq!(soroban_args.proof.b.len(), 256); // G2: 128 bytes * 2 hex
     assert_eq!(soroban_args.proof.c.len(), 128); // G1: 64 bytes * 2 hex
-    assert_eq!(soroban_args.pub_signals.len(), 1);
+    assert_eq!(soroban_args.pub_signals.len(), 2);
     assert_eq!(
         soroban_args.pub_signals[0],
         audit.root().unwrap().to_string()
     );
+    assert_eq!(soroban_args.pub_signals[1], inclusion.leaf.to_string());
 
     eprintln!("✓ End-to-end proof generation succeeded");
     eprintln!("  Root: {}", soroban_args.pub_signals[0]);
@@ -175,7 +178,9 @@ fn test_e2e_proof_with_bundled_resources() {
     let prover = zk_audit::AuditProver::new(r1cs_str, wasm_str).unwrap();
     let groth16_proof = prover.prove(&inclusion).unwrap();
 
+    assert_eq!(groth16_proof.public_inputs.len(), 2);
     assert_eq!(groth16_proof.public_inputs[0], audit.root().unwrap());
+    assert_eq!(groth16_proof.public_inputs[1], inclusion.leaf);
     let soroban_args = zk_audit::AuditProver::serialize_for_soroban(&groth16_proof).unwrap();
     assert_eq!(soroban_args.proof.a.len(), 128);
     assert_eq!(soroban_args.proof.b.len(), 256);

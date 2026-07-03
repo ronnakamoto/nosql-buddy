@@ -96,6 +96,30 @@ impl SetupRole {
     }
 }
 
+/// Parse `--vkey-path <path>` from args, falling back to the `VKEY_PATH` env
+/// var. This is the Groth16 verifying key produced by `zk-audit-ceremony`
+/// (arkworks-serialized `.vkey` file) for the `merkle_inclusion` circuit. It
+/// is pinned on-chain at `initialize` and can never be changed afterwards,
+/// so deploying without the real ceremony output would permanently brick
+/// on-chain proof verification for that contract.
+///
+/// Unlike `--role`, the env fallback here is checked regardless of
+/// `--non-interactive`: there is no interactive prompt for this value (it's
+/// not a secret), so `VKEY_PATH` set via a container's `environment:` block
+/// is the only way to supply it when `docker compose run SERVICE ARGS...`
+/// has replaced the service's `command:` (and any `--vkey-path` baked into
+/// it) with different args, e.g. `--role publisher`.
+fn parse_vkey_path(args: &[String], _non_interactive: bool) -> Option<String> {
+    for (i, a) in args.iter().enumerate() {
+        if a == "--vkey-path" {
+            return args.get(i + 1).cloned();
+        } else if let Some(val) = a.strip_prefix("--vkey-path=") {
+            return Some(val.to_string());
+        }
+    }
+    std::env::var("VKEY_PATH").ok().filter(|s| !s.is_empty())
+}
+
 /// Parse `--role <role>` from args, falling back to the `SETUP_ROLE` env var.
 fn parse_role(args: &[String], non_interactive: bool) -> SetupRole {
     for (i, a) in args.iter().enumerate() {
@@ -326,9 +350,18 @@ async fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // ── 7. Initialize the contract (if deploying new) ──────────────
     if deploy_choice == "deploy" {
         let publisher = publisher_kp.as_ref().unwrap();
+        let vkey_path = parse_vkey_path(args, non_interactive).ok_or_else(|| {
+            "deploying a new contract requires --vkey-path <path to merkle_inclusion.vkey>. \
+             Generate it once via `zk-audit-ceremony <r1cs> <output-dir>`; the verifying key \
+             is pinned on-chain forever at initialize, so this must be the real ceremony \
+             output, not a placeholder."
+                .to_string()
+        })?;
+        let vk = zk_audit::load_verifying_key_hex(&vkey_path)
+            .map_err(|e| format!("failed to load verifying key from {vkey_path}: {e}"))?;
         println!();
-        println!("  Initializing contract (set admin = publisher)...");
-        initialize_contract(&contract_id, publisher, &rpc_url, &passphrase).await?;
+        println!("  Initializing contract (set admin = publisher, pin verifying key)...");
+        initialize_contract(&contract_id, publisher, &vk, &rpc_url, &passphrase).await?;
         println!(
             "  Contract initialized. Admin: {}",
             publisher.account_id()
@@ -900,16 +933,22 @@ fn deploy_from_wasm_hash(
     Err(format!("stellar contract deploy failed:\n{last_stderr}"))
 }
 
-/// Call `initialize(admin)` on the contract via native signing.
+/// Call `initialize(admin, vk)` on the contract via native signing.
 async fn initialize_contract(
     contract_id: &str,
     admin_keypair: &audit_service::audit::stellar_native::StellarKeypair,
+    vk: &zk_audit::SorobanVerifyingKey,
     rpc_url: &str,
     passphrase: &str,
 ) -> Result<(), String> {
     audit_service::audit::stellar_native::initialize_contract_native(
         contract_id,
         admin_keypair,
+        &vk.alpha,
+        &vk.beta,
+        &vk.gamma,
+        &vk.delta,
+        &vk.ic,
         rpc_url,
         passphrase,
     )
@@ -1668,6 +1707,8 @@ fn print_help() {
         Subcommands:\n\
           setup              Generate keys, deploy contract, authorize attester\n\
                              --role all (Dev Mode, default), publisher, or attester\n\
+                             --vkey-path <path>  required when deploying: the\n\
+                               merkle_inclusion.vkey from `zk-audit-ceremony`\n\
           authorize-attester On-chain attester authorization (operator only)\n\
           start              Start the audit service (publisher / reader / attester mode)\n\
           stop               Stop a running service\n\
@@ -1676,7 +1717,7 @@ fn print_help() {
         Run 'nosqlbuddy-audit <subcommand> --help' for subcommand-specific options.\n\
         \n\
         Examples:\n\
-          nosqlbuddy-audit setup --role all\n\
+          nosqlbuddy-audit setup --role all --vkey-path circuits/build/merkle_inclusion.vkey\n\
           nosqlbuddy-audit setup --role publisher\n\
           nosqlbuddy-audit setup --role attester\n\
           nosqlbuddy-audit authorize-attester --contract-id C... --secret-key S... \\\n\

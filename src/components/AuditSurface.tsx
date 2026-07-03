@@ -638,7 +638,16 @@ export function AuditSurface({ config, connectionId, onShowSettings }: AuditSurf
               {pinataResult && (
                 <div className="audit-advanced__row">
                   <span className="audit-advanced__label">IPFS CID</span>
-                  <span className="audit-advanced__value audit-advanced__value--mono">{pinataResult.cid}</span>
+                  <span className="audit-advanced__value audit-advanced__value--mono">
+                    <a
+                      href={pinataResult.gatewayUrl || `https://ipfs.io/ipfs/${pinataResult.cid}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="audit-advanced__link"
+                    >
+                      {pinataResult.cid}
+                    </a>
+                  </span>
                 </div>
               )}
             </div>

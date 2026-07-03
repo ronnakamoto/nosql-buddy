@@ -74,6 +74,23 @@ fn g2_to_hex(p: &G2Affine) -> String {
     hex::encode(result)
 }
 
+/// Serialize a verifying key alone to the Soroban BN254 hex format.
+///
+/// Used both when serializing a full proof (see [`serialize_proof`]) and
+/// when pinning the VK on-chain via the contract's `initialize`, which takes
+/// no proof at all.
+pub fn serialize_verifying_key(
+    vk: &ark_groth16::VerifyingKey<Bn254>,
+) -> SorobanVerifyingKey {
+    SorobanVerifyingKey {
+        alpha: g1_to_hex(&vk.alpha_g1),
+        beta: g2_to_hex(&vk.beta_g2),
+        gamma: g2_to_hex(&vk.gamma_g2),
+        delta: g2_to_hex(&vk.delta_g2),
+        ic: vk.gamma_abc_g1.iter().map(g1_to_hex).collect(),
+    }
+}
+
 /// Serialize a full proof + VK + public signals for Soroban.
 pub fn serialize_proof(
     proof: &ark_groth16::Proof<Bn254>,
@@ -81,13 +98,7 @@ pub fn serialize_proof(
     public_inputs: &[Fr],
 ) -> ZkAuditResult<SorobanProofArgs> {
     Ok(SorobanProofArgs {
-        vk: SorobanVerifyingKey {
-            alpha: g1_to_hex(&vk.alpha_g1),
-            beta: g2_to_hex(&vk.beta_g2),
-            gamma: g2_to_hex(&vk.gamma_g2),
-            delta: g2_to_hex(&vk.delta_g2),
-            ic: vk.gamma_abc_g1.iter().map(g1_to_hex).collect(),
-        },
+        vk: serialize_verifying_key(vk),
         proof: SorobanProof {
             a: g1_to_hex(&proof.a),
             b: g2_to_hex(&proof.b),
@@ -95,6 +106,20 @@ pub fn serialize_proof(
         },
         pub_signals: public_inputs.iter().map(|f| f.to_string()).collect(),
     })
+}
+
+/// Load an arkworks-serialized (uncompressed) verifying key from disk, as
+/// produced by `zk-audit-ceremony`, and serialize it to Soroban hex.
+pub fn load_verifying_key_hex(path: &str) -> ZkAuditResult<SorobanVerifyingKey> {
+    use ark_serialize::CanonicalDeserialize;
+
+    let file = std::fs::File::open(path).map_err(crate::error::ZkAuditError::Io)?;
+    let mut reader = std::io::BufReader::new(file);
+    let vk = ark_groth16::VerifyingKey::<Bn254>::deserialize_uncompressed_unchecked(&mut reader)
+        .map_err(|e| {
+            crate::error::ZkAuditError::Serialization(format!("deserialize verifying key: {e}"))
+        })?;
+    Ok(serialize_verifying_key(&vk))
 }
 
 #[cfg(test)]

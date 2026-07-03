@@ -143,6 +143,65 @@ export function ContractLink({
   );
 }
 
+/**
+ * Renders an IPFS CID as a clickable link to the gateway that served it.
+ * Prefers the `gatewayUrl` the publish call actually returned (Pinata's
+ * configured gateway, or the local Kubo daemon's), and falls back to a
+ * public gateway so the link still works if one wasn't supplied.
+ */
+export function IpfsCidLink({
+  cid,
+  gatewayUrl,
+  showExternalIcon = true,
+}: {
+  cid: string;
+  gatewayUrl?: string;
+  showExternalIcon?: boolean;
+}) {
+  if (!cid) return <span style={{ color: "var(--ink-faint)" }}>—</span>;
+  const href = gatewayUrl || `https://ipfs.io/ipfs/${cid}`;
+  const display = cid.length > 20 ? `${cid.slice(0, 10)}…${cid.slice(-8)}` : cid;
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      title={`View on IPFS: ${cid}`}
+      style={{
+        color: "var(--link)",
+        textDecoration: "none",
+        fontFamily: "var(--font-mono)",
+        letterSpacing: "var(--letter-mono)",
+        fontSize: "var(--font-size-sm)",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: "4px",
+        cursor: "pointer",
+        transition: "color 0.12s ease",
+      }}
+    >
+      {display}
+      {showExternalIcon && (
+        <svg
+          width="11"
+          height="11"
+          viewBox="0 0 16 16"
+          fill="none"
+          style={{ opacity: 0.6, flexShrink: 0 }}
+        >
+          <path
+            d="M6 3h7v7M13 3L6 10M11 9v4a1 1 0 01-1 1H4a1 1 0 01-1-1V7a1 1 0 011-1h4"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      )}
+    </a>
+  );
+}
+
 // ─── Card ───────────────────────────────────────────────────────────────
 
 export function Card({

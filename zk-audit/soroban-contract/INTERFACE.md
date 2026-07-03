@@ -1,8 +1,20 @@
 # ZK-AuditDB Soroban Commitment Contract — Interface Design
 
-**Status:** Draft
-**Author:** ZK-AuditDB team
-**Last updated:** 2025-06-23
+> **Implementation note (2026-07-03):** the shipped contract (`src/lib.rs`)
+> resolved the open questions below as follows, and this predates a full
+> rewrite of this doc:
+> - `initialize(env, admin, vk: VerifyingKey)` — the verifying key is pinned
+>   here, once, and there is no `set_verifying_key`. `verify_inclusion` reads
+>   it from storage; it is **not** a caller-supplied argument, because
+>   accepting an arbitrary VK from the caller would let anyone "verify" a
+>   proof against a circuit/statement of their own choosing.
+> - `verify_inclusion(env, root: Bytes, leaf: Bytes, proof: Proof) ->
+>   Result<bool, CommitmentError>` — public signals are `[root, leaf]`
+>   (Circom orders `main`'s outputs, here `root`, before its `public` inputs,
+>   here `leaf`). `leaf` must be public; see `merkle_inclusion.circom` for why
+>   an unbound leaf makes the inclusion statement vacuous.
+> - Types use `Bytes`, not `u256`, throughout (see §2 below, which is
+>   otherwise accurate).
 
 ## 1. Overview
 
