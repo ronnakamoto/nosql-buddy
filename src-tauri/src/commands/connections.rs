@@ -142,22 +142,53 @@ pub async fn test_profile(
     )
     .await?;
     let database = client.database("admin");
-    let cmd = bson::doc! { "ping": 1 };
     let started = std::time::Instant::now();
-    let result =
-        tokio::time::timeout(std::time::Duration::from_secs(8), database.run_command(cmd)).await;
+    // ping and connectionStatus do NOT require authentication on some proxies
+    // (e.g. Atlas SQL gateway), so a missing credential still passes. We use
+    // listDatabases instead: it forces the driver to actually authenticate,
+    // so missing or wrong credentials surface here instead of later during
+    // normal use. If the user is authenticated but lacks the listDatabases
+    // privilege, we still report success — auth itself worked.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        database.run_command(bson::doc! { "listDatabases": 1, "nameOnly": true }),
+    )
+    .await;
     let latency_ms = Some(started.elapsed().as_millis() as u64);
     match result {
         Ok(Ok(_)) => Ok(TestResult {
             ok: true,
-            message: "Connection successful. The server responded to ping.".into(),
+            message: "Connection successful. The server responded.".into(),
             latency_ms,
         }),
-        Ok(Err(e)) => Ok(TestResult {
-            ok: false,
-            message: e.to_string(),
-            latency_ms,
-        }),
+        Ok(Err(e)) => {
+            let raw = e.to_string();
+            let is_auth_failure = raw.contains("auth required")
+                || raw.contains("Unauthorized")
+                || raw.contains("Authentication failed");
+            let has_credentials = profile.secret.as_deref().is_some_and(|s| !s.is_empty())
+                || mongo_uri::has_username(&profile.uri);
+            let message = if is_auth_failure && !has_credentials {
+                "No username or password provided. Add credentials to your connection URI \
+                 (e.g. mongodb://username:password@host/...) or set a password in the auth settings."
+                    .into()
+            } else if is_auth_failure {
+                "Authentication failed. Please check that your username and password are correct."
+                    .into()
+            } else if raw.contains("not authorized") {
+                // Authenticated successfully, but the user lacks the
+                // listDatabases privilege. The connection itself is valid.
+                "Authentication successful. Your user lacks the listDatabases privilege, but the connection is valid."
+                    .into()
+            } else {
+                raw
+            };
+            Ok(TestResult {
+                ok: !is_auth_failure,
+                message,
+                latency_ms,
+            })
+        }
         Err(_) => Ok(TestResult {
             ok: false,
             message: "Connection timed out after 8s".into(),
@@ -195,15 +226,17 @@ pub async fn open_connection(
         profile.tls.as_ref(),
     )
     .await?;
-    // Confirm we can actually reach the server before publishing the handle.
+    // Confirm we can actually reach and authenticate with the server before
+    // publishing the handle. listDatabases requires authentication (unlike
+    // ping/connectionStatus which can pass without auth on some proxies).
     tokio::time::timeout(
         std::time::Duration::from_secs(8),
         client
             .database("admin")
-            .run_command(bson::doc! { "ping": 1 }),
+            .run_command(bson::doc! { "listDatabases": 1, "nameOnly": true }),
     )
     .await
-    .map_err(|_| AppError::Timeout("ping".into()))??;
+    .map_err(|_| AppError::Timeout("listDatabases".into()))??;
     let connection_id = Uuid::new_v4().to_string();
     // Derive a stable per-deployment identity so audit events are segmented
     // by the deployment they originate from. Resolved once at connect time.

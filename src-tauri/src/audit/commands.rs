@@ -2035,6 +2035,7 @@ mod tests {
     fn proof_result_serializes_with_camel_case_fields() {
         let result = ProofResult {
             root_hex: "root".to_string(),
+            leaf_hex: "leaf".to_string(),
             leaf_index: 42,
             proof: zk_audit::serialize::SorobanProof {
                 a: "a".to_string(),

@@ -114,6 +114,31 @@ fn percent_decode(value: &str) -> String {
         .into_owned()
 }
 
+/// Check whether a MongoDB connection URI contains a non-empty username in its
+/// userinfo section (the part before the first raw `@`).
+///
+/// `mongodb://host/` → `false`
+/// `mongodb://user@host/` → `true`
+/// `mongodb://user:pass@host/` → `true`
+/// `mongodb://:pass@host/` → `false` (empty username)
+pub fn has_username(uri: &str) -> bool {
+    let Some(scheme_end) = uri.find("://") else {
+        return false;
+    };
+    let rest = &uri[scheme_end + 3..];
+    let Some(at) = rest.find('@') else {
+        return false;
+    };
+    let userinfo = &rest[..at];
+    // If there's a `:`, the username is before it; otherwise the whole
+    // userinfo is the username. Either way, it must be non-empty.
+    let user = match userinfo.find(':') {
+        Some(colon) => &userinfo[..colon],
+        None => userinfo,
+    };
+    !user.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,6 +166,28 @@ mod tests {
             force_direct_connection("mongodb://localhost:27019?directConnection=true"),
             "mongodb://localhost:27019?directConnection=true"
         );
+    }
+
+    // ── strip_password ──────────────────────────────────────────────────────
+
+    // ── has_username ────────────────────────────────────────────────────────
+
+    #[test]
+    fn has_username_false_without_userinfo() {
+        assert!(!has_username("mongodb://localhost:27017"));
+        assert!(!has_username("mongodb+srv://cluster.example.net/"));
+    }
+
+    #[test]
+    fn has_username_true_with_username() {
+        assert!(has_username("mongodb://alice@localhost:27017"));
+        assert!(has_username("mongodb://alice:pw@localhost:27017"));
+        assert!(has_username("mongodb+srv://alice@cluster.example.net/"));
+    }
+
+    #[test]
+    fn has_username_false_with_empty_username() {
+        assert!(!has_username("mongodb://:pw@localhost:27017"));
     }
 
     // ── strip_password ──────────────────────────────────────────────────────

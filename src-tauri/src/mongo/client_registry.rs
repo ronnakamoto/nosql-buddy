@@ -156,7 +156,7 @@ pub async fn build_client_with_auth(
     options.connect_timeout = Some(Duration::from_secs(8));
     options.max_pool_size = Some(32);
     options.min_pool_size = Some(1);
-    apply_auth(&mut options, auth_mechanism, secret);
+    apply_auth(&mut options, auth_mechanism, secret)?;
     apply_tls(&mut options, auth_mechanism, tls);
     let client = Client::with_options(options)?;
     Ok(Arc::new(client))
@@ -171,7 +171,11 @@ pub async fn build_client_with_auth(
 /// The username and auth source still come from the URI. `None` leaves the
 /// options untouched (no-auth default); `Kerberos` is left to the URI because
 /// GSSAPI requires the `gssapi-auth` build feature and native libraries.
-fn apply_auth(options: &mut ClientOptions, auth_mechanism: AuthMechanism, secret: Option<&str>) {
+fn apply_auth(
+    options: &mut ClientOptions,
+    auth_mechanism: AuthMechanism,
+    secret: Option<&str>,
+) -> AppResult<()> {
     use mongodb::options::AuthMechanism as DriverMechanism;
 
     let secret = secret.filter(|s| !s.is_empty());
@@ -180,7 +184,7 @@ fn apply_auth(options: &mut ClientOptions, auth_mechanism: AuthMechanism, secret
     // Kerberos libraries) to construct programmatically, so honor whatever the
     // URI specifies rather than injecting a broken credential.
     if matches!(auth_mechanism, AuthMechanism::Kerberos) {
-        return;
+        return Ok(());
     }
 
     // The explicit driver mechanism to pin, if any. `None` (the default) leaves
@@ -199,17 +203,24 @@ fn apply_auth(options: &mut ClientOptions, auth_mechanism: AuthMechanism, secret
     // the URI verbatim — this is the true no-auth default (or a fully
     // URI-specified credential).
     if driver_mechanism.is_none() && secret.is_none() {
-        return;
+        return Ok(());
     }
 
     // We need a base credential to attach to. Prefer the one parsed from the
-    // URI (it carries the username and auth source). If the URI produced none
-    // and there is no explicit mechanism, a lone password has no username to
-    // pair with, so there is nothing meaningful to apply.
+    // URI (it carries the username and auth source).
     let mut credential = match options.credential.take() {
         Some(c) => c,
         None if driver_mechanism.is_some() => mongodb::options::Credential::default(),
-        None => return,
+        None => {
+            if secret.is_some() {
+                return Err(AppError::Validation(
+                    "A password is configured for this profile but the connection URI does not contain a username. \
+                     Add the username to the URI (e.g. mongodb://username@host...) or remove the stored password."
+                        .into(),
+                ));
+            }
+            return Ok(());
+        }
     };
 
     if let Some(m) = driver_mechanism {
@@ -238,6 +249,7 @@ fn apply_auth(options: &mut ClientOptions, auth_mechanism: AuthMechanism, secret
     }
 
     options.credential = Some(credential);
+    Ok(())
 }
 
 /// Apply TLS configuration to parsed `ClientOptions`. TLS is an independent
@@ -291,7 +303,7 @@ mod tests {
             .await
             .expect("parse");
 
-        apply_auth(&mut options, AuthMechanism::None, Some("ignored"));
+        apply_auth(&mut options, AuthMechanism::None, None).unwrap();
 
         assert!(options.credential.is_none());
     }
@@ -302,7 +314,7 @@ mod tests {
             .await
             .expect("parse");
 
-        apply_auth(&mut options, AuthMechanism::ScramSha256, Some("keychain-pw"));
+        apply_auth(&mut options, AuthMechanism::ScramSha256, Some("keychain-pw")).unwrap();
 
         let credential = options.credential.expect("credential");
         assert_eq!(credential.username.as_deref(), Some("alice"));
@@ -317,7 +329,7 @@ mod tests {
             .await
             .expect("parse");
 
-        apply_auth(&mut options, AuthMechanism::Ldap, Some("keychain-pw"));
+        apply_auth(&mut options, AuthMechanism::Ldap, Some("keychain-pw")).unwrap();
 
         let credential = options.credential.expect("credential");
         assert_eq!(credential.source.as_deref(), Some("$external"));
@@ -333,7 +345,7 @@ mod tests {
         credential.password = Some("not-used".to_string());
         options.credential = Some(credential);
 
-        apply_auth(&mut options, AuthMechanism::X509, Some("ignored"));
+        apply_auth(&mut options, AuthMechanism::X509, Some("ignored")).unwrap();
 
         let credential = options.credential.expect("credential");
         assert_eq!(credential.password, None);
@@ -348,7 +360,7 @@ mod tests {
             .await
             .expect("parse");
 
-        apply_auth(&mut options, AuthMechanism::None, Some("keychain-pw"));
+        apply_auth(&mut options, AuthMechanism::None, Some("keychain-pw")).unwrap();
 
         let credential = options.credential.expect("credential");
         assert_eq!(credential.username.as_deref(), Some("alice"));
@@ -358,15 +370,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn none_with_secret_but_no_username_injects_nothing() {
-        // A lone password with no username anywhere cannot form a credential.
+    async fn none_with_secret_but_no_username_returns_error() {
+        // A lone password with no username anywhere is a configuration error;
+        // we must fail fast instead of silently dropping the secret.
         let mut options = ClientOptions::parse("mongodb://localhost:27017")
             .await
             .expect("parse");
 
-        apply_auth(&mut options, AuthMechanism::None, Some("orphan-pw"));
+        let result = apply_auth(&mut options, AuthMechanism::None, Some("orphan-pw"));
 
-        assert!(options.credential.is_none());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("username"), "error should mention missing username: {err}");
     }
 
     #[tokio::test]
@@ -376,7 +391,7 @@ mod tests {
             .await
             .expect("parse");
 
-        apply_auth(&mut options, AuthMechanism::None, None);
+        apply_auth(&mut options, AuthMechanism::None, None).unwrap();
 
         let credential = options.credential.expect("credential");
         assert_eq!(credential.username.as_deref(), Some("alice"));
@@ -390,7 +405,7 @@ mod tests {
             .await
             .expect("parse");
 
-        apply_auth(&mut options, AuthMechanism::AwsIam, Some("aws-secret-key"));
+        apply_auth(&mut options, AuthMechanism::AwsIam, Some("aws-secret-key")).unwrap();
 
         let credential = options.credential.expect("credential");
         assert_eq!(credential.username.as_deref(), Some("AKIAEXAMPLE"));
@@ -406,7 +421,7 @@ mod tests {
             .expect("parse");
         let before = options.credential.clone();
 
-        apply_auth(&mut options, AuthMechanism::Kerberos, Some("ignored"));
+        apply_auth(&mut options, AuthMechanism::Kerberos, Some("ignored")).unwrap();
 
         // We do not synthesize a GSSAPI credential; the URI credential is
         // preserved exactly as the driver parsed it.
@@ -419,7 +434,7 @@ mod tests {
             .await
             .expect("parse");
 
-        apply_auth(&mut options, AuthMechanism::ScramSha256, Some("keychain-pw"));
+        apply_auth(&mut options, AuthMechanism::ScramSha256, Some("keychain-pw")).unwrap();
 
         let credential = options.credential.expect("credential");
         assert_eq!(credential.password.as_deref(), Some("keychain-pw"));
@@ -432,7 +447,7 @@ mod tests {
             .await
             .expect("parse");
 
-        apply_auth(&mut options, AuthMechanism::ScramSha256, Some(""));
+        apply_auth(&mut options, AuthMechanism::ScramSha256, Some("")).unwrap();
 
         let credential = options.credential.expect("credential");
         assert_eq!(credential.password.as_deref(), Some("uri-pw"));
@@ -449,7 +464,7 @@ mod tests {
 
     async fn build_options(uri: &str, mech: AuthMechanism, secret: Option<&str>) -> ClientOptions {
         let mut options = ClientOptions::parse(uri).await.expect("parse uri");
-        apply_auth(&mut options, mech, secret);
+        apply_auth(&mut options, mech, secret).expect("apply auth");
         options
     }
 
