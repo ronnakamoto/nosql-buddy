@@ -13,6 +13,19 @@ use serde_json::Value;
 use crate::error::{AuditError, AuditResult};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 15;
+/// Proof generation endpoints run a Groth16 prover (witness generation +
+/// proving key load) and can legitimately take longer than ordinary status
+/// calls, especially on first use when nothing is in the page cache.
+const PROVING_TIMEOUT_SECS: u64 = 120;
+
+fn post_timeout_secs(path: &str) -> u64 {
+    let p = path.trim_start_matches('/');
+    if p.starts_with("disclosure/") || p.starts_with("proof/") {
+        PROVING_TIMEOUT_SECS
+    } else {
+        DEFAULT_TIMEOUT_SECS
+    }
+}
 
 /// Build the full URL for a daemon port + path.
 pub fn url(port: u16, path: &str) -> String {
@@ -55,7 +68,7 @@ pub async fn proxy_get(port: u16, path: &str) -> AuditResult<Value> {
 /// Proxy a POST request to a local audit service with a JSON body.
 pub async fn proxy_post(port: u16, path: &str, body: Value) -> AuditResult<Value> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(post_timeout_secs(path)))
         .build()
         .map_err(|e| AuditError::Internal(format!("reqwest build: {e}")))?;
 

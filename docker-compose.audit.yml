@@ -179,6 +179,10 @@ services:
       - .:/work
     environment:
       VKEY_PATH: /opt/circuits/merkle_inclusion.vkey
+      # Registers the audited_action (disclosure) circuit's VK right after
+      # initialize, so `verify_disclosure` works on dev contracts. Write-once,
+      # same env-over-command reasoning as VKEY_PATH above.
+      DISCLOSURE_VKEY_PATH: /opt/circuits/audited_action.vkey
     # The desktop "Set up" flow writes a temporary .setup.env (Stellar network,
     # optional operator secret keys, Pinata creds) into the stack dir before
     # running this service, then deletes it afterward. Loaded here so the keys
@@ -188,7 +192,7 @@ services:
     env_file:
       - path: .setup.env
         required: false
-    command: ["setup", "--vkey-path", "/opt/circuits/merkle_inclusion.vkey"]
+    command: ["setup", "--vkey-path", "/opt/circuits/merkle_inclusion.vkey", "--disclosure-vkey-path", "/opt/circuits/audited_action.vkey"]
 
 volumes:
   audit-publisher-data:

@@ -1224,6 +1224,12 @@ pub struct AuditorHandoffMaterial {
     pub age_public_key_operator: String,
     pub age_public_key_attester: String,
     pub age_attester_secret: String,
+    /// The attester's funded Stellar secret key (S...). Dev Mode only: the
+    /// setup wizard generates and funds this account on the same machine, so
+    /// handing it to the in-app auditor surface lets "Verify & Record" work
+    /// without copy-paste. In a real deployment the auditor's Stellar key
+    /// never passes through the operator, and this stays empty.
+    pub attester_stellar_secret: String,
     pub audit_leaf_key_hex: String,
     pub auditor_mongo_uri: String,
     pub operator_mongo_uri: String,
@@ -1253,6 +1259,7 @@ pub async fn audit_dev_stack_auditor_material(
     let mut age_public_key_attester = String::new();
     let mut age_operator_secret = String::new();
     let mut age_attester_secret = String::new();
+    let mut attester_stellar_secret = String::new();
     let mut audit_leaf_key_hex = String::new();
     let mut auditor_mongo_uri = String::new();
     let mut operator_mongo_uri = String::new();
@@ -1272,6 +1279,8 @@ pub async fn audit_dev_stack_auditor_material(
             age_operator_secret = val.trim().to_string();
         } else if let Some(val) = line.strip_prefix("AGE_ATTESTER_SECRET=") {
             age_attester_secret = val.trim().to_string();
+        } else if let Some(val) = line.strip_prefix("ATTESTER_SECRET_KEY=") {
+            attester_stellar_secret = val.trim().to_string();
         } else if let Some(val) = line.strip_prefix("AUDIT_LEAF_KEY_HEX=") {
             audit_leaf_key_hex = val.trim().to_string();
         } else if let Some(val) = line.strip_prefix("AUDIT_LEAF_KEY=") {
@@ -1318,6 +1327,7 @@ pub async fn audit_dev_stack_auditor_material(
         age_public_key_operator,
         age_public_key_attester,
         age_attester_secret,
+        attester_stellar_secret,
         audit_leaf_key_hex,
         auditor_mongo_uri,
         operator_mongo_uri,

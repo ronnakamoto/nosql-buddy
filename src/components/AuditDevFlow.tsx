@@ -79,6 +79,28 @@ interface DevOnChainRoot {
   metadata: string;
 }
 
+/// Response of the publisher daemon's `POST /disclosure/:index` — a
+/// self-contained Audited-Action Disclosure bundle in the exact shape the
+/// auditor's "Verify a proof bundle" flow parses.
+interface DevDisclosureResult {
+  rootHex: string;
+  leafHex: string;
+  leafIndex: number;
+  claim: {
+    opPredHex: string;
+    collPredHex: string;
+    tsMin: number;
+    tsMax: number;
+    checkOp: boolean;
+    checkColl: boolean;
+    checkTs: boolean;
+  };
+  claimText: string;
+  proof: { a: string; b: string; c: string };
+  network: string;
+  contractId: string;
+}
+
 interface OplogReport {
   sequence: number;
   onChainOplogRoot: string;
@@ -657,6 +679,13 @@ function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
   const [provenIndex, setProvenIndex] = useState<number | null>(null);
   const [showProofDetails, setShowProofDetails] = useState(false);
   const [copyProofHint, setCopyProofHint] = useState(false);
+  // Disclosure proof flow: pick claims in a modal, then generate a
+  // shareable ZK bundle that reveals only the selected predicates.
+  const [discloseTarget, setDiscloseTarget] = useState<DevEvent | null>(null);
+  const [discloseChecks, setDiscloseChecks] = useState({ op: true, coll: true, ts: true });
+  const [discloseBusy, setDiscloseBusy] = useState(false);
+  const [discloseResult, setDiscloseResult] = useState<DevDisclosureResult | null>(null);
+  const [copyDiscloseHint, setCopyDiscloseHint] = useState(false);
   const [verifyTxHash, setVerifyTxHash] = useState<string | null>(null);
   const [verifyBusy, setVerifyBusy] = useState(false);
   const [verifyError, setVerifyError] = useState<string | null>(null);
@@ -870,6 +899,29 @@ function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
       toast.push(formatError(e), "error");
     } finally {
       setProofBusy(null);
+    }
+  };
+
+  const handleGenerateDisclosure = async () => {
+    if (!discloseTarget) return;
+    setDiscloseBusy(true);
+    try {
+      const res = await commands.auditDevProxyPost(
+        PUBLISHER_PORT,
+        `disclosure/${discloseTarget.index}`,
+        {
+          checkOp: discloseChecks.op,
+          checkColl: discloseChecks.coll,
+          checkTs: discloseChecks.ts,
+        },
+      );
+      setDiscloseResult(res as DevDisclosureResult);
+      setDiscloseTarget(null);
+      toast.push("Disclosure proof generated — share the bundle with the auditor", "success");
+    } catch (e) {
+      toast.push(formatError(e), "error");
+    } finally {
+      setDiscloseBusy(false);
     }
   };
 
@@ -1298,8 +1350,11 @@ function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
               <Button
                 variant="secondary"
                 onClick={() => {
+                  // Shape matches the auditor's "Verify a proof bundle" parser:
+                  // rootHex + leafHex + proof.a/b/c are required there.
                   const payload = {
                     rootHex: proofResult.rootHex,
+                    leafHex: proofResult.leafHex,
                     leafIndex: proofResult.leafIndex,
                     proof: proofResult.proof,
                     pubSignals: proofResult.pubSignals,
@@ -1311,7 +1366,7 @@ function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
                   setCopyProofHint(true);
                   setTimeout(() => setCopyProofHint(false), 1500);
                 }}
-                title="Copy the full proof payload as JSON"
+                title="Copy the proof bundle as JSON — paste it into the auditor's Verify a proof bundle box"
               >
                 {copyProofHint ? (
                   <>
@@ -1321,7 +1376,7 @@ function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
                 ) : (
                   <>
                     <Copy size={14} />
-                    Copy proof
+                    Copy proof bundle
                   </>
                 )}
               </Button>
@@ -1410,11 +1465,83 @@ function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
         </Card>
       )}
 
+      {/* ─── Disclosure proof result ──────────────────────────────────── */}
+      {discloseResult && (
+        <Card>
+          <CardHeader
+            title={<>Disclosure Proof<InfoPopover label="Help: Disclosure Proof" title="Disclosure Proof"><p>A zero-knowledge claim about a still-private event: the proof shows an event matching the selected predicates exists in the committed log, revealing nothing else — not the document, database, or exact timestamp.</p></InfoPopover></>}
+            subtitle={`Leaf #${discloseResult.leafIndex} · batch root ${shortHash(discloseResult.rootHex)}`}
+            actions={
+              <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
+                <Badge tone="success" dot>Ready to share</Badge>
+                <button
+                  className="audit-proof-dismiss"
+                  onClick={() => setDiscloseResult(null)}
+                  aria-label="Close disclosure proof"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            }
+          />
+          <div className="audit-proof-card">
+            <div className="audit-proof-card__summary">
+              <div className="audit-proof-card__check">
+                <ShieldCheck size={22} />
+              </div>
+              <div className="audit-proof-card__summary-text">
+                <div className="audit-proof-card__summary-title">
+                  The bundle proves: {discloseResult.claimText}.
+                </div>
+                <p className="audit-proof-card__summary-body">
+                  Everything else about the event stays private. Hand the bundle
+                  to the auditor — they paste it into "Verify a proof bundle"
+                  and check it against the on-chain root from their own machine,
+                  with no trust in this app.
+                </p>
+              </div>
+            </div>
+            <div className="audit-proof-card__actions">
+              <Button
+                variant="primary"
+                onClick={() => {
+                  const payload = {
+                    rootHex: discloseResult.rootHex,
+                    leafHex: discloseResult.leafHex,
+                    claim: discloseResult.claim,
+                    claimText: discloseResult.claimText,
+                    proof: discloseResult.proof,
+                    network: discloseResult.network,
+                    contractId: discloseResult.contractId,
+                  };
+                  navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+                  setCopyDiscloseHint(true);
+                  setTimeout(() => setCopyDiscloseHint(false), 1500);
+                }}
+                title="Copy the disclosure bundle as JSON — paste it into the auditor's Verify a proof bundle box"
+              >
+                {copyDiscloseHint ? (
+                  <>
+                    <Check size={14} />
+                    Copied
+                  </>
+                ) : (
+                  <>
+                    <Copy size={14} />
+                    Copy disclosure bundle
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
+        </Card>
+      )}
+
       {/* ─── Event feed + history ───────────────────────────────────── */}
       <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: "var(--space-4)" }}>
         <Card compact>
           <CardHeader
-            title={<>Change Feed<InfoPopover label="Help: Change Feed" title="Change Feed"><p>Real-time stream of audited MongoDB operations. Click Prove to generate a cryptographic Merkle proof for any event.</p></InfoPopover></>}
+            title={<>Change Feed<InfoPopover label="Help: Change Feed" title="Change Feed"><p>Real-time stream of audited MongoDB operations. Prove generates a Merkle inclusion proof for an event; Disclose generates a zero-knowledge claim about it (operation, collection, day) that reveals nothing else.</p></InfoPopover></>}
             subtitle={`${events.length} captured · ${leafCount} leaves`}
             compact
           />
@@ -1429,7 +1556,7 @@ function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
               {events.slice().reverse().map((ev, i, arr) => (
                 <div
                   key={ev.index}
-                  className={`audit-event-row-grid audit-event-row-grid--with-action${
+                  className={`audit-event-row-grid audit-event-row-grid--with-actions${
                     provenIndex === ev.index ? " audit-event-row--proven" : ""
                   }`}
                   style={i >= arr.length - 1 ? { borderBottom: "none" } : undefined}
@@ -1447,6 +1574,18 @@ function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
                     title={provenIndex === ev.index ? "Regenerate proof" : "Generate ZK inclusion proof"}
                   >
                     {provenIndex === ev.index ? "Re-prove" : "Prove"}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={proofBusy !== null || discloseBusy}
+                    onClick={() => {
+                      setDiscloseChecks({ op: true, coll: true, ts: true });
+                      setDiscloseTarget(ev);
+                    }}
+                    title="Generate a disclosure proof: a ZK claim about this event that reveals only the predicates you pick"
+                  >
+                    Disclose
                   </Button>
                 </div>
               ))}
@@ -1499,6 +1638,90 @@ function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
           )}
         </Card>
       </div>
+
+      {/* ─── Disclosure claim picker ──────────────────────────────────── */}
+      <Modal
+        open={discloseTarget !== null}
+        onClose={() => {
+          if (!discloseBusy) setDiscloseTarget(null);
+        }}
+        title="Disclose privately"
+        subtitle={
+          discloseTarget
+            ? `Event #${discloseTarget.index} · ${discloseTarget.database}.${discloseTarget.collection}`
+            : undefined
+        }
+        maxWidth={480}
+        onSubmit={handleGenerateDisclosure}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setDiscloseTarget(null)} disabled={discloseBusy}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              loading={discloseBusy}
+              disabled={discloseBusy}
+              onClick={handleGenerateDisclosure}
+            >
+              Generate disclosure proof
+            </Button>
+          </>
+        }
+      >
+        {discloseTarget && (
+          <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)" }}>
+            <p style={{ fontSize: "var(--font-size-sm)", color: "var(--ink-muted)", margin: 0 }}>
+              Pick what the proof reveals. Checked predicates become the public
+              claim; everything unchecked stays private — the document itself is
+              never part of the bundle.
+            </p>
+            <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-2)" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", fontSize: "var(--font-size-sm)", cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={discloseChecks.op}
+                  onChange={(e) => setDiscloseChecks((c) => ({ ...c, op: e.target.checked }))}
+                />
+                <span>
+                  Operation is <code>{discloseTarget.operation}</code>
+                </span>
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", fontSize: "var(--font-size-sm)", cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={discloseChecks.coll}
+                  onChange={(e) => setDiscloseChecks((c) => ({ ...c, coll: e.target.checked }))}
+                />
+                <span>
+                  Collection is <code>{discloseTarget.collection}</code>
+                </span>
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", fontSize: "var(--font-size-sm)", cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={discloseChecks.ts}
+                  onChange={(e) => setDiscloseChecks((c) => ({ ...c, ts: e.target.checked }))}
+                />
+                <span>
+                  Happened on{" "}
+                  <code>
+                    {new Date(discloseTarget.timestamp).toLocaleDateString(undefined, { dateStyle: "medium" })}
+                  </code>{" "}
+                  (UTC day, not the exact time)
+                </span>
+              </label>
+            </div>
+            {!discloseChecks.op && !discloseChecks.coll && !discloseChecks.ts && (
+              <Alert tone="info" compact>
+                With no predicates checked, the bundle only proves an event
+                exists in the committed log — same as a plain inclusion proof,
+                but without revealing which leaf fields it commits to.
+              </Alert>
+            )}
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

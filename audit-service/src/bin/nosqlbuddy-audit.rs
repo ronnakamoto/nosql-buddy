@@ -120,6 +120,25 @@ fn parse_vkey_path(args: &[String], _non_interactive: bool) -> Option<String> {
     std::env::var("VKEY_PATH").ok().filter(|s| !s.is_empty())
 }
 
+/// Parse `--disclosure-vkey-path <path>` from args, falling back to the
+/// `DISCLOSURE_VKEY_PATH` env var. This is the ceremony `.vkey` for the
+/// `audited_action` disclosure circuit, pinned on-chain (write-once) via
+/// `register_disclosure_vk` right after `initialize`. Optional: a contract
+/// deployed without it still verifies inclusion proofs, but
+/// `verify_disclosure` will reject with `DisclosureVkNotSet`.
+fn parse_disclosure_vkey_path(args: &[String]) -> Option<String> {
+    for (i, a) in args.iter().enumerate() {
+        if a == "--disclosure-vkey-path" {
+            return args.get(i + 1).cloned();
+        } else if let Some(val) = a.strip_prefix("--disclosure-vkey-path=") {
+            return Some(val.to_string());
+        }
+    }
+    std::env::var("DISCLOSURE_VKEY_PATH")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
 /// Parse `--role <role>` from args, falling back to the `SETUP_ROLE` env var.
 fn parse_role(args: &[String], non_interactive: bool) -> SetupRole {
     for (i, a) in args.iter().enumerate() {
@@ -366,6 +385,34 @@ async fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             "  Contract initialized. Admin: {}",
             publisher.account_id()
         );
+
+        // Optionally pin the Audited-Action Disclosure circuit's VK so
+        // `verify_disclosure` works on this contract (write-once).
+        if let Some(dvkey_path) = parse_disclosure_vkey_path(args) {
+            let dvk = zk_audit::load_verifying_key_hex(&dvkey_path).map_err(|e| {
+                format!("failed to load disclosure verifying key from {dvkey_path}: {e}")
+            })?;
+            println!("  Registering disclosure verifying key (audited_action circuit)...");
+            audit_service::audit::stellar_native::register_disclosure_vk_native(
+                &contract_id,
+                publisher,
+                &dvk.alpha,
+                &dvk.beta,
+                &dvk.gamma,
+                &dvk.delta,
+                &dvk.ic,
+                &rpc_url,
+                &passphrase,
+            )
+            .await
+            .map_err(|e| format!("register_disclosure_vk: {e}"))?;
+            println!("  Disclosure verifying key registered.");
+        } else {
+            println!(
+                "  Note: no --disclosure-vkey-path given — disclosure proofs \
+                 (verify_disclosure) will not be verifiable on this contract."
+            );
+        }
     }
 
     // ── 8. Attester ed25519 oplog signing key (all / attester) ─────

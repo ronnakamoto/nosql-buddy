@@ -61,14 +61,15 @@ import {
   Info,
 } from "lucide-react";
 
-type AuditView = "chooser" | "dev" | "production" | "settings" | "auditor";
+type AuditView = "chooser" | "dev" | "production" | "settings";
+type AuditRole = "operator" | "auditor";
 
 type Tab =
   | { id: string; kind: "query"; connectionId: string; database: string; collection: string }
   | { id: string; kind: "indexes"; connectionId: string; database: string; collection: string }
   | { id: string; kind: "schema"; connectionId: string; database: string; collection: string }
   | { id: string; kind: "shell"; connectionId: string; database: string; collection: string }
-  | { id: string; kind: "audit"; auditMode: AuditMode; auditView: AuditView }
+  | { id: string; kind: "audit"; auditMode: AuditMode; auditView: AuditView; auditRole?: AuditRole | null }
   | { id: string; kind: "jobs"; connectionId?: string | null; profileId?: string | null }
   | { id: string; kind: "timeline"; connectionId?: string | null; profileId?: string | null; database?: string | null; collection?: string | null }
   | { id: string; kind: "diagram"; connectionId: string; database: string };
@@ -976,7 +977,7 @@ export default function App() {
 
   const openAuditTab = useCallback(() => {
     const id = `audit-${Date.now()}`;
-    setTabs((current) => [...current, { id, kind: "audit", auditMode: "dev", auditView: "chooser" }]);
+    setTabs((current) => [...current, { id, kind: "audit", auditMode: "dev", auditView: "chooser", auditRole: null }]);
     setActiveTabId(id);
   }, []);
 
@@ -1703,9 +1704,11 @@ const TabPane = memo(function TabPane({
       <AuditPanel
         mode={tab.auditMode}
         view={tab.auditView}
+        role={tab.auditRole ?? null}
         connectionId={connectionId}
         onModeChange={(auditMode) => updateTab(tab.id, { auditMode })}
         onViewChange={(auditView) => updateTab(tab.id, { auditView })}
+        onRoleChange={(auditRole) => updateTab(tab.id, { auditRole })}
       />
     );
   }

@@ -41,7 +41,7 @@ use stellar_xdr::curr::{
 
 use crate::audit::stellar::{
     CommitResult, OnChainAttestationVerification, OnChainOplogCommitment, OnChainRoot,
-    VerifyInclusionResult,
+    ReadonlyVerifyResult, VerifyInclusionResult,
 };
 use crate::error::{AuditError, AuditResult};
 
@@ -1145,22 +1145,8 @@ pub async fn verify_inclusion_native(
     contract_id: &str,
     network_passphrase: &str,
 ) -> AuditResult<VerifyInclusionResult> {
-    // Build ScVal args: root (Bytes), leaf (Bytes), proof (Map).
-    let root_bytes = hex::decode(root_hex)
-        .map_err(|e| AuditError::Validation(format!("invalid root hex: {e}")))?;
-    let root_scval = ScVal::Bytes(ScBytes(root_bytes.clone().try_into().map_err(
-        |e: stellar_xdr::curr::Error| AuditError::Validation(format!("invalid root bytes: {e}")),
-    )?));
-
-    let leaf_bytes = hex::decode(leaf_hex)
-        .map_err(|e| AuditError::Validation(format!("invalid leaf hex: {e}")))?;
-    let leaf_scval = ScVal::Bytes(ScBytes(leaf_bytes.try_into().map_err(
-        |e: stellar_xdr::curr::Error| AuditError::Validation(format!("invalid leaf bytes: {e}")),
-    )?));
-
-    let proof_scval = build_proof_scval(proof_a_hex, proof_b_hex, proof_c_hex)?;
-
-    let args = vec![root_scval, leaf_scval, proof_scval];
+    let args =
+        build_verify_inclusion_args(root_hex, leaf_hex, proof_a_hex, proof_b_hex, proof_c_hex)?;
 
     // Submit (serialized per account, confirmed, and retried on txBAD_SEQ).
     let (tx_hash, sim_result) = submit_invoke_with_retry(
@@ -1193,6 +1179,134 @@ pub async fn verify_inclusion_native(
     }
 
     Ok(VerifyInclusionResult { tx_hash, verified })
+}
+
+/// Build the `verify_inclusion(root, leaf, proof)` ScVal argument list.
+fn build_verify_inclusion_args(
+    root_hex: &str,
+    leaf_hex: &str,
+    proof_a_hex: &str,
+    proof_b_hex: &str,
+    proof_c_hex: &str,
+) -> AuditResult<Vec<ScVal>> {
+    let root_bytes = hex::decode(root_hex)
+        .map_err(|e| AuditError::Validation(format!("invalid root hex: {e}")))?;
+    let root_scval = ScVal::Bytes(ScBytes(root_bytes.try_into().map_err(
+        |e: stellar_xdr::curr::Error| AuditError::Validation(format!("invalid root bytes: {e}")),
+    )?));
+
+    let leaf_bytes = hex::decode(leaf_hex)
+        .map_err(|e| AuditError::Validation(format!("invalid leaf hex: {e}")))?;
+    let leaf_scval = ScVal::Bytes(ScBytes(leaf_bytes.try_into().map_err(
+        |e: stellar_xdr::curr::Error| AuditError::Validation(format!("invalid leaf bytes: {e}")),
+    )?));
+
+    let proof_scval = build_proof_scval(proof_a_hex, proof_b_hex, proof_c_hex)?;
+
+    Ok(vec![root_scval, leaf_scval, proof_scval])
+}
+
+/// Map a Soroban contract error string from `verify_inclusion` to a
+/// human-readable failure reason. The contract's `CommitmentError` codes
+/// surface in simulation errors as `Error(Contract, #N)`.
+fn classify_verify_error(msg: &str) -> String {
+    if msg.contains("#7") {
+        "root not committed on-chain — the proof's root was never anchored by the contract"
+            .to_string()
+    } else if msg.contains("#8") {
+        "pairing check failed — the proof is invalid for this (root, leaf) pair".to_string()
+    } else if msg.contains("#4") {
+        "invalid proof encoding — point bytes have the wrong length or format".to_string()
+    } else if msg.contains("#9") {
+        "contract not initialized — no verifying key is pinned".to_string()
+    } else if msg.contains("#5") {
+        "malformed verifying key pinned on-chain".to_string()
+    } else if msg.contains("#18") {
+        "no disclosure verifying key registered on this contract — the operator must run \
+         register_disclosure_vk"
+            .to_string()
+    } else {
+        format!("verification failed: {msg}")
+    }
+}
+
+/// Verify a Groth16 inclusion proof via a **read-only simulation** — no
+/// transaction is submitted, no fee is paid, and no signing key is needed.
+///
+/// This is the trust-minimized verification path for auditors and third
+/// parties: the pairing check runs inside the Soroban runtime (against the
+/// verifying key pinned at `initialize` and the on-chain committed-root
+/// index), but the caller needs nothing beyond the public RPC URL and
+/// contract ID. An ephemeral, unfunded keypair is generated internally just
+/// to shape the simulated transaction envelope — the account never needs to
+/// exist on-ledger (same pattern as [`get_current_root_native`]).
+///
+/// A failing proof returns `Ok(ReadonlyVerifyResult { verified: false, .. })`
+/// with a classified reason rather than an error, so callers can distinguish
+/// "the proof is bad" from "the RPC is unreachable".
+pub async fn verify_inclusion_readonly_native(
+    root_hex: &str,
+    leaf_hex: &str,
+    proof_a_hex: &str,
+    proof_b_hex: &str,
+    proof_c_hex: &str,
+    rpc_url: &str,
+    contract_id: &str,
+) -> AuditResult<ReadonlyVerifyResult> {
+    let args =
+        build_verify_inclusion_args(root_hex, leaf_hex, proof_a_hex, proof_b_hex, proof_c_hex)?;
+
+    let probe_kp = generate_keypair();
+    let tx = build_invoke_transaction(
+        &probe_kp.public_bytes(),
+        0,
+        contract_id,
+        "verify_inclusion",
+        args,
+        100,
+    )?;
+
+    let sim_result = match simulate_transaction(rpc_url, &tx).await {
+        Ok(sim) => sim,
+        Err(e) => {
+            let msg = e.to_string();
+            // A contract-level rejection (bad proof, unknown root, …) traps
+            // during simulation and surfaces as an error string containing
+            // the Soroban error code. Network/transport failures do not.
+            if msg.contains("Error(Contract") || msg.contains("simulateTransaction error") {
+                return Ok(ReadonlyVerifyResult {
+                    verified: false,
+                    reason: Some(classify_verify_error(&msg)),
+                });
+            }
+            return Err(e);
+        }
+    };
+
+    // Parse the simulated return value: Result<bool, _> arrives either as a
+    // bare Bool or wrapped as Vec([Bool]) depending on the host encoding.
+    let mut verified = false;
+    if let Some(first) = sim_result.results.first() {
+        let return_val_xdr = base64::engine::general_purpose::STANDARD
+            .decode(&first.xdr)
+            .map_err(|e| AuditError::Validation(format!("base64 decode return value: {e}")))?;
+        let return_val = ScVal::from_xdr(&return_val_xdr, Limits::none())
+            .map_err(|e| AuditError::Validation(format!("decode return value: {e}")))?;
+        verified = match &return_val {
+            ScVal::Bool(b) => *b,
+            ScVal::Vec(Some(vec)) => matches!(vec.first(), Some(ScVal::Bool(true))),
+            _ => false,
+        };
+    }
+
+    Ok(ReadonlyVerifyResult {
+        verified,
+        reason: if verified {
+            None
+        } else {
+            Some("simulation returned no boolean verification result".to_string())
+        },
+    })
 }
 
 /// Build a Soroban symbol ScVal from a string.
@@ -1938,6 +2052,399 @@ pub async fn initialize_contract_native(
     )
     .await?;
     Ok(())
+}
+
+/// Call `register_disclosure_vk(vk)` on the contract via native signing.
+///
+/// Pins the Groth16 verifying key for the `audited_action` disclosure
+/// circuit. Admin-only and write-once on the contract side — like the
+/// inclusion VK pinned at `initialize`, it can never be changed afterwards.
+pub async fn register_disclosure_vk_native(
+    contract_id: &str,
+    admin_keypair: &StellarKeypair,
+    vk_alpha_hex: &str,
+    vk_beta_hex: &str,
+    vk_gamma_hex: &str,
+    vk_delta_hex: &str,
+    vk_ic_hex: &[String],
+    rpc_url: &str,
+    network_passphrase: &str,
+) -> AuditResult<()> {
+    let vk_scval = build_verifying_key_scval(
+        vk_alpha_hex,
+        vk_beta_hex,
+        vk_gamma_hex,
+        vk_delta_hex,
+        vk_ic_hex,
+    )?;
+
+    submit_invoke_with_retry(
+        rpc_url,
+        admin_keypair,
+        network_passphrase,
+        contract_id,
+        "register_disclosure_vk",
+        vec![vk_scval],
+        100,
+    )
+    .await?;
+    Ok(())
+}
+
+/// The predicate parameters of an Audited-Action Disclosure claim, exactly
+/// as passed to the contract's `verify_disclosure`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisclosureClaim {
+    /// `str_to_field(operation)` as 32-byte hex.
+    pub op_pred_hex: String,
+    /// `str_to_field(collection)` as 32-byte hex.
+    pub coll_pred_hex: String,
+    /// Inclusive lower timestamp bound (Unix seconds).
+    pub ts_min: u64,
+    /// Inclusive upper timestamp bound (Unix seconds).
+    pub ts_max: u64,
+    pub check_op: bool,
+    pub check_coll: bool,
+    pub check_ts: bool,
+}
+
+/// Verify an Audited-Action Disclosure proof via a **read-only simulation**
+/// — no transaction, no fee, no signing key. See
+/// [`verify_inclusion_readonly_native`] for the trust model; this calls the
+/// contract's `verify_disclosure` with the claim's predicate parameters as
+/// additional public inputs.
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_disclosure_readonly_native(
+    root_hex: &str,
+    leaf_hex: &str,
+    claim: &DisclosureClaim,
+    proof_a_hex: &str,
+    proof_b_hex: &str,
+    proof_c_hex: &str,
+    rpc_url: &str,
+    contract_id: &str,
+) -> AuditResult<ReadonlyVerifyResult> {
+    let args = build_disclosure_args(
+        root_hex,
+        leaf_hex,
+        claim,
+        proof_a_hex,
+        proof_b_hex,
+        proof_c_hex,
+    )?;
+
+    let probe_kp = generate_keypair();
+    let tx = build_invoke_transaction(
+        &probe_kp.public_bytes(),
+        0,
+        contract_id,
+        "verify_disclosure",
+        args,
+        100,
+    )?;
+
+    let sim_result = match simulate_transaction(rpc_url, &tx).await {
+        Ok(sim) => sim,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("Error(Contract") || msg.contains("simulateTransaction error") {
+                return Ok(ReadonlyVerifyResult {
+                    verified: false,
+                    reason: Some(classify_verify_error(&msg)),
+                });
+            }
+            return Err(e);
+        }
+    };
+
+    let mut verified = false;
+    if let Some(first) = sim_result.results.first() {
+        let return_val_xdr = base64::engine::general_purpose::STANDARD
+            .decode(&first.xdr)
+            .map_err(|e| AuditError::Validation(format!("base64 decode return value: {e}")))?;
+        let return_val = ScVal::from_xdr(&return_val_xdr, Limits::none())
+            .map_err(|e| AuditError::Validation(format!("decode return value: {e}")))?;
+        verified = match &return_val {
+            ScVal::Bool(b) => *b,
+            ScVal::Vec(Some(vec)) => matches!(vec.first(), Some(ScVal::Bool(true))),
+            _ => false,
+        };
+    }
+
+    Ok(ReadonlyVerifyResult {
+        verified,
+        reason: if verified {
+            None
+        } else {
+            Some("simulation returned no boolean verification result".to_string())
+        },
+    })
+}
+
+/// Result of a signed, recorded disclosure verification.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordedVerifyResult {
+    /// The transaction hash on Stellar — citable evidence that the
+    /// verification happened.
+    pub tx_hash: String,
+    /// The on-chain record id assigned by the contract.
+    pub record_id: u64,
+    /// The verifier's Stellar account (G... strkey).
+    pub verifier: String,
+}
+
+/// A recorded disclosure verification read back from the contract.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnChainDisclosureRecord {
+    pub record_id: u64,
+    /// The verifier's Stellar address (G... strkey).
+    pub verifier: String,
+    pub root_hex: String,
+    pub leaf_hex: String,
+    pub claim: DisclosureClaim,
+    /// Ledger timestamp when the verification was recorded.
+    pub timestamp: u64,
+}
+
+/// Build the `verify_and_record_disclosure` / `verify_disclosure` claim +
+/// proof argument tail (everything after the optional verifier address).
+fn build_disclosure_args(
+    root_hex: &str,
+    leaf_hex: &str,
+    claim: &DisclosureClaim,
+    proof_a_hex: &str,
+    proof_b_hex: &str,
+    proof_c_hex: &str,
+) -> AuditResult<Vec<ScVal>> {
+    let bytes32 = |label: &str, hex_str: &str| -> AuditResult<ScVal> {
+        let bytes = hex::decode(hex_str)
+            .map_err(|e| AuditError::Validation(format!("invalid {label} hex: {e}")))?;
+        Ok(ScVal::Bytes(ScBytes(bytes.try_into().map_err(
+            |e: stellar_xdr::curr::Error| {
+                AuditError::Validation(format!("invalid {label} bytes: {e}"))
+            },
+        )?)))
+    };
+    Ok(vec![
+        bytes32("root", root_hex)?,
+        bytes32("leaf", leaf_hex)?,
+        bytes32("op_pred", &claim.op_pred_hex)?,
+        bytes32("coll_pred", &claim.coll_pred_hex)?,
+        ScVal::U64(claim.ts_min),
+        ScVal::U64(claim.ts_max),
+        ScVal::Bool(claim.check_op),
+        ScVal::Bool(claim.check_coll),
+        ScVal::Bool(claim.check_ts),
+        build_proof_scval(proof_a_hex, proof_b_hex, proof_c_hex)?,
+    ])
+}
+
+/// Verify a disclosure proof **and record it on-chain** as a signed
+/// transaction from the verifier's own account.
+///
+/// This is the attestation form of verification: the pairing check runs
+/// on-chain, and on success the contract appends a verifier-attributed
+/// `DisclosureRecord` and emits an event. The `verifier_keypair` must be a
+/// funded account — it signs the transaction and satisfies the contract's
+/// `require_auth`, which is exactly what makes the record third-party
+/// evidence ("account X verified claim C at ledger time T").
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_and_record_disclosure_native(
+    root_hex: &str,
+    leaf_hex: &str,
+    claim: &DisclosureClaim,
+    proof_a_hex: &str,
+    proof_b_hex: &str,
+    proof_c_hex: &str,
+    verifier_keypair: &StellarKeypair,
+    rpc_url: &str,
+    contract_id: &str,
+    network_passphrase: &str,
+) -> AuditResult<RecordedVerifyResult> {
+    let verifier_scval = ScVal::Address(ScAddress::Account(AccountId(
+        PublicKey::PublicKeyTypeEd25519(Uint256(verifier_keypair.public_bytes())),
+    )));
+
+    let mut args = vec![verifier_scval];
+    args.extend(build_disclosure_args(
+        root_hex,
+        leaf_hex,
+        claim,
+        proof_a_hex,
+        proof_b_hex,
+        proof_c_hex,
+    )?);
+
+    let (tx_hash, sim_result) = submit_invoke_with_retry(
+        rpc_url,
+        verifier_keypair,
+        network_passphrase,
+        contract_id,
+        "verify_and_record_disclosure",
+        args,
+        100,
+    )
+    .await?;
+
+    // Parse the record id: Result<u64, _> arrives as U64 (or Vec([U64])).
+    let mut record_id = 0u64;
+    if let Some(first) = sim_result.results.first() {
+        let return_val_xdr = base64::engine::general_purpose::STANDARD
+            .decode(&first.xdr)
+            .map_err(|e| AuditError::Validation(format!("base64 decode return value: {e}")))?;
+        let return_val = ScVal::from_xdr(&return_val_xdr, Limits::none())
+            .map_err(|e| AuditError::Validation(format!("decode return value: {e}")))?;
+        record_id = match &return_val {
+            ScVal::U64(v) => *v,
+            ScVal::Vec(Some(vec)) => match vec.first() {
+                Some(ScVal::U64(v)) => *v,
+                _ => 0,
+            },
+            _ => 0,
+        };
+    }
+
+    Ok(RecordedVerifyResult {
+        tx_hash,
+        record_id,
+        verifier: verifier_keypair.account_id(),
+    })
+}
+
+/// Query recorded disclosure verifications (most recent first) via a
+/// read-only simulation. Anyone can enumerate what has been proven, by
+/// whom, and when — without contacting either party.
+pub async fn get_disclosure_records_native(
+    rpc_url: &str,
+    contract_id: &str,
+    limit: u32,
+) -> AuditResult<Vec<OnChainDisclosureRecord>> {
+    let probe_kp = generate_keypair();
+    let tx = build_invoke_transaction(
+        &probe_kp.public_bytes(),
+        0,
+        contract_id,
+        "get_disclosure_records",
+        vec![ScVal::U32(limit)],
+        100,
+    )?;
+
+    let sim_result = simulate_transaction(rpc_url, &tx).await?;
+
+    if sim_result.results.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let return_val_xdr = base64::engine::general_purpose::STANDARD
+        .decode(&sim_result.results[0].xdr)
+        .map_err(|e| AuditError::Validation(format!("base64 decode records return: {e}")))?;
+    let return_val = ScVal::from_xdr(&return_val_xdr, Limits::none())
+        .map_err(|e| AuditError::Validation(format!("decode records ScVal: {e}")))?;
+
+    let entries = match &return_val {
+        ScVal::Vec(Some(vec)) => &vec.0,
+        _ => return Ok(vec![]),
+    };
+
+    let mut result = Vec::with_capacity(entries.len());
+    for entry in entries.iter() {
+        let map = match entry {
+            ScVal::Map(Some(m)) => m,
+            _ => continue,
+        };
+        let mut record = OnChainDisclosureRecord {
+            record_id: 0,
+            verifier: String::new(),
+            root_hex: String::new(),
+            leaf_hex: String::new(),
+            claim: DisclosureClaim {
+                op_pred_hex: String::new(),
+                coll_pred_hex: String::new(),
+                ts_min: 0,
+                ts_max: 0,
+                check_op: false,
+                check_coll: false,
+                check_ts: false,
+            },
+            timestamp: 0,
+        };
+        for kv in map.0.iter() {
+            let ScVal::Symbol(s) = &kv.key else { continue };
+            match String::from_utf8_lossy(s.0.as_slice()).as_ref() {
+                "record_id" => {
+                    if let ScVal::U64(v) = &kv.val {
+                        record.record_id = *v;
+                    }
+                }
+                "verifier" => {
+                    if let ScVal::Address(ScAddress::Account(AccountId(
+                        PublicKey::PublicKeyTypeEd25519(Uint256(bytes)),
+                    ))) = &kv.val
+                    {
+                        record.verifier = encode_account_id(bytes);
+                    }
+                }
+                "root" => {
+                    if let ScVal::Bytes(b) = &kv.val {
+                        record.root_hex = hex::encode(b.0.as_slice());
+                    }
+                }
+                "leaf" => {
+                    if let ScVal::Bytes(b) = &kv.val {
+                        record.leaf_hex = hex::encode(b.0.as_slice());
+                    }
+                }
+                "op_pred" => {
+                    if let ScVal::Bytes(b) = &kv.val {
+                        record.claim.op_pred_hex = hex::encode(b.0.as_slice());
+                    }
+                }
+                "coll_pred" => {
+                    if let ScVal::Bytes(b) = &kv.val {
+                        record.claim.coll_pred_hex = hex::encode(b.0.as_slice());
+                    }
+                }
+                "ts_min" => {
+                    if let ScVal::U64(v) = &kv.val {
+                        record.claim.ts_min = *v;
+                    }
+                }
+                "ts_max" => {
+                    if let ScVal::U64(v) = &kv.val {
+                        record.claim.ts_max = *v;
+                    }
+                }
+                "check_op" => {
+                    if let ScVal::Bool(v) = &kv.val {
+                        record.claim.check_op = *v;
+                    }
+                }
+                "check_coll" => {
+                    if let ScVal::Bool(v) = &kv.val {
+                        record.claim.check_coll = *v;
+                    }
+                }
+                "check_ts" => {
+                    if let ScVal::Bool(v) = &kv.val {
+                        record.claim.check_ts = *v;
+                    }
+                }
+                "timestamp" => {
+                    if let ScVal::U64(v) = &kv.val {
+                        record.timestamp = *v;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if record.record_id != 0 {
+            result.push(record);
+        }
+    }
+    Ok(result)
 }
 
 /// Call `authorize_attester(address, pubkey)` on the contract via native signing.

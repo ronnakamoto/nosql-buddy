@@ -9,7 +9,6 @@
 //! - `audit_commit_root` — commit the current root to Stellar testnet.
 //! - `audit_get_onchain_root` — query the latest committed root from Stellar.
 
-use base64::Engine;
 use serde::Serialize;
 use tauri::State;
 
@@ -265,6 +264,324 @@ pub async fn audit_verify_proof_onchain(
     .map_err(AppError::from)
 }
 
+/// Verify a Groth16 inclusion proof via a **read-only simulation** — no
+/// transaction, no fee, no signing key. This is the auditor-side verification
+/// path: the pairing check runs inside the Soroban runtime against the
+/// contract's pinned verifying key and committed-root index, but the caller
+/// needs only the public RPC URL and contract ID.
+///
+/// `rpc_url` / `contract_id` are explicit (the auditor may be pointing at the
+/// operator's contract from a different machine); empty values fall back to
+/// the app's active audit-mode chain config.
+#[tauri::command]
+pub async fn audit_verify_proof_readonly(
+    app: tauri::AppHandle,
+    root_hex: String,
+    leaf_hex: String,
+    proof_a: String,
+    proof_b: String,
+    proof_c: String,
+    rpc_url: Option<String>,
+    contract_id: Option<String>,
+) -> AppResult<crate::audit::stellar::ReadonlyVerifyResult> {
+    let chain = chain_config(&app)?;
+    let rpc = rpc_url
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| chain.rpc_url.clone());
+    let contract = contract_id
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| chain.contract_id.clone());
+
+    stellar_native::verify_inclusion_readonly_native(
+        &root_hex,
+        &leaf_hex,
+        &proof_a,
+        &proof_b,
+        &proof_c,
+        &rpc,
+        &contract,
+    )
+    .await
+    .map_err(AppError::from)
+}
+
+/// Verify a disclosure proof **and record the verification on-chain** as a
+/// signed transaction from the auditor's own Stellar account.
+///
+/// This is the attestation form: on success the contract appends a
+/// verifier-attributed record (who verified, the full claim, when) to an
+/// append-only on-chain log and emits an event — citable evidence, by tx
+/// hash, that this party checked this claim. The `secret_key` is the
+/// auditor's own S... key; it never belongs to the operator.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn audit_verify_disclosure_record(
+    app: tauri::AppHandle,
+    root_hex: String,
+    leaf_hex: String,
+    claim: crate::audit::stellar_native::DisclosureClaim,
+    proof_a: String,
+    proof_b: String,
+    proof_c: String,
+    secret_key: String,
+    rpc_url: Option<String>,
+    contract_id: Option<String>,
+) -> AppResult<crate::audit::stellar_native::RecordedVerifyResult> {
+    let kp = audit_service::auditd::load_keypair_from_secret_key(secret_key.trim())
+        .map_err(AppError::Validation)?;
+
+    let chain = chain_config(&app)?;
+    let rpc = rpc_url
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| chain.rpc_url.clone());
+    let contract = contract_id
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| chain.contract_id.clone());
+
+    stellar_native::verify_and_record_disclosure_native(
+        &root_hex,
+        &leaf_hex,
+        &claim,
+        &proof_a,
+        &proof_b,
+        &proof_c,
+        &kp,
+        &rpc,
+        &contract,
+        &chain.passphrase,
+    )
+    .await
+    .map_err(AppError::from)
+}
+
+/// List recorded disclosure verifications from the contract (most recent
+/// first) via a read-only simulation — no keys or fees needed.
+#[tauri::command]
+pub async fn audit_list_disclosure_records(
+    app: tauri::AppHandle,
+    limit: Option<u32>,
+    rpc_url: Option<String>,
+    contract_id: Option<String>,
+) -> AppResult<Vec<crate::audit::stellar_native::OnChainDisclosureRecord>> {
+    let chain = chain_config(&app)?;
+    let rpc = rpc_url
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| chain.rpc_url.clone());
+    let contract = contract_id
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| chain.contract_id.clone());
+
+    stellar_native::get_disclosure_records_native(&rpc, &contract, limit.unwrap_or(20).clamp(1, 100))
+        .await
+        .map_err(AppError::from)
+}
+
+/// Resolve a bundled circuit resource path.
+fn resolve_circuit_resource(app: &tauri::AppHandle, name: &str) -> AppResult<String> {
+    use tauri::Manager;
+    let resource = app
+        .path()
+        .resolve(
+            format!("resources/circuits/{name}"),
+            tauri::path::BaseDirectory::Resource,
+        )
+        .map_err(|e| AppError::Validation(format!("resolve {name} resource: {e}")))?;
+    Ok(resource.to_string_lossy().to_string())
+}
+
+/// The result of Audited-Action Disclosure proof generation: a
+/// self-contained bundle an auditor can verify on-chain with zero trust in
+/// the operator (via `audit_verify_disclosure_readonly` or any Soroban RPC
+/// client).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisclosureProofResult {
+    pub root_hex: String,
+    pub leaf_hex: String,
+    pub leaf_index: u64,
+    /// The public claim: predicate parameters exactly as passed on-chain.
+    pub claim: crate::audit::stellar_native::DisclosureClaim,
+    /// Human-readable restatement of the claim (what the proof shows).
+    pub claim_text: String,
+    pub proof: zk_audit::serialize::SorobanProof,
+    pub network: String,
+    pub contract_id: String,
+}
+
+/// Generate an **Audited-Action Disclosure** proof for the v3 event at
+/// `index`: a Groth16 proof that an event with the claimed operation /
+/// collection / time-range exists in the committed tree, revealing nothing
+/// else about it (not the document, database, or exact timestamp).
+///
+/// The claim is derived from the event itself: `op_pred` / `coll_pred` are
+/// the event's own operation and collection (they are only *revealed* if
+/// the corresponding check is enabled), and the time range defaults to the
+/// surrounding UTC day — coarse enough not to fingerprint the exact write
+/// time.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn audit_generate_disclosure_proof(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    index: u64,
+    check_op: bool,
+    check_coll: bool,
+    check_ts: bool,
+    ts_min: Option<u64>,
+    ts_max: Option<u64>,
+) -> AppResult<DisclosureProofResult> {
+    use ark_ff::{BigInteger, PrimeField};
+    use zk_audit::commitment::str_to_field;
+
+    // 1. The private opening (validated against the stored leaf).
+    let (opening, leaf) = state.audit_log.disclosure_opening(index)?;
+
+    // 2. The event metadata for the public claim parameters.
+    let event = state
+        .audit_log
+        .list_events()
+        .into_iter()
+        .find(|e| e.index == index)
+        .ok_or_else(|| AppError::Validation(format!("no event at index {index}")))?;
+
+    // 3. Merkle path for the leaf against the current tree.
+    let inclusion = state.audit_log.prove_inclusion(index)?;
+    if inclusion.leaf != leaf {
+        return Err(AppError::Internal(format!(
+            "tree leaf at {index} does not match the recomputed v3 commitment"
+        )));
+    }
+
+    // 4. Build the statement. Default time range: the surrounding UTC day.
+    let day_start = opening.ts - (opening.ts % 86_400);
+    let statement = zk_audit::DisclosureStatement {
+        op_pred: str_to_field(&event.operation),
+        coll_pred: str_to_field(&event.collection),
+        ts_min: ts_min.unwrap_or(day_start),
+        ts_max: ts_max.unwrap_or(day_start + 86_399),
+        check_op,
+        check_coll,
+        check_ts,
+    };
+    if statement.ts_min > opening.ts || statement.ts_max < opening.ts {
+        return Err(AppError::Validation(format!(
+            "time range [{}, {}] does not contain the event timestamp — the proof would be unsatisfiable",
+            statement.ts_min, statement.ts_max
+        )));
+    }
+
+    // 5. Prove on a blocking thread with the bundled ceremony proving key,
+    //    so the proof verifies against the disclosure VK registered on-chain.
+    let r1cs = resolve_circuit_resource(&app, "audited_action.r1cs")?;
+    let wasm = resolve_circuit_resource(&app, "audited_action.wasm")?;
+    let pkey = resolve_circuit_resource(&app, "audited_action.pkey")?;
+
+    let statement_clone = statement.clone();
+    let groth16_proof = tokio::task::spawn_blocking(move || {
+        let prover = zk_audit::DisclosureProver::with_proving_key(&r1cs, &wasm, &pkey)?;
+        prover.prove(&opening, &inclusion, &statement_clone)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("disclosure proof task: {e}")))?
+    .map_err(AppError::from)?;
+
+    let soroban_args = zk_audit::AuditProver::serialize_for_soroban(&groth16_proof)?;
+
+    let fr_hex = |f: &zk_audit::prover::Fr| {
+        let bytes = f.into_bigint().to_bytes_be();
+        let mut arr = [0u8; 32];
+        arr[32 - bytes.len()..].copy_from_slice(&bytes);
+        hex::encode(arr)
+    };
+
+    let root_hex = fr_hex(&groth16_proof.public_inputs[0]);
+    let leaf_hex = fr_hex(&leaf);
+
+    let claim = crate::audit::stellar_native::DisclosureClaim {
+        op_pred_hex: fr_hex(&statement.op_pred),
+        coll_pred_hex: fr_hex(&statement.coll_pred),
+        ts_min: statement.ts_min,
+        ts_max: statement.ts_max,
+        check_op,
+        check_coll,
+        check_ts,
+    };
+
+    let mut clauses: Vec<String> = Vec::new();
+    if check_op {
+        clauses.push(format!("operation = \"{}\"", event.operation));
+    }
+    if check_coll {
+        clauses.push(format!("collection = \"{}\"", event.collection));
+    }
+    if check_ts {
+        clauses.push(format!(
+            "timestamp within [{}, {}] (Unix seconds)",
+            statement.ts_min, statement.ts_max
+        ));
+    }
+    let claim_text = if clauses.is_empty() {
+        "an event exists in the committed audit log (no predicate checks enabled)".to_string()
+    } else {
+        format!(
+            "an event with {} exists in the committed audit log",
+            clauses.join(" AND ")
+        )
+    };
+
+    let mode_config = load_mode_config(&app)?;
+    let chain = chain_config_from_mode(&mode_config);
+
+    Ok(DisclosureProofResult {
+        root_hex,
+        leaf_hex,
+        leaf_index: index,
+        claim,
+        claim_text,
+        proof: soroban_args.proof,
+        network: chain.network,
+        contract_id: chain.contract_id,
+    })
+}
+
+/// Verify an Audited-Action Disclosure proof via a **read-only simulation**
+/// — the auditor-side counterpart of `audit_generate_disclosure_proof`.
+/// No transaction, no fee, no keys; see `audit_verify_proof_readonly`.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn audit_verify_disclosure_readonly(
+    app: tauri::AppHandle,
+    root_hex: String,
+    leaf_hex: String,
+    claim: crate::audit::stellar_native::DisclosureClaim,
+    proof_a: String,
+    proof_b: String,
+    proof_c: String,
+    rpc_url: Option<String>,
+    contract_id: Option<String>,
+) -> AppResult<crate::audit::stellar::ReadonlyVerifyResult> {
+    let chain = chain_config(&app)?;
+    let rpc = rpc_url
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| chain.rpc_url.clone());
+    let contract = contract_id
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| chain.contract_id.clone());
+
+    stellar_native::verify_disclosure_readonly_native(
+        &root_hex,
+        &leaf_hex,
+        &claim,
+        &proof_a,
+        &proof_b,
+        &proof_c,
+        &rpc,
+        &contract,
+    )
+    .await
+    .map_err(AppError::from)
+}
+
 /// Resolve circuit artifact paths, falling back to bundled resources.
 fn resolve_circuit_paths(
     app: &tauri::AppHandle,
@@ -353,29 +670,31 @@ pub async fn audit_record_event(
     deployment_id: Option<String>,
     payload: String,
 ) -> AppResult<u64> {
-    // When v2 leaf derivation is active, treat the user-supplied payload
-    // as the `data` field of a canonical payload.
-    let (payload_to_store, leaf) = if state.audit_log.has_leaf_key() {
+    // When keyed leaf derivation is active, treat the user-supplied payload
+    // as the `data` field of a canonical payload and record a v3 leaf
+    // (keyed Poseidon vector commitment — ZK-provable structured fields).
+    let index = if state.audit_log.has_leaf_key() {
         let canonical = crate::audit::crypto::canonical_payload_bytes(
             &operation, &database, &collection, &payload,
         );
-        let payload_b64 = base64::engine::general_purpose::STANDARD.encode(&canonical);
-        let key = state.audit_log.leaf_key().expect("leaf key checked above");
-        let leaf = crate::audit::crypto::hmac_leaf(&key, &canonical);
-        (payload_b64, leaf)
+        state.audit_log.record_v3(
+            deployment_id.as_deref().unwrap_or(""),
+            &operation,
+            &database,
+            &collection,
+            &canonical,
+        )?
     } else {
         let leaf = crate::audit::leaf_from_payload(&operation, &database, &collection, &payload);
-        (payload, leaf)
+        state.audit_log.record(
+            deployment_id.as_deref().unwrap_or(""),
+            &operation,
+            &database,
+            &collection,
+            &payload,
+            leaf,
+        )?
     };
-
-    let index = state.audit_log.record(
-        deployment_id.as_deref().unwrap_or(""),
-        &operation,
-        &database,
-        &collection,
-        &payload_to_store,
-        leaf,
-    )?;
 
     // Advance the open batch (epoch) so the UI's "Batch · filling" counter
     // tracks recorded events and the on-disk epoch state stays in sync.
@@ -1401,6 +1720,39 @@ pub async fn audit_provision_testnet_contract(
         &chain.passphrase,
     )
     .await?;
+
+    // Also pin the Audited-Action Disclosure circuit's VK (write-once, like
+    // the inclusion VK) so disclosure proofs can be verified on this
+    // contract. Best-effort: an older bundle without the disclosure
+    // artifacts still provisions a working inclusion-only contract.
+    match app.path().resolve(
+        "resources/circuits/audited_action.vkey",
+        tauri::path::BaseDirectory::Resource,
+    ) {
+        Ok(disclosure_vkey) if disclosure_vkey.exists() => {
+            let dvk = zk_audit::load_verifying_key_hex(&disclosure_vkey.to_string_lossy())
+                .map_err(|e| {
+                    AppError::Validation(format!("load disclosure verifying key: {e}"))
+                })?;
+            stellar_native::register_disclosure_vk_native(
+                &deployed.contract_id,
+                &kp,
+                &dvk.alpha,
+                &dvk.beta,
+                &dvk.gamma,
+                &dvk.delta,
+                &dvk.ic,
+                &chain.rpc_url,
+                &chain.passphrase,
+            )
+            .await?;
+        }
+        _ => {
+            tracing::warn!(
+                "audited_action.vkey resource not found — disclosure proofs will not verify on this contract"
+            );
+        }
+    }
 
     save_production_network(
         &app,

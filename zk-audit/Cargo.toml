@@ -35,6 +35,8 @@ num-traits = "0.2"
 thiserror = "2"
 rand = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread"] }
+sha2 = "0.10"
+hmac = "0.12"
 
 [[bin]]
 name = "zk-audit-ceremony"

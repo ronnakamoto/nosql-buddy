@@ -207,6 +207,148 @@ pub struct TestResult {
     pub latency_ms: Option<u64>,
 }
 
+/// Classified access level of an open connection, derived from
+/// `connectionStatus { showPrivileges: true }`.
+///
+/// `level` is one of:
+///   - "write": the authenticated user can modify data (or the deployment
+///     has no auth enabled, which grants full access to anyone)
+///   - "read": the user authenticated but only holds read-side roles
+///   - "unknown": the probe failed or returned nothing usable
+///
+/// The audit tab uses this to default the Dev Mode role: write → operator
+/// (seal/commit surface), read → auditor (verification surface). It is a
+/// UX default only, never a security boundary — the server enforces the
+/// real privileges.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionAccessLevel {
+    pub level: String,
+    pub roles: Vec<String>,
+}
+
+/// Built-in roles that imply the ability to write data (directly or by
+/// granting oneself the ability). Custom roles are covered by the
+/// privilege-action scan below.
+const WRITE_ROLES: &[&str] = &[
+    "readWrite",
+    "readWriteAnyDatabase",
+    "dbOwner",
+    "dbAdmin",
+    "dbAdminAnyDatabase",
+    "userAdmin",
+    "userAdminAnyDatabase",
+    "clusterAdmin",
+    "restore",
+    "root",
+    "atlasAdmin",
+];
+
+/// Privilege actions that constitute data writes.
+const WRITE_ACTIONS: &[&str] = &[
+    "insert",
+    "update",
+    "remove",
+    "createCollection",
+    "dropCollection",
+    "dropDatabase",
+    "renameCollectionSameDB",
+    "anyAction",
+];
+
+#[tauri::command]
+pub async fn connection_access_level(
+    connection_id: String,
+    state: State<'_, AppState>,
+) -> AppResult<ConnectionAccessLevel> {
+    let entry = state.clients.get(&connection_id).await?;
+    let probe = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        entry
+            .client
+            .database("admin")
+            .run_command(bson::doc! { "connectionStatus": 1, "showPrivileges": true }),
+    )
+    .await;
+    let doc = match probe {
+        Ok(Ok(d)) => d,
+        _ => {
+            return Ok(ConnectionAccessLevel {
+                level: "unknown".into(),
+                roles: vec![],
+            })
+        }
+    };
+    let Ok(auth_info) = doc.get_document("authInfo") else {
+        return Ok(ConnectionAccessLevel {
+            level: "unknown".into(),
+            roles: vec![],
+        });
+    };
+
+    let authenticated_users = auth_info
+        .get_array("authenticatedUsers")
+        .map(|a| a.len())
+        .unwrap_or(0);
+    // No authenticated users means auth is not enabled (or the proxy let us
+    // through without credentials) — such a connection can write anything.
+    if authenticated_users == 0 {
+        return Ok(ConnectionAccessLevel {
+            level: "write".into(),
+            roles: vec![],
+        });
+    }
+
+    let roles: Vec<String> = auth_info
+        .get_array("authenticatedUserRoles")
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| r.as_document())
+                .filter_map(|r| {
+                    let role = r.get_str("role").ok()?;
+                    let db = r.get_str("db").unwrap_or("");
+                    Some(if db.is_empty() {
+                        role.to_string()
+                    } else {
+                        format!("{role}@{db}")
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let role_grants_write = auth_info
+        .get_array("authenticatedUserRoles")
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| r.as_document())
+                .filter_map(|r| r.get_str("role").ok())
+                .any(|role| WRITE_ROLES.contains(&role))
+        })
+        .unwrap_or(false);
+
+    let privilege_grants_write = auth_info
+        .get_array("authenticatedUserPrivileges")
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|p| p.as_document())
+                .filter_map(|p| p.get_array("actions").ok())
+                .flatten()
+                .filter_map(|a| a.as_str())
+                .any(|action| WRITE_ACTIONS.contains(&action))
+        })
+        .unwrap_or(false);
+
+    Ok(ConnectionAccessLevel {
+        level: if role_grants_write || privilege_grants_write {
+            "write".into()
+        } else {
+            "read".into()
+        },
+        roles,
+    })
+}
+
 #[tauri::command]
 pub async fn open_connection(
     profile_id: String,

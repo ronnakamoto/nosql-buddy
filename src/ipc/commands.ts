@@ -157,6 +157,12 @@ export interface TestResult {
   latencyMs: number | null;
 }
 
+/** Classified access level of an open connection (UX default, not a security boundary). */
+export interface ConnectionAccessLevel {
+  level: "write" | "read" | "unknown";
+  roles: string[];
+}
+
 export interface ServerInfo {
   version: string | null;
   host: string | null;
@@ -1159,6 +1165,68 @@ export interface Epoch {
   txHash: string | null;
 }
 
+/**
+ * Result of a read-only (simulated) on-chain proof verification.
+ *
+ * No transaction is submitted and no signing key is needed — the pairing
+ * check runs inside the Soroban runtime via `simulateTransaction`, so anyone
+ * with the RPC URL and contract ID can obtain this verdict.
+ */
+export interface ReadonlyVerifyResult {
+  verified: boolean;
+  reason: string | null;
+}
+
+/**
+ * The public predicate parameters of an Audited-Action Disclosure claim,
+ * exactly as bound into the proof's public signals on-chain.
+ */
+export interface DisclosureClaim {
+  opPredHex: string;
+  collPredHex: string;
+  tsMin: number;
+  tsMax: number;
+  checkOp: boolean;
+  checkColl: boolean;
+  checkTs: boolean;
+}
+
+/**
+ * Result of a signed, on-chain-recorded disclosure verification: the tx
+ * hash is citable evidence that `verifier` checked the claim.
+ */
+export interface RecordedVerifyResult {
+  txHash: string;
+  recordId: number;
+  verifier: string;
+}
+
+/** A recorded disclosure verification read back from the contract. */
+export interface OnChainDisclosureRecord {
+  recordId: number;
+  verifier: string;
+  rootHex: string;
+  leafHex: string;
+  claim: DisclosureClaim;
+  timestamp: number;
+}
+
+/**
+ * A self-contained Audited-Action Disclosure proof bundle: everything an
+ * auditor needs to verify the claim on-chain with zero trust in the
+ * operator (contract ID + RPC URL + this bundle).
+ */
+export interface DisclosureProofResult {
+  rootHex: string;
+  leafHex: string;
+  leafIndex: number;
+  claim: DisclosureClaim;
+  claimText: string;
+  proof: { a: string; b: string; c: string };
+  network: string;
+  contractId: string;
+}
+
 // ─── Phase 3: Reader mode, IPFS, RPC, Attestation ───────────────────
 
 /** Result of reader-mode verification against on-chain roots. */
@@ -1292,6 +1360,8 @@ export interface AuditorHandoffMaterial {
   agePublicKeyOperator: string;
   agePublicKeyAttester: string;
   ageAttesterSecret: string;
+  /** Attester's funded Stellar secret (S...). Dev Mode only; empty in real deployments. */
+  attesterStellarSecret: string;
   auditLeafKeyHex: string;
   auditorMongoUri: string;
   operatorMongoUri: string;
@@ -1413,6 +1483,57 @@ const commands = {
     invoke<{ txHash: string; verified: boolean }>(
       "audit_verify_proof_onchain",
       proof,
+    ),
+  auditVerifyProofReadonly: (proof: {
+    rootHex: string;
+    leafHex: string;
+    proofA: string;
+    proofB: string;
+    proofC: string;
+    rpcUrl?: string;
+    contractId?: string;
+  }) =>
+    invoke<ReadonlyVerifyResult>("audit_verify_proof_readonly", proof),
+  auditGenerateDisclosureProof: (params: {
+    index: number;
+    checkOp: boolean;
+    checkColl: boolean;
+    checkTs: boolean;
+    tsMin?: number;
+    tsMax?: number;
+  }) =>
+    invoke<DisclosureProofResult>("audit_generate_disclosure_proof", params),
+  auditVerifyDisclosureReadonly: (params: {
+    rootHex: string;
+    leafHex: string;
+    claim: DisclosureClaim;
+    proofA: string;
+    proofB: string;
+    proofC: string;
+    rpcUrl?: string;
+    contractId?: string;
+  }) =>
+    invoke<ReadonlyVerifyResult>("audit_verify_disclosure_readonly", params),
+  auditVerifyDisclosureRecord: (params: {
+    rootHex: string;
+    leafHex: string;
+    claim: DisclosureClaim;
+    proofA: string;
+    proofB: string;
+    proofC: string;
+    secretKey: string;
+    rpcUrl?: string;
+    contractId?: string;
+  }) =>
+    invoke<RecordedVerifyResult>("audit_verify_disclosure_record", params),
+  auditListDisclosureRecords: (params?: {
+    limit?: number;
+    rpcUrl?: string;
+    contractId?: string;
+  }) =>
+    invoke<OnChainDisclosureRecord[]>(
+      "audit_list_disclosure_records",
+      params ?? {},
     ),
   auditRecordEvent: (
     operation: string,
@@ -1645,6 +1766,8 @@ const commands = {
     invoke<ConnectionDescriptor[]>("list_active_connections"),
   resolveProfileUri: (id: string) =>
     invoke<string>("resolve_profile_uri", { id }),
+  connectionAccessLevel: (connectionId: string) =>
+    invoke<ConnectionAccessLevel>("connection_access_level", { connectionId }),
 
   listDatabases: (connectionId: string) =>
     invoke<DatabaseSummary[]>("list_databases", { connectionId }),

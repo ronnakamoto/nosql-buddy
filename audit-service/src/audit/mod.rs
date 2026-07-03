@@ -127,9 +127,13 @@ struct PersistedEvent {
     ///
     /// - **v1** (legacy): `"{op}|{db}|{col}|{args}"` — pipe-delimited,
     ///   leaf derived via `SHA-256(payload)`.
-    /// - **v2** (current): base64-encoded canonical bytes
+    /// - **v2** (legacy): base64-encoded canonical bytes
     ///   (`canonical_payload_bytes(op, db, col, data)`), leaf derived via
     ///   `HMAC-SHA-256(k_audit, canonical_bytes)`.
+    /// - **v3** (current): base64-encoded canonical bytes, leaf derived via
+    ///   the keyed Poseidon vector commitment over structured fields
+    ///   (`zk_audit::commitment::poseidon_leaf_v3`) — provable in-circuit
+    ///   for ZK disclosure proofs.
     payload: String,
     leaf_hex: String,
     /// Merkle root hex computed *after* this leaf was inserted. Forms a
@@ -141,6 +145,8 @@ struct PersistedEvent {
     /// - `1` (or missing, which deserializes to `0`) = legacy pipe-delimited
     ///   payload + SHA-256 leaf.
     /// - `2` = canonical binary payload + HMAC leaf.
+    /// - `3` = canonical binary payload + keyed Poseidon vector commitment
+    ///   (ZK-provable structured fields).
     #[serde(default = "default_event_version")]
     version: u32,
 }
@@ -299,6 +305,41 @@ impl AuditLog {
                     ))
                 })?;
                 Ok(crate::audit::crypto::hmac_leaf(&key, &canonical))
+            }
+            3 => {
+                let key = self
+                    .leaf_key
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .ok_or_else(|| {
+                        AuditError::Validation(
+                            "v3 event requires leaf key, but none is configured".to_string(),
+                        )
+                    })?;
+                let canonical = base64::engine::general_purpose::STANDARD.decode(&event.payload).map_err(|e| {
+                    AuditError::Validation(format!(
+                        "v3 event base64 decode failed at index {}: {e}",
+                        event.index
+                    ))
+                })?;
+                let ts_secs = chrono::DateTime::parse_from_rfc3339(&event.timestamp)
+                    .map_err(|e| {
+                        AuditError::Validation(format!(
+                            "v3 event timestamp parse failed at index {}: {e}",
+                            event.index
+                        ))
+                    })?
+                    .timestamp()
+                    .max(0) as u64;
+                let (leaf, _) = zk_audit::commitment::poseidon_leaf_v3(
+                    &key,
+                    &event.operation,
+                    &event.database,
+                    &event.collection,
+                    ts_secs,
+                    &canonical,
+                )?;
+                Ok(leaf)
             }
             v => Err(AuditError::Validation(format!(
                 "unknown event version {v} at index {}",
@@ -823,6 +864,86 @@ impl AuditLog {
         payload: &str,
         leaf: ark_bn254::Fr,
     ) -> AuditResult<u64> {
+        // Determine event version from the configured leaf key.
+        let version = if self.has_leaf_key() { 2 } else { 1 };
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        self.record_inner(
+            deployment_id,
+            operation,
+            database,
+            collection,
+            payload,
+            leaf,
+            version,
+            &timestamp,
+        )
+    }
+
+    /// Record an audit event with a **v3 leaf**: a keyed Poseidon vector
+    /// commitment over the event's structured fields (see
+    /// [`zk_audit::commitment`]). Returns the leaf index.
+    ///
+    /// Unlike [`record`](Self::record), the leaf is derived *inside* this
+    /// method because it commits to the event timestamp, which must be the
+    /// same instant that is persisted — replay recomputes the leaf from the
+    /// stored RFC 3339 timestamp's Unix seconds.
+    ///
+    /// `canonical_payload` must be the canonical byte encoding from
+    /// [`crypto::canonical_payload_bytes`]; it is persisted base64-encoded,
+    /// like v2.
+    pub fn record_v3(
+        &self,
+        deployment_id: &str,
+        operation: &str,
+        database: &str,
+        collection: &str,
+        canonical_payload: &[u8],
+    ) -> AuditResult<u64> {
+        let key = self.leaf_key().ok_or_else(|| {
+            AuditError::Validation(
+                "v3 events require a leaf key, but none is configured".to_string(),
+            )
+        })?;
+
+        let now = chrono::Utc::now();
+        let timestamp = now.to_rfc3339();
+        let ts_secs = now.timestamp().max(0) as u64;
+
+        let (leaf, _opening) = zk_audit::commitment::poseidon_leaf_v3(
+            &key,
+            operation,
+            database,
+            collection,
+            ts_secs,
+            canonical_payload,
+        )?;
+
+        let payload_b64 = base64::engine::general_purpose::STANDARD.encode(canonical_payload);
+
+        self.record_inner(
+            deployment_id,
+            operation,
+            database,
+            collection,
+            &payload_b64,
+            leaf,
+            3,
+            &timestamp,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_inner(
+        &self,
+        deployment_id: &str,
+        operation: &str,
+        database: &str,
+        collection: &str,
+        payload: &str,
+        leaf: ark_bn254::Fr,
+        version: u32,
+        timestamp: &str,
+    ) -> AuditResult<u64> {
         // Assign a monotonic, per-`(deploymentId, database)` sequence number.
         // Acquired and released before the tree lock to avoid holding two
         // locks at once.
@@ -859,7 +980,7 @@ impl AuditLog {
             roots.push(root_after.clone());
         }
 
-        let timestamp = chrono::Utc::now().to_rfc3339();
+        let timestamp = timestamp.to_string();
 
         let mut events = self.events.lock().unwrap_or_else(|e| e.into_inner());
         events.push(AuditEvent {
@@ -872,9 +993,6 @@ impl AuditLog {
             sequence,
             timestamp: timestamp.clone(),
         });
-
-        // Determine event version from the configured leaf key.
-        let version = if self.has_leaf_key() { 2 } else { 1 };
 
         // Persist atomically: append one JSONL line + fsync, all while
         // holding the persistence mutex. If persistence isn't wired yet
@@ -913,6 +1031,84 @@ impl AuditLog {
         }
 
         Ok(index)
+    }
+
+    /// The private opening of a **v3** event's leaf commitment, needed to
+    /// generate an Audited-Action Disclosure proof for it.
+    ///
+    /// Reads the persisted JSONL record for `index` (the in-memory
+    /// [`AuditEvent`] doesn't carry the payload), re-derives the keyed
+    /// Poseidon commitment, and cross-checks it against the stored leaf.
+    /// Errors for v1/v2 events (their opaque hash leaves have no provable
+    /// opening) and when persistence or the leaf key isn't configured.
+    pub fn disclosure_opening(
+        &self,
+        index: u64,
+    ) -> AuditResult<(zk_audit::LeafOpening, ark_bn254::Fr)> {
+        let key = self.leaf_key().ok_or_else(|| {
+            AuditError::Validation("disclosure proofs require a leaf key".to_string())
+        })?;
+
+        let events_path = {
+            let persistence = self.persistence.lock().unwrap_or_else(|e| e.into_inner());
+            persistence
+                .as_ref()
+                .map(|p| p.events_path.clone())
+                .ok_or_else(|| {
+                    AuditError::Validation(
+                        "disclosure proofs require persistence to be configured".to_string(),
+                    )
+                })?
+        };
+
+        let content = std::fs::read_to_string(&events_path)?;
+        let event = content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str::<PersistedEvent>(l).ok())
+            .find(|e| e.index == index)
+            .ok_or_else(|| {
+                AuditError::Validation(format!("no persisted event at index {index}"))
+            })?;
+
+        if event.version != 3 {
+            return Err(AuditError::Validation(format!(
+                "event at index {index} is v{} — disclosure proofs require v3 leaves \
+                 (keyed Poseidon commitment). Events recorded before the v3 upgrade \
+                 cannot be disclosed this way.",
+                event.version
+            )));
+        }
+
+        let canonical = base64::engine::general_purpose::STANDARD
+            .decode(&event.payload)
+            .map_err(|e| {
+                AuditError::Validation(format!("v3 payload base64 decode at {index}: {e}"))
+            })?;
+        let ts_secs = chrono::DateTime::parse_from_rfc3339(&event.timestamp)
+            .map_err(|e| {
+                AuditError::Validation(format!("v3 timestamp parse at {index}: {e}"))
+            })?
+            .timestamp()
+            .max(0) as u64;
+
+        let (leaf, opening) = zk_audit::commitment::poseidon_leaf_v3(
+            &key,
+            &event.operation,
+            &event.database,
+            &event.collection,
+            ts_secs,
+            &canonical,
+        )?;
+
+        if fr_to_hex(leaf) != event.leaf_hex {
+            return Err(AuditError::Validation(format!(
+                "recomputed v3 leaf does not match stored leaf at index {index} — \
+                 wrong leaf key or tampered log"
+            )));
+        }
+
+        Ok((opening, leaf))
     }
 
     /// Get the current Merkle root as a hex string.
@@ -1423,6 +1619,49 @@ mod tests {
             // Root must be non-trivial (not the empty-tree root).
             let empty_root = AuditLog::new().unwrap().root_hex().unwrap();
             assert_ne!(audit.root_hex().unwrap(), empty_root);
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// v3 leaves (keyed Poseidon vector commitment) round-trip through
+    /// persistence: record with a leaf key, replay with the same key, and
+    /// verify the leaf/root chain reproduces. Replay without the key must
+    /// fail (v3 events are unverifiable keyless), proving the leaf actually
+    /// depends on the key.
+    #[test]
+    fn v3_leaf_persistence_round_trip() {
+        let dir = tempfile_dir();
+        let key = [0x42u8; 32];
+        let root_hex = {
+            let audit = AuditLog::new().unwrap();
+            audit.set_leaf_key(key);
+            audit.set_persistence_dir(&dir).unwrap();
+            let a = std::sync::Arc::new(audit);
+            interceptor::record_insert(&a, "rs:rs0", "shop", "orders", r#"{"total":42}"#)
+                .unwrap();
+            interceptor::record_delete(&a, "rs:rs0", "shop", "orders", r#"{"_id":1}"#).unwrap();
+            a.root_hex().unwrap()
+        };
+
+        // Replay with the same key: leaves recompute, root matches.
+        {
+            let audit = AuditLog::new().unwrap();
+            audit.set_leaf_key(key);
+            audit.set_persistence_dir(&dir).unwrap();
+            assert_eq!(audit.event_count(), 2);
+            assert_eq!(audit.root_hex().unwrap(), root_hex);
+        }
+
+        // Replay without the key: must fail, not silently accept.
+        {
+            let audit = AuditLog::new().unwrap();
+            // Remove sled fast-path so replay actually recomputes leaves.
+            let _ = fs::remove_dir_all(dir.join("audit").join("tree.sled"));
+            let err = audit.set_persistence_dir(&dir).unwrap_err();
+            assert!(
+                err.to_string().contains("leaf key"),
+                "expected leaf-key error, got: {err}"
+            );
         }
         let _ = fs::remove_dir_all(&dir);
     }

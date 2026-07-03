@@ -65,6 +65,12 @@
     "resources": {
       "resources/circuits/merkle_inclusion.r1cs": "resources/circuits/merkle_inclusion.r1cs",
       "resources/circuits/merkle_inclusion.wasm": "resources/circuits/merkle_inclusion.wasm",
+      "resources/circuits/merkle_inclusion.pkey": "resources/circuits/merkle_inclusion.pkey",
+      "resources/circuits/merkle_inclusion.vkey": "resources/circuits/merkle_inclusion.vkey",
+      "resources/circuits/audited_action.r1cs": "resources/circuits/audited_action.r1cs",
+      "resources/circuits/audited_action.wasm": "resources/circuits/audited_action.wasm",
+      "resources/circuits/audited_action.pkey": "resources/circuits/audited_action.pkey",
+      "resources/circuits/audited_action.vkey": "resources/circuits/audited_action.vkey",
       "resources/contract/zk_audit_commitment.wasm": "resources/contract/zk_audit_commitment.wasm",
       "../docker-compose.audit.yml": "stack/docker-compose.audit.yml",
       "../docker-compose.audit-db.yml": "stack/docker-compose.audit-db.yml",

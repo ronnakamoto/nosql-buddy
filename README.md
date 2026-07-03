@@ -106,7 +106,7 @@ docker compose run --rm seeder   # re-seed the demo data
 - **Schema and index analysis** — Infer schema shape, cardinality, and index usage from sampled documents.
 - **Explain plan visualization** — Parse `explain` output into a navigable tree to diagnose slow queries.
 - **Driver code generation** — Export queries and pipelines to Node.js, Python, Java, C#, Ruby, Rust, and the MongoDB shell.
-- **ZK audit log** — Tamper-evident Poseidon Merkle tree, Groth16 inclusion proofs, epoch batching with IPFS publishing and Stellar on-chain commitments (testnet or mainnet), multi-publisher K-of-N threshold attestation, and reader-mode verification against on-chain roots. Two modes: **Dev Mode** (full stack locally via Docker, available now) and **Production Mode** (in-app pipeline with your own keys, coming soon). **Batch encryption** with age (X25519 multi-recipient) ensures only authorized auditors can read published epoch batches. **Keyed leaf derivation** (HMAC-SHA-256) resists offline dictionary attacks against public circuit signals.
+- **ZK audit log** — Tamper-evident Poseidon Merkle tree, **Audited-Action Disclosure proofs** (Groth16 proofs of predicates — operation, collection, time range — over still-private events, verifiable on-chain by anyone via a free read-only Soroban simulation), epoch batching with IPFS publishing and Stellar on-chain commitments (testnet or mainnet), multi-publisher K-of-N threshold attestation, and reader-mode verification against on-chain roots. Two modes: **Dev Mode** (full stack locally via Docker, available now) and **Production Mode** (in-app pipeline with your own keys, coming soon). **Batch encryption** with age (X25519 multi-recipient) ensures only authorized auditors can read published epoch batches. **Keyed leaf derivation** (a keyed Poseidon vector commitment over structured event fields, ZK-openable in-circuit) resists offline dictionary attacks against public circuit signals.
 - **Audit domains & selective disclosure** — Events are segmented per `(deployment, database)` domain, each with its own secondary Merkle root, so you can prove one tenant's record without revealing any other domain's data. An aggregation **super-root** over all domain roots (anchored in the on-chain commit metadata) lets you prove a domain is part of the committed state, and per-domain **legal hold** and **retention/pruning** manage lifecycle while keeping the anchored history intact and verifiable.
 - **Oplog completeness** — Deterministic SHA-256 Merkle tree over MongoDB's oplog (`local.oplog.rs`), binding the audit log to the same ground truth that MongoDB's replication protocol uses. An independent replica member (run by the auditor/regulator) provides a trust anchor that detects any omitted writes. The on-chain commitment stores both the audit log root and the oplog root, and independent attesters submit ed25519 attestations over the oplog root for durable, post-rollover verification.
 - **Standalone audit service** — `nosqlbuddy-audit` runs independently of the desktop app, capturing MongoDB change stream events, batching into epochs, publishing to IPFS, and committing Merkle roots on-chain via an HTTP API. Signs transactions natively (ed25519 + Soroban RPC) — no `stellar` CLI required. Includes an interactive `setup` wizard for one-command key generation, contract deployment, and attester authorization.
@@ -194,49 +194,59 @@ For a detailed explanation of the ZK Audit system, see [nosqlbuddy.com/audit](ht
 
 ### How it works (the short version)
 
-1. **Capture.** Every MongoDB write (insert, update, delete) is recorded into a tamper-evident Poseidon Merkle tree.
+1. **Capture.** Every MongoDB write (insert, update, delete) is recorded into a tamper-evident Poseidon Merkle tree. Each leaf is a **keyed Poseidon vector commitment** over the event's structured fields (operation, database, collection, timestamp, document hash) — binding, hiding, and openable inside a ZK circuit.
 2. **Seal.** Writes are grouped into an "epoch" (batch). Sealing the epoch freezes its Merkle root, a single fingerprint that commits to every event in the batch.
 3. **Anchor.** The Merkle root is committed on-chain (Stellar blockchain) and the full batch is stored on IPFS. This makes the fingerprint public and permanent.
-4. **Prove.** For any individual record, you can generate a zero-knowledge inclusion proof that it is part of a sealed batch, without revealing any other record.
-5. **Verify.** Anyone can independently verify that a record is in the on-chain log, and that no writes were omitted.
+4. **Disclose.** For any individual event, the operator can generate an **Audited-Action Disclosure proof**: a zero-knowledge proof that an event with a claimed operation, collection, and time range exists in the committed log — without revealing the document, the database, the exact timestamp, or any other record.
+5. **Verify.** Anyone — an auditor, a regulator, a counterparty with zero data access — verifies the claim against the on-chain root via a **read-only Soroban simulation** from their own machine: no transaction, no fees, no keys, and no trust in the operator's software. Independent attesters separately guarantee that no writes were omitted.
+
+The trust model decomposes cleanly: **on-chain root anchoring** makes history tamper-evident, **K-of-N independent attesters** guarantee completeness (no event exists that isn't in the log), and **ZK disclosure proofs** answer specific questions about private events (∃-statements) without a data dump. Each mechanism does the one job the others can't.
 
 ### ZK implementation: circuit, prover, and on-chain verifier
 
 The zero-knowledge proof system is the core of the audit log's integrity guarantee. This section explains the three components: the Circom circuit, the off-chain prover, and the on-chain Soroban verifier.
 
-#### 1. The circuit (Circom + Poseidon)
+#### 1. The circuits (Circom + Poseidon)
 
-**File:** [`zk-spike/circuits/merkle_inclusion.circom`](zk-spike/circuits/merkle_inclusion.circom)
+**Files:** [`zk-spike/circuits/audited_action.circom`](zk-spike/circuits/audited_action.circom) (disclosure — the flagship), [`zk-spike/circuits/merkle_inclusion.circom`](zk-spike/circuits/merkle_inclusion.circom) (plain inclusion)
 
-The circuit proves **Merkle inclusion**: that a specific leaf (an audit entry) is part of a Merkle tree whose root is publicly committed on-chain. The tree uses **Poseidon(2)** — a ZK-friendly hash with `t=3` (2 inputs + 1 capacity field) — matching `light-poseidon`'s `new_circom(2)` on the Rust side and Circom's `Poseidon(2)` on the circuit side. Poseidon is the hash function Stellar added as a **native host function in Protocol 25**, making it the natural choice for ZK proofs that verify on Stellar.
+Both circuits work over a 20-level Poseidon Merkle tree (up to 2²⁰ ≈ 1M entries per epoch) using **Poseidon(2)** — a ZK-friendly hash with `t=3` — matching `light-poseidon`'s `new_circom(2)` on the Rust side and Circom's `Poseidon(2)` on the circuit side. Poseidon is the hash function Stellar added as a **native host function in Protocol 25**, making it the natural choice for ZK proofs that verify on Stellar.
+
+**`audited_action.circom` — Audited-Action Disclosure.** The statement a plain Merkle proof structurally cannot make: it opens the leaf's **keyed Poseidon vector commitment** in-circuit (`leaf = Poseidon(7)(key, opH, dbH, collH, ts, docH, salt)`, derived in [`zk-audit/src/commitment.rs`](zk-audit/src/commitment.rs)) and proves predicates over the still-private field values:
 
 | Input | Visibility | Description |
 |---|---|---|
 | `root` | **Public** | The Merkle tree root (committed on-chain via Soroban) |
-| `leaf` | Private | The audit entry hash being proven included |
-| `pathElements[20]` | Private | Sibling hashes at each level of the tree |
-| `pathIndices[20]` | Private | Direction bits (0 = left child, 1 = right), constrained to {0, 1} |
+| `leaf` | **Public** | The event's commitment (binds the proof to one entry) |
+| `opPred`, `collPred` | **Public** | Claimed operation / collection (field-encoded) |
+| `tsMin`, `tsMax` | **Public** | Claimed time range (Unix seconds) |
+| `checkOp`, `checkColl`, `checkTs` | **Public** | Which predicate checks are enabled |
+| `key`, `opH`, `dbH`, `collH`, `ts`, `docH`, `salt` | Private | The commitment opening — the event's actual fields |
+| `pathElements[20]`, `pathIndices[20]` | Private | Merkle authentication path |
 
-The tree is 20 levels deep, supporting up to 2²⁰ ≈ 1M entries per epoch. The circuit reconstructs the root from the leaf and authentication path, and constrains the output to equal the public `root`. If the proof verifies, a judge knows the leaf is in the committed tree — without learning which leaf, or anything about any other entry.
+A valid proof shows *"an event with this operation, in this collection, within this time range, exists in the anchored log"* — revealing nothing else: not the document, the database, the exact timestamp, or any sibling entry. Every predicate parameter is a public signal folded into the pairing check, so a proof cannot be replayed against a different claim.
+
+**`merkle_inclusion.circom` — plain inclusion.** Proves a specific leaf is part of the committed tree (public signals `[root, leaf]`, private authentication path). Used for basic inclusion checks where the leaf hash itself is the claim.
 
 #### 2. The prover (off-chain: ark-circom + ark-groth16)
 
-**Files:** [`zk-audit/src/prover.rs`](zk-audit/src/prover.rs), [`zk-audit/src/merkle.rs`](zk-audit/src/merkle.rs), [`zk-audit/src/bin/ceremony.rs`](zk-audit/src/bin/ceremony.rs)
+**Files:** [`zk-audit/src/disclosure.rs`](zk-audit/src/disclosure.rs), [`zk-audit/src/prover.rs`](zk-audit/src/prover.rs), [`zk-audit/src/commitment.rs`](zk-audit/src/commitment.rs), [`zk-audit/src/merkle.rs`](zk-audit/src/merkle.rs), [`zk-audit/src/bin/ceremony.rs`](zk-audit/src/bin/ceremony.rs)
 
 Proof generation runs off-chain in Rust:
 
-1. **Witness computation** — `ark-circom` loads the compiled circuit (`merkle_inclusion.r1cs` + `.wasm`) and computes the witness via Wasmer, given the leaf and its authentication path.
-2. **Groth16 proof** — `ark-groth16` on the BN254 curve generates a zero-knowledge proof that the witness satisfies the circuit's constraints. The proof is a triple of elliptic-curve points (A ∈ G1, B ∈ G2, C ∈ G1).
-3. **Trusted setup** — The `zk-audit-ceremony` binary runs the Powers of Tau ceremony once to produce a stable proving key (`.pkey`) and verifying key (`.vkey`) in arkworks binary format. The proving key is reused for every proof; the verifying key is deployed with the contract.
+1. **Witness computation** — `ark-circom` loads the compiled circuit (`.r1cs` + `.wasm`) and computes the witness via Wasmer, given the commitment opening, predicate parameters, and authentication path.
+2. **Groth16 proof** — `ark-groth16` on the BN254 curve generates a zero-knowledge proof that the witness satisfies the circuit's constraints. The proof is a triple of elliptic-curve points (A ∈ G1, B ∈ G2, C ∈ G1). A false claim (wrong operation, out-of-range timestamp) fails constraint satisfaction and cannot be proven.
+3. **Trusted setup** — The `zk-audit-ceremony` binary runs the Powers of Tau ceremony once per circuit to produce a stable proving key (`.pkey`) and verifying key (`.vkey`) in arkworks binary format. The proving key is reused for every proof; the verifying keys are pinned on the contract (`initialize` for inclusion, `register_disclosure_vk` for disclosure). *Honest caveat: Groth16 requires a per-circuit trusted setup; a production deployment should run a multi-party ceremony (or migrate to a universal-setup system) so no single party ever holds the toxic waste.*
 
 ```
-audit entry → Poseidon hash → leaf in Merkle tree → authentication path
+audit event → keyed Poseidon vector commitment (leaf) → Merkle tree → auth path
+  + predicate claim (op / collection / time range)
   → Circom witness → Groth16 proof (A, B, C on BN254)
 ```
 
 #### 3. The on-chain verifier (Soroban + BN254 host functions)
 
-**File:** [`zk-audit/soroban-contract/src/lib.rs`](zk-audit/soroban-contract/src/lib.rs) — function `verify_inclusion`
+**File:** [`zk-audit/soroban-contract/src/lib.rs`](zk-audit/soroban-contract/src/lib.rs) — functions `verify_disclosure` and `verify_inclusion`
 
 The Soroban contract verifies Groth16 proofs **on-chain** using Stellar's native BN254 host functions, introduced in **Protocol 25 ("X-Ray")** and expanded in **Protocol 26 ("Yardstick")**. These host functions move the heavy elliptic-curve math into the protocol layer, making on-chain proof verification affordable enough to run for every batch.
 
@@ -253,20 +263,25 @@ The verification algorithm:
 
 The contract uses these Soroban BN254 host functions: `g1_mul`, `g1_add`, `pairing_check`, and `Fr` field arithmetic — all from Protocol 25/26. This is what makes on-chain Groth16 verification cost-effective on Stellar.
 
+Both verification functions are **permissionless** (no `require_auth`), and the app's Auditor role calls them via a **read-only `simulateTransaction`** — the pairing check runs inside the Soroban runtime, but the verifier needs no funded account, pays no fee, and submits nothing to the ledger. Anyone with the RPC URL and contract ID gets a cryptographic verdict without trusting the operator at all.
+
 #### What is zero-knowledge about this
 
-The proof reveals **nothing** about the private inputs. An auditor verifying the proof on-chain learns only:
+A disclosure proof reveals **only its public claim** — the predicate parameters (operation, collection, time range) and the yes/no verdict. The verifier learns:
 
-- A specific leaf exists in the committed Merkle tree (inclusion)
+- An event satisfying the claimed predicates exists in the committed Merkle tree
 - The root matches the on-chain commitment (integrity)
 
 They do **not** learn:
 
-- Which audit entry the leaf corresponds to
-- Any sibling hashes or tree structure
-- Any document content, field names, or data from the database
+- The document content, field names, or any data from the database
+- The database name or the event's exact timestamp
+- The commitment key or salt (so leaves resist offline guessing attacks)
+- Any sibling hashes, tree structure, or anything about any other entry
 
-The database content never leaves the operator's infrastructure. Only a 32-byte hash (the root) and a zero-knowledge proof go on-chain. This is the core ZK value: prove the audit log is complete and correct, without revealing the data being audited.
+The database content never leaves the operator's infrastructure. Only a 32-byte root and a ~200-byte proof cross the trust boundary.
+
+**Being precise about what each mechanism guarantees:** disclosure proofs are *existential* — they show a matching event exists, never that "nothing bad exists" or "this is everything." Exhaustiveness is exactly what the [oplog completeness protocol](#roles-publisher-vs-attester) provides: independent K-of-N attesters, reading their own replica, sign the oplog hash on-chain. The composition — attesters for completeness (∀), ZK for private disclosure (∃), the chain for integrity — is what makes the system trustworthy end to end; no single primitive is asked to do a job it can't.
 
 ### On-chain contract reference
 
@@ -282,13 +297,19 @@ You can inspect committed roots and transactions on [stellar.expert](https://ste
 |---|---|
 | `commit_root(root, metadata)` | Anchor a Merkle root on-chain (admin-gated) |
 | `commit_root_with_oplog(root, oplog_root, metadata)` | Anchor root + oplog completeness hash |
-| `verify_inclusion(root, leaf, proof)` | **Verify a Groth16 proof on-chain** via BN254 host functions, against the verifying key pinned at `initialize` |
+| `verify_disclosure(root, leaf, op_pred, coll_pred, ts_min, ts_max, checks…, proof)` | **Verify an Audited-Action Disclosure proof on-chain** — predicates over a still-private event, against the VK pinned by `register_disclosure_vk` |
+| `verify_and_record_disclosure(verifier, …same args…)` | Verify **and record**: on success, appends a verifier-attributed `DisclosureRecord` (who verified, the full claim, ledger time) to an append-only log and emits an event. Signed by the verifier's own account — the tx hash is citable evidence that *that party* checked *that claim* |
+| `get_disclosure_records(limit)` | Enumerate recorded verifications (most recent first) — anyone can see what has been proven, by whom, and when |
+| `verify_inclusion(root, leaf, proof)` | Verify a plain Groth16 inclusion proof, against the verifying key pinned at `initialize` |
+| `register_disclosure_vk(vk)` | Pin the disclosure circuit's VK (admin, **write-once**) |
 | `get_current_root()` | Read the latest committed root |
 | `attest_oplog(epoch, oplog_root, signature)` | Independent attester signs the oplog hash |
 
-The verifying key is **not** passed to `verify_inclusion` — it's set once at `initialize(admin, vk)` and can never be changed afterwards, so a compromised admin can't retroactively swap in a different VK. The public signals are `[root, leaf]`: binding `leaf` (not just `root`) is what makes the proof mean "this specific audit entry is included" rather than merely "some leaf hashes up to this root".
+**Free verification vs. recorded verification.** `verify_disclosure` is typically called via a read-only `simulateTransaction` — free, private, no account needed — and answers "is this claim true?" for *you, now*. `verify_and_record_disclosure` is a signed transaction from the **auditor's own funded account** and answers a different need: a permanent, third-party-attributable public record that the verification happened, consumable later in audit reports, disputes, or compliance filings (the Auditor role exposes both: "Verify On-Chain" and "Verify & Record"). Only successful verifications are recorded — the log is a registry of proven claims, mirroring the `attest_oplog` pattern where independent parties pay a small fee precisely because the durable record *is* the product.
 
-To independently verify a proof: obtain a Groth16 proof from the prover (see the [example flow](#example-end-to-end-flow) below), call `verify_inclusion` on the contract with the committed root and the leaf hash, and the BN254 pairing check runs on-chain against the contract's pinned verifying key. The full contract source is in [`zk-audit/soroban-contract/`](zk-audit/soroban-contract/), with interface documentation in [`INTERFACE.md`](zk-audit/soroban-contract/INTERFACE.md).
+Verifying keys are **never** passed by the caller — they're pinned once (`initialize` for inclusion, `register_disclosure_vk` for disclosure) and can never be changed afterwards, so a compromised admin can't retroactively swap in a VK for a weaker circuit. All predicate parameters are public signals folded into the pairing check: a valid proof is bound to its exact claim.
+
+To independently verify a proof: obtain a proof bundle from the operator (the **Disclose** button in the Change Feed exports one, in both Dev Mode and the production surface), then paste it into the Auditor role's **Verify a proof bundle** box — the app verifies it via a read-only Soroban simulation from your own machine. Or do it yourself with any Soroban RPC client: call `verify_disclosure` with the bundle's arguments. The full contract source is in [`zk-audit/soroban-contract/`](zk-audit/soroban-contract/), with interface documentation in [`INTERFACE.md`](zk-audit/soroban-contract/INTERFACE.md).
 
 > **Dev Mode deploys your own contract.** When you run Dev Mode setup, the wizard deploys a fresh per-user contract on testnet (your publisher key becomes admin). The contract ID above is the shared default; your Dev Mode instance will have its own. Check **Advanced → Your contract** in the Audit tab for the active ID.
 
@@ -320,6 +341,13 @@ The Audit tab offers two modes:
 
 **New to this?** Start with **Dev Mode** to watch the whole system work end to end. (Production Mode is not yet available in the UI.)
 
+**Roles inside Dev Mode.** The Dev tab shows one of two surfaces, picked by the **Role** switch in the header:
+
+- **Operator** — the stack dashboard: start/stop the Docker stack, watch the change feed, seal batches, commit roots on-chain, and export proof bundles.
+- **Auditor** — the independent verification surface: rebuild the log from chain + IPFS, verify proof bundles, and record verifications on-chain. No MongoDB access needed (see [In-app Auditor role](#in-app-auditor-role-no-mongodb-required)).
+
+The default is inferred from the active connection's privileges: a write-capable credential gets the Operator surface, a read-only credential (like the dev `auditor` user) gets the Auditor surface. It's a UX default, not a permission gate — the switch overrides it either way, and MongoDB enforces the real privileges server-side.
+
 ### Dev Mode (full stack locally)
 
 Runs the **complete audit system** on your machine via Docker — publisher, independent attester, and reader daemons — with K-of-N attestation, oplog completeness verification, and on-chain commitments to Stellar testnet.
@@ -334,7 +362,7 @@ Runs the **complete audit system** on your machine via Docker — publisher, ind
 
 1. Open the app, go to the Audit tab, and select **Dev Mode**.
 
-2. Click **Set up**. This runs the setup wizard for you — no terminal required. It generates the two independent Stellar keypairs (publisher + attester), funds them on testnet via Friendbot, deploys a fresh audit contract so the publisher becomes its admin, generates the attester's ed25519 oplog key, authorizes the attester on the contract, and writes `attester.key` + `.env.audit`. Enter your Pinata API key/secret in the form to enable IPFS publishing (optional). Your secret keys are stored locally and are never displayed.
+2. Click **Set up**. This runs the setup wizard for you — no terminal required. It generates the two independent Stellar keypairs (publisher + attester), funds them on testnet via Friendbot, deploys a fresh audit contract so the publisher becomes its admin, pins both verifying keys on-chain (the inclusion VK at `initialize`, the disclosure VK via `register_disclosure_vk` — so disclosure proofs verify on this contract), generates the attester's ed25519 oplog key, authorizes the attester on the contract, and writes `attester.key` + `.env.audit`. Enter your Pinata API key/secret in the form to enable IPFS publishing (optional). Your secret keys are stored locally and are never displayed.
 
    > **No host `stellar` CLI or Rust toolchain needed for Dev Mode.** The setup runs inside the audit Docker image, which bundles the `stellar` CLI and a prebuilt contract WASM. The wizard deploys the contract and authorizes the attester from there, so deploying a per-user contract is the default — your publisher key owns it, which is required for committing roots and authorizing the attester.
    >
@@ -343,7 +371,7 @@ Runs the **complete audit system** on your machine via Docker — publisher, ind
 3. Click **Start Stack**. This brings up the 3-node MongoDB replica set and the publisher, attester, and reader containers using the `.env.audit` and `attester.key` that setup produced.
 
 4. Write data to the audited MongoDB endpoint (`mongodb://root:nosqlbuddy-dev-root-pw@127.0.0.1:27020/?directConnection=true&authSource=admin`) to populate the audit log. The dev-mode replica set runs with auth enabled; `root`/`nosqlbuddy-dev-root-pw` are fixed, non-secret dev-only credentials (see [Security -> Auditor access model](#auditor-access-model-dev-mode) for why, and what a real auditor's credentials look like). The live view shows:
-   - **Event feed** — real-time stream of captured inserts, updates, and deletes
+   - **Event feed** — real-time stream of captured inserts, updates, and deletes. Each event has **Prove** (Groth16 inclusion proof) and **Disclose** (an Audited-Action Disclosure proof: pick which predicates — operation, collection, UTC day — become the public claim; everything else stays private). Both export a copyable bundle the auditor verifies independently.
    - **Epoch progress** — how many events are in the current batch (fills up to 100 by default)
    - **On-chain root** — the last Merkle root committed to Stellar
    - **Multi-party sign-off** (K-of-N) — how many independent attesters have signed the batch
@@ -701,6 +729,7 @@ All endpoints are on `http://localhost:9173`. Both modes share common endpoints;
 | `GET` | `/events` | List all recorded audit events |
 | `GET` | `/root` | Current Merkle root (hex) |
 | `POST` | `/proof/:index` | Generate Groth16 inclusion proof (requires `--circuit-dir`) |
+| `POST` | `/disclosure/:index` | Generate an Audited-Action Disclosure proof for a v3 event. Body: `{checkOp, checkColl, checkTs, tsMin?, tsMax?}` (time range defaults to the event's UTC day). Requires `--circuit-dir` with the `audited_action` ceremony artifacts, the leaf key, and event persistence |
 
 **Publisher mode:**
 
@@ -769,6 +798,12 @@ curl http://localhost:9173/root
 
 # 8. (Optional) Generate a Groth16 inclusion proof
 curl -X POST http://localhost:9173/proof/0
+
+# 9. (Optional) Generate an Audited-Action Disclosure proof
+#    (a ZK claim over the still-private event: operation + collection + UTC day)
+curl -X POST http://localhost:9173/disclosure/0 \
+  -H 'content-type: application/json' \
+  -d '{"checkOp": true, "checkColl": true, "checkTs": true}'
 ```
 
 ## Deploying the audit service to a server
@@ -835,9 +870,9 @@ Both use the **published Docker image** (`ghcr.io/ronnakamoto/nosqlbuddy-audit`,
    docker compose --env-file .env.audit --profile attester up -d
    ```
 
-### In-app Auditor Mode (no MongoDB required)
+### In-app Auditor role (no MongoDB required)
 
-NoSQLBuddy includes a built-in **Auditor Mode** that lets an independent auditor verify the audit trail **without any MongoDB connection**. The auditor only needs:
+NoSQLBuddy includes a built-in **Auditor role** (the Role switch in the Audit tab) that lets an independent auditor verify the audit trail **without any MongoDB connection**. The auditor only needs:
 
 - The **Soroban contract ID** (to query on-chain roots)
 - The **Stellar RPC URL** (to reach the network)
@@ -850,8 +885,8 @@ This is useful when:
 - You need to verify historical commitments long after the oplog has rolled
 
 **How it works:**
-1. Open NoSQLBuddy and go to **Audit Log → Auditor** tab.
-2. Enter the contract ID, RPC URL, and age identity (or click **Load Handoff Material** if running on the same machine as the operator).
+1. Open NoSQLBuddy, go to the **Audit Log** tab, and switch the **Role** control to **Auditor**. If the active MongoDB connection is read-only, the auditor surface is selected automatically — the role is inferred from the connection's actual privileges (`connectionStatus {showPrivileges: true}`), and the switch always lets you override it. With no connection (or when privileges can't be classified) the Operator surface is the default; auditor work itself never requires a connection.
+2. Enter the contract ID, RPC URL, and age identity. When the app shares a machine with the operator's Dev Mode setup, these are pre-filled automatically from the handoff material (use **Load operator handoff** to re-fetch after a fresh setup).
 3. Click **Rebuild from Chain**. The app will:
    - Query the on-chain root history from Stellar
    - Extract IPFS CIDs from the metadata of each committed root
@@ -862,7 +897,7 @@ This is useful when:
 
 The reconstructed tree lives in `<app_data_dir>/audit/auditor-rebuild/` — completely isolated from the operator's own audit log, so running this on the same machine never collides.
 
-**Handoff material:** When Dev Mode is active, the **Load Handoff Material** button fetches the ready-made values from `.env.audit` (contract ID, RPC URL, age keys, leaf key, and the auditor's MongoDB connection string). In a real deployment, these are exchanged via a secure channel (Signal, 1Password, PGP) rather than copy-paste.
+**Handoff material:** When Dev Mode setup has run on the same machine, the auditor surface auto-loads the ready-made values from `.env.audit` on open (contract ID, RPC URL, age keys, leaf key, and the auditor's MongoDB connection string); **Load operator handoff** re-fetches them on demand. In a real deployment, these are exchanged via a secure channel (Signal, 1Password, PGP) rather than copy-paste.
 
 **Security note:** The auditor's age secret key is sensitive material. The UI shows it only behind an explicit **Reveal** button. Never share age secret keys over unencrypted channels.
 
@@ -915,6 +950,8 @@ In a real audit, the auditor/regulator does not get free rein over the operator'
 - **`root`** (full admin) is the operator's credential — used by the publisher and the demo seeder.
 - **`auditor`** is a dedicated, minimal-privilege credential: it can `find` on `local.oplog.rs` (enough to independently recompute the oplog Merkle hash) and run `replSetGetStatus` (replication topology) — nothing else. It cannot read `shopkeeper.orders` or any other application data, and cannot write anything.
 - `mongo3` (the independent member) is configured `priority: 0, hidden: true` — it can never become primary and is invisible to normal driver topology discovery / default read preference, so it never serves app traffic. It still counts as a full voting member (`votes: 1`), which matters: the oplog-completeness trust model relies on `w:"majority"` forcing replication to this member before a write acknowledges, so it must count toward the majority.
+
+The app's Audit tab mirrors this boundary: connect with the `auditor` credential and the Dev Mode **Role** switch auto-selects the Auditor surface (verification tools), while a write-capable credential like `root` gets the Operator surface (stack control, seal, commit).
 
 Both users are created once, automatically, by `scripts/rs-init-audit.js` (run via a custom entrypoint, `scripts/mongo-entrypoint.sh`, against the primary's own loopback while MongoDB's "localhost exception" is open — i.e. before any user exists anywhere in the deployment). The credentials are fixed, non-secret, and documented directly in that script — appropriate for an isolated local Docker network used purely to demonstrate the concept. A real deployment must generate and rotate its own credentials out of band, exactly like the Stellar/age keys the setup wizard generates fresh per run.
 
