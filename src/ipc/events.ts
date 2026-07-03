@@ -29,6 +29,29 @@ export async function onConnectionClosed(
   );
 }
 
+export interface ConnectionProgressPayload {
+  /** Stable phase id: `resolve`, `authenticate`, `metadata`, `discover`. */
+  phase: string;
+  /** Human-readable label for the stepper. */
+  label: string;
+  /** `"active"` when the phase begins, `"done"` when it completes. */
+  status: "active" | "done";
+}
+
+/**
+ * Subscribe to `connection-progress` events emitted during `open_connection`.
+ * Lets the UI show a stepper instead of a blank workspace while the driver
+ * resolves the URI, performs the TLS + SCRAM handshake, reads deployment
+ * metadata, and lists databases. Atlas connections can take several seconds.
+ */
+export async function onConnectionProgress(
+  handler: (payload: ConnectionProgressPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<ConnectionProgressPayload>("connection-progress", (event) =>
+    handler(event.payload),
+  );
+}
+
 export async function onMenuAction(
   handler: (action: string) => void,
 ): Promise<UnlistenFn> {

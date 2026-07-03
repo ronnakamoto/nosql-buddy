@@ -11,7 +11,7 @@ import commands, {
   type ProfileSummary,
   type SaveProfileRequest,
 } from "./ipc/commands";
-import { onMenuAction } from "./ipc/events";
+import { onMenuAction, onConnectionProgress } from "./ipc/events";
 import { ConnectionForm } from "./components/ConnectionForm";
 import { CommandPalette, type CommandPaletteItem } from "./components/CommandPalette";
 import { QueryTab } from "./features/QueryTab";
@@ -33,6 +33,7 @@ import { ShortcutsMap } from "./components/ShortcutsMap";
 import { ShortcutButton } from "./components/ShortcutButton";
 import { AboutScreen } from "./components/AboutScreen";
 import { ConnectionOverview } from "./components/ConnectionOverview";
+import { ConnectingView } from "./components/ConnectingView";
 import logoUrl from "./assets/logo.png";
 import {
   Search,
@@ -411,6 +412,8 @@ function ConnectionSwitcher({
   active,
   profiles,
   error,
+  connecting,
+  connectingName,
   open,
   onOpenChange,
   onConnect,
@@ -423,6 +426,8 @@ function ConnectionSwitcher({
   active: ActiveConnection | null;
   profiles: ProfileSummary[];
   error: string | null;
+  connecting: boolean;
+  connectingName: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onConnect: (p: ProfileSummary) => void;
@@ -453,7 +458,13 @@ function ConnectionSwitcher({
     };
   }, [open, onOpenChange]);
 
-  const status: "connected" | "error" | "idle" = active ? "connected" : error ? "error" : "idle";
+  const status: "connected" | "connecting" | "error" | "idle" = connecting
+    ? "connecting"
+    : active
+      ? "connected"
+      : error
+        ? "error"
+        : "idle";
 
   const q = search.trim().toLowerCase();
   const filtered = profiles.filter(
@@ -480,13 +491,17 @@ function ConnectionSwitcher({
       >
         <span className={`conn-status conn-status--${status}`} aria-hidden="true" />
         <span className="conn-switcher__text">
-          <span className="conn-switcher__name">{active ? active.handle.name : "No connection"}</span>
+          <span className="conn-switcher__name">
+            {connecting ? (connectingName ?? "Connecting…") : active ? active.handle.name : "No connection"}
+          </span>
           <span className="conn-switcher__meta">
-            {active
-              ? (active.handle.serverInfo?.topology ?? "connected")
-              : error
-                ? "Connection error"
-                : `${profiles.length} saved connection${profiles.length === 1 ? "" : "s"}`}
+            {connecting
+              ? "Establishing connection…"
+              : active
+                ? (active.handle.serverInfo?.topology ?? "connected")
+                : error
+                  ? "Connection error"
+                  : `${profiles.length} saved connection${profiles.length === 1 ? "" : "s"}`}
           </span>
         </span>
         <ChevronsUpDown size={15} className="conn-switcher__chevron" aria-hidden="true" />
@@ -536,12 +551,13 @@ function ConnectionSwitcher({
                         return (
                           <div
                             key={p.id}
-                            className={`conn-row ${isActive ? "is-active" : ""}`}
+                            className={`conn-row ${isActive ? "is-active" : ""} ${connecting && !isActive ? "is-disabled" : ""}`}
                             role="button"
-                            tabIndex={0}
-                            onClick={() => { if (!isActive) onConnect(p); onOpenChange(false); }}
+                            tabIndex={connecting && !isActive ? -1 : 0}
+                            aria-disabled={connecting && !isActive}
+                            onClick={() => { if (!isActive && !connecting) onConnect(p); onOpenChange(false); }}
                             onKeyDown={(e) => {
-                              if (e.key === "Enter") { if (!isActive) onConnect(p); onOpenChange(false); }
+                              if (e.key === "Enter") { if (!isActive && !connecting) onConnect(p); onOpenChange(false); }
                             }}
                             title={p.maskedUri}
                           >
@@ -558,7 +574,7 @@ function ConnectionSwitcher({
                             {isActive && <span className="conn-row__badge">Connected</span>}
                             <ConnectionRowMenu
                               isActive={isActive}
-                              onConnect={() => { onConnect(p); onOpenChange(false); }}
+                              onConnect={() => { if (!connecting) { onConnect(p); onOpenChange(false); } }}
                               onDisconnect={() => { onDisconnect(); onOpenChange(false); }}
                               onEdit={() => { onEdit(p); onOpenChange(false); }}
                               onDuplicate={() => { onDuplicate(p); onOpenChange(false); }}
@@ -589,6 +605,16 @@ export default function App() {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
   const [active, setActive] = useState<ActiveConnection | null>(null);
+  // Tracks an in-flight connection attempt so the workspace can show a
+  // progress stepper instead of a blank screen while the driver resolves
+  // the URI, authenticates, and discovers databases. Cleared on success
+  // or error. `phaseStatus` is updated live from `connection-progress`
+  // events; the `collections` phase is driven locally by the
+  // `listCollections` loop after the handle returns.
+  const [connecting, setConnecting] = useState<{
+    profile: ProfileSummary;
+    phaseStatus: Record<string, "active" | "done">;
+  } | null>(null);
   const [treeFilter, setTreeFilter] = useState("");
   const [connectionFormOpen, setConnectionFormOpen] = useState(false);
   const [connFormInitial, setConnFormInitial] = useState<Partial<SaveProfileRequest> | undefined>(undefined);
@@ -729,8 +755,30 @@ export default function App() {
 
   const openProfile = useCallback(async (profile: ProfileSummary) => {
     setError(null);
+    setConnecting({ profile, phaseStatus: {} });
+    // Listen for backend progress ticks and fold them into the stepper state.
+    const unlisten = await onConnectionProgress((p) => {
+      setConnecting((prev) =>
+        prev
+          ? { ...prev, phaseStatus: { ...prev.phaseStatus, [p.phase]: p.status } }
+          : prev,
+      );
+    });
     try {
       const handle = await commands.openConnection(profile.id);
+      // Mark the backend phases as done in case a fast local server skipped
+      // the final "done" tick, then signal the frontend-driven collections
+      // phase as active before the listCollections loop begins.
+      setConnecting({
+        profile,
+        phaseStatus: {
+          resolve: "done",
+          authenticate: "done",
+          metadata: "done",
+          discover: "done",
+          collections: "active",
+        },
+      });
       // Fetch collection list for each database so the tree is populated.
       const collections: Record<string, CollectionSummary[]> = {};
       for (const db of handle.databases) {
@@ -747,6 +795,9 @@ export default function App() {
       toasts.push(`Connected to ${profile.name}`, "success");
     } catch (e) {
       toasts.push(describeError(e), "error");
+    } finally {
+      unlisten();
+      setConnecting(null);
     }
   }, [toasts]);
 
@@ -1265,6 +1316,8 @@ export default function App() {
           active={active}
           profiles={profiles}
           error={error}
+          connecting={!!connecting}
+          connectingName={connecting?.profile.name ?? null}
           open={connSwitcherOpen}
           onOpenChange={setConnSwitcherOpen}
           onConnect={switchConnection}
@@ -1462,6 +1515,12 @@ export default function App() {
               onImported={refreshConnection}
             />
           </ErrorBoundary>
+        ) : connecting ? (
+          <ConnectingView
+            profileName={connecting.profile.name}
+            maskedUri={connecting.profile.maskedUri}
+            phaseStatus={connecting.phaseStatus}
+          />
         ) : active ? (
           <ConnectionOverview
             active={active}

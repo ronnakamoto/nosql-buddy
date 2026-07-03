@@ -10,7 +10,9 @@ use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
-use crate::events::{emit_connection_closed, emit_connection_opened};
+use crate::events::{
+    emit_connection_closed, emit_connection_opened, emit_connection_progress,
+};
 use crate::mongo::client_registry::{build_client_with_auth, describe_connection, ClientEntry};
 use crate::mongo::types::{ConnectionHandle, ConnectionProfile, ProfileSummary};
 use crate::state::AppState;
@@ -218,6 +220,16 @@ pub async fn open_connection(
             profile.secret = Some(override_secret);
         }
     }
+    // Stream progress to the UI so the user sees what's happening during the
+    // (potentially multi-second) connect + auth + discovery sequence. Atlas
+    // SRV resolution + TLS + SCRAM handshake alone can take 1–3s; without
+    // these ticks the workspace stays blank and looks frozen.
+    emit_connection_progress(
+        &app,
+        "resolve",
+        "Resolving connection string",
+        "active",
+    );
     let client = build_client_with_auth(
         &profile.uri,
         "NoSQLBuddy",
@@ -226,9 +238,21 @@ pub async fn open_connection(
         profile.tls.as_ref(),
     )
     .await?;
+    emit_connection_progress(
+        &app,
+        "resolve",
+        "Resolving connection string",
+        "done",
+    );
     // Confirm we can actually reach and authenticate with the server before
     // publishing the handle. listDatabases requires authentication (unlike
     // ping/connectionStatus which can pass without auth on some proxies).
+    emit_connection_progress(
+        &app,
+        "authenticate",
+        "Authenticating with the server",
+        "active",
+    );
     tokio::time::timeout(
         std::time::Duration::from_secs(8),
         client
@@ -237,10 +261,28 @@ pub async fn open_connection(
     )
     .await
     .map_err(|_| AppError::Timeout("listDatabases".into()))??;
+    emit_connection_progress(
+        &app,
+        "authenticate",
+        "Authenticating with the server",
+        "done",
+    );
     let connection_id = Uuid::new_v4().to_string();
     // Derive a stable per-deployment identity so audit events are segmented
     // by the deployment they originate from. Resolved once at connect time.
+    emit_connection_progress(
+        &app,
+        "metadata",
+        "Reading deployment metadata",
+        "active",
+    );
     let deployment_id = crate::audit::change_stream::fetch_deployment_id(&client).await;
+    emit_connection_progress(
+        &app,
+        "metadata",
+        "Reading deployment metadata",
+        "done",
+    );
     let entry = ClientEntry {
         client: client.clone(),
         profile_id: profile.id.clone(),
@@ -270,7 +312,19 @@ pub async fn open_connection(
             )
             .await;
     }
+    emit_connection_progress(
+        &app,
+        "discover",
+        "Discovering databases and statistics",
+        "active",
+    );
     let handle = describe_connection(&client, &connection_id, &profile.id, &profile.name).await?;
+    emit_connection_progress(
+        &app,
+        "discover",
+        "Discovering databases and statistics",
+        "done",
+    );
     // Drop the secret from local memory now that the client is up. The
     // driver keeps a pool internally; we don't need the string anymore.
     drop(profile);

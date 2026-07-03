@@ -26,6 +26,46 @@ pub struct ConnectionClosedPayload {
     pub at: String,
 }
 
+/// Payload for the `connection-progress` event: a single phase update emitted
+/// during `open_connection` so the UI can show a stepper instead of a blank
+/// screen while the driver resolves the URI, performs the TLS + SCRAM handshake,
+/// reads deployment metadata, and lists databases. Atlas connections routinely
+/// take 1–3s (sometimes longer) across these phases; without progress the user
+/// sees nothing and assumes the app is frozen.
+///
+/// `status` is `"active"` when a phase begins and `"done"` when it completes.
+/// The frontend treats receiving a later phase as implicit completion of all
+/// earlier ones, so a missing `"done"` (e.g. on a fast local server) never
+/// leaves the stepper stuck.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionProgressPayload {
+    /// Stable phase id: `resolve`, `authenticate`, `metadata`, `discover`.
+    pub phase: String,
+    /// Human-readable label for the stepper.
+    pub label: String,
+    /// `"active"` when the phase begins, `"done"` when it completes.
+    pub status: String,
+}
+
+/// Emit a single connection-progress phase update. Best-effort: emission
+/// failures are ignored so they never abort the connection attempt.
+pub fn emit_connection_progress(
+    app: &AppHandle,
+    phase: &str,
+    label: &str,
+    status: &str,
+) {
+    let _ = app.emit(
+        "connection-progress",
+        ConnectionProgressPayload {
+            phase: phase.to_string(),
+            label: label.to_string(),
+            status: status.to_string(),
+        },
+    );
+}
+
 /// Payload for the `audit-setup-progress` event: one (secret-redacted) line of
 /// output from the audit setup wizard, streamed live to the UI so users can see
 /// progress (key generation, funding, contract deploy, attester authorization).

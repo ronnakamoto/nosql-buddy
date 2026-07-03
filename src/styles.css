@@ -366,6 +366,18 @@ body,
 }
 .conn-status--error { background: var(--danger-500); }
 .conn-status--idle { background: var(--ink-faint); }
+.conn-status--connecting {
+  background: var(--accent-500);
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--accent-500) 25%, transparent);
+  animation: conn-status-pulse 1.4s ease-in-out infinite;
+}
+@keyframes conn-status-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .conn-status--connecting { animation: none; }
+}
 
 .conn-switcher__text {
   display: flex;
@@ -525,6 +537,10 @@ body,
 .conn-row:hover,
 .conn-row:focus-within { background: var(--surface-2); }
 .conn-row.is-active { background: var(--selection); }
+.conn-row.is-disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
 
 .conn-row__icon {
   color: var(--ink-muted);
@@ -1321,6 +1337,154 @@ body,
   margin: 0 0 var(--space-4);
   max-width: 48ch;
   line-height: var(--line-height-normal);
+}
+
+/* ─── Connecting View (in-flight connection stepper) ─────────────── */
+
+.connecting {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  padding: var(--space-8);
+  background: var(--bg);
+  overflow: auto;
+}
+.connecting__card {
+  width: 100%;
+  max-width: 460px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-xs);
+  overflow: hidden;
+}
+.connecting__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-5) var(--space-6);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.connecting__server-id {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.connecting__server-icon {
+  color: var(--ink-muted);
+  flex-shrink: 0;
+}
+.connecting__server-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.connecting__title {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.connecting__meta {
+  font-size: var(--font-size-xs);
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Vertical stepper. A hairline connector runs through the markers; each
+   step hides its own segment of the line once completed so the line reads
+   as "in progress up to here". */
+.connecting__steps {
+  list-style: none;
+  margin: 0;
+  padding: var(--space-5) var(--space-6) var(--space-6);
+  display: flex;
+  flex-direction: column;
+}
+.connecting__step {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+}
+.connecting__step::before {
+  content: "";
+  position: absolute;
+  left: 11px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border);
+}
+.connecting__step:first-child::before { top: 50%; }
+.connecting__step:last-child::before { bottom: 50%; }
+.connecting__step--done::before { background: var(--border); }
+
+.connecting__step-marker {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 0;
+}
+.connecting__step--done .connecting__step-marker {
+  background: var(--success-500);
+  border-color: var(--success-500);
+  color: var(--accent-fg);
+}
+.connecting__step--active .connecting__step-marker {
+  border-color: var(--accent-500);
+  background: var(--accent-100);
+}
+.connecting__check {
+  color: var(--accent-fg);
+}
+.connecting__spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 0;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent-500);
+  animation: spin 800ms linear infinite;
+}
+.connecting__dot {
+  width: 6px;
+  height: 6px;
+  background: var(--ink-faint);
+  opacity: 0.5;
+}
+.connecting__step-label {
+  font-size: var(--font-size-md);
+  color: var(--ink-faint);
+  line-height: var(--line-height-normal);
+}
+.connecting__step--done .connecting__step-label {
+  color: var(--ink-muted);
+}
+.connecting__step--active .connecting__step-label {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .connecting__spinner { animation: none; }
 }
 
 /* ─── Connection Overview ────────────────────────────────────────── */
