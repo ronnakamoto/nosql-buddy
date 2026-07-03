@@ -2,7 +2,9 @@
 
 A cross-platform MongoDB management studio for developers, SREs, and database engineers who work across local, staging, and production environments.
 
-NoSQLBuddy connects to MongoDB, lets you browse data, run queries, build aggregations, translate SQL to MongoDB, inspect schema and indexes, and review performance — all from a native desktop app built with Tauri, Rust, React, and TypeScript.
+NoSQLBuddy connects to MongoDB, lets you browse data, run queries, build aggregations, translate SQL to MongoDB, inspect schema and indexes, and review performance — all from a lightweight native desktop app.
+
+![NoSQLBuddy App](https://nosqlbuddy.com/nosql-buddy-app.png)
 
 ## Contents
 
@@ -187,6 +189,8 @@ Connection profiles are saved with their secrets in your OS keychain; URIs and c
 ## ZK Audit Log
 
 NoSQLBuddy can produce a tamper-evident, independently verifiable audit log of every database write: every insert, update, and delete is captured into a cryptographic Merkle tree, sealed into batches, and anchored on the Stellar blockchain so no one can alter history undetected.
+
+For a detailed explanation of the ZK Audit system, see [nosqlbuddy.com/audit](https://nosqlbuddy.com/audit).
 
 ### How it works (the short version)
 
