@@ -14,8 +14,36 @@
 #   mongo2 → localhost:27018   (operator secondary)
 #   mongo3 → localhost:27019   (independent member — the auditor's trust anchor)
 #   mongo1 → localhost:27020   (operator primary for app writes)
-#   Use mongodb://127.0.0.1:27020/?directConnection=true for changes you want
-#   the audit publisher to capture.
+#   Use mongodb://root:nosqlbuddy-dev-root-pw@127.0.0.1:27020/?authSource=admin&directConnection=true
+#   for changes you want the audit publisher to capture.
+#
+# ── Authentication (new) ──────────────────────────────────────────────────
+# This replica set runs with --keyFile + auth enforced. mongo1's own
+# entrypoint bootstraps everything on first start (fresh volume) via the
+# official image's docker-entrypoint-initdb.d mechanism — see
+# scripts/rs-init-audit.js, which both calls rs.initiate() and creates two
+# users while MongoDB's "localhost exception" is still open (no users exist
+# yet anywhere in the deployment):
+#   root/nosqlbuddy-dev-root-pw       — full admin access (operator/seeder)
+#   auditor/nosqlbuddy-dev-auditor-pw — read-only on local.oplog.rs ONLY;
+#     this is what a real auditor/regulator would be handed: enough to
+#     independently recompute the oplog hash, nothing else. It cannot read
+#     shopkeeper.orders or any other application data.
+# These are fixed, non-secret dev credentials (documented in
+# rs-init-audit.js) — appropriate for an isolated local Docker network, not
+# for a real deployment, which must generate and rotate its own.
+#
+# mongo3 is additionally configured (in rs-init-audit.js's rs.initiate() call)
+# as priority: 0, hidden: true — it can never become primary and is invisible
+# to normal driver topology discovery / default read preference, while still
+# counting as a full voting member (votes: 1) so w:"majority" writes are still
+# forced to replicate to it. This is what a dedicated "audit replica" should
+# look like: present, durable, independently readable, but never serving app
+# traffic and never electable.
+#
+# scripts/mongo-keyfile is a fixed, checked-in, non-secret dev keyfile shared
+# by all three members for intra-cluster authentication. Real deployments
+# must generate their own and keep it private.
 #
 # Bring up order:
 #   docker compose -f docker-compose.audit-db.yml up -d   # this 3-node set
@@ -29,9 +57,19 @@ services:
     # without colliding with the single-node dev DB on localhost:27017.
     ports:
       - "27020:27017"
-    command: ["--replSet", "rs0", "--bind_ip_all"]
+    entrypoint: ["/scripts/mongo-entrypoint.sh"]
+    environment:
+      MONGO_ROLE: primary
     volumes:
       - audit-mongo-data-1:/data/db
+      - ./scripts/mongo-entrypoint.sh:/scripts/mongo-entrypoint.sh:ro
+      - ./scripts/mongo-keyfile:/keyfile-src/mongo-keyfile:ro
+      # Bootstraps rs.initiate() + root/auditor users on first (empty-volume)
+      # start only — see mongo-entrypoint.sh for how this uses the localhost
+      # exception against the REAL mongod (not the temp initdb.d instance).
+      # Only mounted on mongo1; mongo2/mongo3 stay untouched and receive the
+      # replicated admin database once they join the set.
+      - ./scripts/rs-init-audit.js:/scripts/rs-init-audit.js:ro
     networks:
       - default
       - mongo-net
@@ -40,34 +78,59 @@ services:
     image: mongo:7
     ports:
       - "27018:27017"
-    command: ["--replSet", "rs0", "--bind_ip_all"]
+    entrypoint: ["/scripts/mongo-entrypoint.sh"]
     volumes:
       - audit-mongo-data-2:/data/db
+      - ./scripts/mongo-entrypoint.sh:/scripts/mongo-entrypoint.sh:ro
+      - ./scripts/mongo-keyfile:/keyfile-src/mongo-keyfile:ro
     networks:
       - default
       - mongo-net
 
   # Independent member — the trust anchor for oplog completeness verification.
+  # priority: 0 + hidden: true is set in rs-init-audit.js's rs.initiate() call.
   mongo3:
     image: mongo:7
     ports:
       - "27019:27017"
-    command: ["--replSet", "rs0", "--bind_ip_all"]
+    entrypoint: ["/scripts/mongo-entrypoint.sh"]
     volumes:
       - audit-mongo-data-3:/data/db
+      - ./scripts/mongo-entrypoint.sh:/scripts/mongo-entrypoint.sh:ro
+      - ./scripts/mongo-keyfile:/keyfile-src/mongo-keyfile:ro
     networks:
       - default
       - mongo-net
 
+  # Readiness gate for `seeder` (and, transitively, for the app's `docker
+  # compose ... up -d` call to only return once the set is actually usable).
+  # Bootstrap itself now happens inline in mongo1's own entrypoint (see
+  # above); this just polls until it can authenticate and see a PRIMARY.
   rs-init:
     image: mongo:7
     depends_on:
       - mongo1
       - mongo2
       - mongo3
-    volumes:
-      - ./scripts/rs-init-audit.js:/scripts/rs-init-audit.js:ro
-    entrypoint: ["mongosh", "--nodb", "/scripts/rs-init-audit.js"]
+    entrypoint: ["bash", "-c"]
+    # mongo1's own bootstrap (rs.initiate + user creation, see
+    # rs-init-audit.js) can take a while, and connections outright fail
+    # (auth not even up yet, or the replica set not initiated yet) rather
+    # than just returning a non-PRIMARY status — so retry the whole mongosh
+    # invocation, not just an in-script query, until it succeeds.
+    command:
+      - >
+        for i in $$(seq 1 90); do
+          if mongosh "mongodb://root:nosqlbuddy-dev-root-pw@mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet=rs0" \
+              --quiet --eval 'const s = rs.status(); if (s.ok !== 1 || !s.members.some(m => m.stateStr === "PRIMARY")) { quit(1); }' ; then
+            echo "replica set ready";
+            exit 0;
+          fi
+          echo "waiting for replica set (attempt $$i)...";
+          sleep 2;
+        done;
+        echo "timed out waiting for replica set";
+        exit 1
     restart: "no"
 
   seeder:
@@ -79,7 +142,7 @@ services:
       - ./scripts/seed.js:/scripts/seed.js:ro
     entrypoint:
       - "mongosh"
-      - "mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0"
+      - "mongodb://root:nosqlbuddy-dev-root-pw@mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0&authSource=admin"
       - "/scripts/seed.js"
     restart: "no"
 

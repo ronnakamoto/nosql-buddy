@@ -820,6 +820,285 @@ pub async fn audit_list_verification_history(
     Ok(state.verification_store.list())
 }
 
+/// Rebuild the audit log from on-chain commitments + IPFS batches.
+///
+/// This is the auditor's primary verification tool. It:
+/// 1. Queries the on-chain root history from the Soroban contract.
+/// 2. For each committed root, extracts the IPFS CID from metadata.
+/// 3. Fetches the (age-encrypted) batch from IPFS/Pinata.
+/// 4. Decrypts the batch with the auditor's age identity.
+/// 5. Replays all events into a fresh, isolated Merkle tree.
+/// 6. Verifies the rebuilt root matches the latest on-chain commitment.
+///
+/// The reconstructed tree lives in a completely isolated directory
+/// (`<app_data_dir>/audit/auditor-rebuild/`) so running this on the
+/// same machine as the operator never touches the operator's own log.
+#[tauri::command]
+pub async fn audit_rebuild_from_chain(
+    app: tauri::AppHandle,
+    age_identity: String,
+    pinata_api_key: Option<String>,
+    pinata_api_secret: Option<String>,
+    pinata_gateway_url: Option<String>,
+    audit_leaf_key_hex: Option<String>,
+) -> AppResult<crate::audit::reader::VerificationReport> {
+    use tauri::Manager;
+
+    if age_identity.trim().is_empty() {
+        return Err(AppError::Validation(
+            "age_identity is required for decryption".to_string(),
+        ));
+    }
+
+    // Resolve chain config (contract + RPC) from the app's settings store.
+    let config = crate::audit::audit_mode::load_mode_config(&app)?;
+    let chain = chain_config_from_mode(&config);
+    if chain.contract_id.is_empty() {
+        return Err(AppError::Validation(
+            "No Soroban contract ID configured. Run Dev Mode setup first.".to_string(),
+        ));
+    }
+
+    // Auditor isolation: use a dedicated subdirectory so we never collide
+    // with the operator's own audit state on the same machine.
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::Validation(format!("resolve app data dir: {e}")))?
+        .join("audit")
+        .join("auditor-rebuild");
+    std::fs::create_dir_all(&data_dir)
+        .map_err(|e| AppError::Io(format!("create auditor-rebuild dir: {e}")))?;
+
+    // 1. Query on-chain root history.
+    let kp = stellar_native::generate_keypair();
+    let history = stellar_native::get_root_history_native(&kp, &chain.rpc_url, &chain.contract_id, 100)
+        .await
+        .map_err(|e| AppError::Internal(format!("get_root_history: {e}")))?;
+
+    if history.is_empty() {
+        return Ok(crate::audit::reader::VerificationReport {
+            onchain_root_found: false,
+            onchain_root: None,
+            local_root_hex: crate::audit::AuditLog::new()
+                .map_err(|e| AppError::Internal(format!("{e}")))?
+                .root_hex()
+                .map_err(|e| AppError::Internal(format!("{e}")))?,
+            commitment_event_index: None,
+            total_events: 0,
+            verified_events: 0,
+            events_after_commitment: 0,
+            chain_intact: true,
+            tamper_detected: false,
+            summary: "No on-chain roots committed yet. Nothing to rebuild.".to_string(),
+        });
+    }
+
+    // 2. Build Pinata config if credentials provided.
+    let pinata_config = match (pinata_api_key, pinata_api_secret, pinata_gateway_url) {
+        (Some(key), Some(secret), Some(gateway)) if !key.is_empty() && !secret.is_empty() => {
+            Some(crate::audit::pinata::PinataConfig {
+                api_key: key,
+                api_secret: secret,
+                gateway_url: gateway,
+            })
+        }
+        _ => None,
+    };
+    let ipfs_config = crate::audit::ipfs::IpfsConfig::default();
+
+    // 3. Fetch + decrypt all batches.
+    let mut all_lines: Vec<String> = Vec::new();
+    let mut fetched_batches = 0usize;
+    let mut failed_batches = 0usize;
+
+    for root in &history {
+        let Some(cid) = extract_cid_from_metadata(&root.metadata) else {
+            continue;
+        };
+
+        let raw_bytes = match fetch_cid(&ipfs_config, pinata_config.as_ref(), &cid).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("rebuild: failed to fetch CID {} for seq {}: {e}", cid, root.sequence);
+                failed_batches += 1;
+                continue;
+            }
+        };
+
+        let decrypted = match crate::audit::crypto::decrypt_batch(&raw_bytes, &age_identity) {
+            Ok(plaintext) => {
+                tracing::info!("rebuild: decrypted batch {} (seq {})", cid, root.sequence);
+                plaintext.into_bytes()
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "rebuild: age decrypt failed for CID {} (seq {}): {e} — treating as plaintext",
+                    cid,
+                    root.sequence
+                );
+                raw_bytes
+            }
+        };
+
+        let text = match String::from_utf8(decrypted) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    "rebuild: CID {} (seq {}) is not valid UTF-8: {e}",
+                    cid,
+                    root.sequence
+                );
+                failed_batches += 1;
+                continue;
+            }
+        };
+
+        for line in text.lines() {
+            let line = line.trim();
+            if !line.is_empty() {
+                all_lines.push(line.to_string());
+            }
+        }
+        fetched_batches += 1;
+    }
+
+    // `get_root_history_native` returns entries most-recent-first, and
+    // fetched batches are appended in that same order — so `all_lines` at
+    // this point is generally NOT in ascending event-index order (e.g. a
+    // newer, smaller batch can be fetched before an older, larger one).
+    // Replay is strictly sequential (the Merkle tree is append-only and
+    // asserts each event's stored `index` matches its actual insertion
+    // position), so the reconstructed log must be sorted by index before
+    // being written and replayed — otherwise the very first insertion
+    // fails with a false "tamper detected: index mismatch" even though
+    // every batch decrypted and verified correctly on its own.
+    all_lines.sort_by_key(|line| {
+        serde_json::from_str::<serde_json::Value>(line)
+            .ok()
+            .and_then(|v| v.get("index").and_then(|i| i.as_u64()))
+            .unwrap_or(u64::MAX)
+    });
+
+    if all_lines.is_empty() {
+        return Ok(crate::audit::reader::VerificationReport {
+            onchain_root_found: false,
+            onchain_root: history.last().cloned(),
+            local_root_hex: crate::audit::AuditLog::new()
+                .map_err(|e| AppError::Internal(format!("{e}")))?
+                .root_hex()
+                .map_err(|e| AppError::Internal(format!("{e}")))?,
+            commitment_event_index: None,
+            total_events: 0,
+            verified_events: 0,
+            events_after_commitment: 0,
+            chain_intact: true,
+            tamper_detected: false,
+            summary: format!(
+                "Found {} on-chain root(s), but no batches could be fetched/decrypted.",
+                history.len()
+            ),
+        });
+    }
+
+    // 4. Write reconstructed JSONL and replay into a fresh tree.
+    let audit_dir = data_dir.join("audit");
+    std::fs::create_dir_all(&audit_dir)
+        .map_err(|e| AppError::Io(format!("create audit dir: {e}")))?;
+    let events_path = audit_dir.join("events.jsonl");
+    let jsonl_content = all_lines.join("\n") + "\n";
+    std::fs::write(&events_path, &jsonl_content)
+        .map_err(|e| AppError::Io(format!("write events.jsonl: {e}")))?;
+
+    let fresh_log = crate::audit::AuditLog::new()
+        .map_err(|e| AppError::Internal(format!("create audit log: {e}")))?;
+
+    if let Some(hex) = audit_leaf_key_hex.as_ref().filter(|s| !s.is_empty()) {
+        let bytes = hex::decode(hex.trim())
+            .map_err(|e| AppError::Validation(format!("invalid audit_leaf_key_hex: {e}")))?;
+        let key: [u8; 32] = bytes.try_into().map_err(|_| {
+            AppError::Validation("audit_leaf_key_hex must be exactly 64 hex chars (32 bytes)".to_string())
+        })?;
+        fresh_log.set_leaf_key(key);
+    }
+
+    fresh_log
+        .set_persistence_dir(&data_dir)
+        .map_err(|e| AppError::Internal(format!("replay events: {e}")))?;
+
+    let rebuilt_root_hex = fresh_log
+        .root_hex()
+        .map_err(|e| AppError::Internal(format!("compute root: {e}")))?;
+    let total_events = fresh_log.event_count() as u64;
+
+    let latest_onchain = history.last().cloned();
+    let root_matches = latest_onchain
+        .as_ref()
+        .map_or(false, |r| r.root_hex == rebuilt_root_hex);
+
+    let summary = if root_matches {
+        format!(
+            "Rebuilt {} event(s) from {} batch(es). Final root matches on-chain commitment (seq {}).",
+            total_events,
+            fetched_batches,
+            latest_onchain.as_ref().unwrap().sequence
+        )
+    } else {
+        format!(
+            "Rebuilt {} event(s) from {} batch(es). Root mismatch: local {} vs on-chain {} (seq {}). {} batch(es) failed to fetch.",
+            total_events,
+            fetched_batches,
+            &rebuilt_root_hex[..rebuilt_root_hex.len().min(16)],
+            latest_onchain.as_ref().map_or("?".to_string(), |r| r.root_hex.clone()),
+            latest_onchain.as_ref().map_or(0, |r| r.sequence),
+            failed_batches
+        )
+    };
+
+    Ok(crate::audit::reader::VerificationReport {
+        onchain_root_found: true,
+        onchain_root: latest_onchain,
+        local_root_hex: rebuilt_root_hex,
+        commitment_event_index: Some(total_events.saturating_sub(1)),
+        total_events,
+        verified_events: total_events,
+        events_after_commitment: 0,
+        chain_intact: root_matches,
+        tamper_detected: !root_matches,
+        summary,
+    })
+}
+
+/// Fetch raw bytes for a CID, preferring Pinata when configured.
+async fn fetch_cid(
+    ipfs_config: &crate::audit::ipfs::IpfsConfig,
+    pinata_config: Option<&crate::audit::pinata::PinataConfig>,
+    cid: &str,
+) -> Result<Vec<u8>, crate::error::AppError> {
+    if let Some(pinata) = pinata_config {
+        if !pinata.api_key.is_empty() || !pinata.api_secret.is_empty() {
+            return crate::audit::pinata::fetch_batch(pinata, cid)
+                .await
+                .map_err(|e| crate::error::AppError::Internal(format!("pinata fetch: {e}")));
+        }
+    }
+    crate::audit::ipfs::fetch_batch(ipfs_config, cid)
+        .await
+        .map_err(|e| crate::error::AppError::Internal(format!("ipfs fetch: {e}")))
+}
+
+/// Extract an IPFS CID from on-chain metadata string.
+///
+/// Metadata format: `epoch=N cid=CID ...` or `epoch=N` (no CID).
+fn extract_cid_from_metadata(metadata: &str) -> Option<String> {
+    for part in metadata.split_whitespace() {
+        if let Some(val) = part.strip_prefix("cid=") {
+            return Some(val.to_string());
+        }
+    }
+    None
+}
+
 // ─── IPFS batch publishing commands ───────────────────────────────────
 
 /// Publish an epoch's event batch to IPFS.
@@ -2370,6 +2649,29 @@ mod tests {
         assert!(
             rebuilt.verify().unwrap(),
             "reconstructed super-proof must verify against the super-root"
+        );
+    }
+
+    #[test]
+    fn extract_cid_from_metadata_parses_various_formats() {
+        // CID present in standard format
+        assert_eq!(
+            extract_cid_from_metadata("epoch=0 cid=QmAbCdEf123"),
+            Some("QmAbCdEf123".to_string())
+        );
+        // CID at start
+        assert_eq!(
+            extract_cid_from_metadata("cid=bafybeifoo epoch=1"),
+            Some("bafybeifoo".to_string())
+        );
+        // No CID
+        assert_eq!(extract_cid_from_metadata("epoch=0 oplog_entries=5"), None);
+        // Empty metadata
+        assert_eq!(extract_cid_from_metadata(""), None);
+        // CID with empty value (edge case)
+        assert_eq!(
+            extract_cid_from_metadata("epoch=0 cid="),
+            Some("".to_string())
         );
     }
 }

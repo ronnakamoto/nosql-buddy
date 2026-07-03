@@ -42,7 +42,11 @@ import { FlaskConical, CircleDashed, X, CheckCircle, ExternalLink, ChevronDown, 
 const PUBLISHER_PORT = 9173;
 const ATTESTER_PORT = 9174;
 const READER_PORT = 9175;
-const AUDITED_MONGO_URI = "mongodb://127.0.0.1:27020/?directConnection=true";
+// The dev-mode replica set now runs with auth enabled (see
+// docker-compose.audit-db.yml + scripts/rs-init-audit.js) — these are the
+// fixed, non-secret dev-only root credentials created by that bootstrap.
+const AUDITED_MONGO_URI =
+  "mongodb://root:nosqlbuddy-dev-root-pw@127.0.0.1:27020/?directConnection=true&authSource=admin";
 const POLL_MS = 2500;
 const EPOCH_THRESHOLD = 100;
 
@@ -583,7 +587,7 @@ function SetupWizardModal({
               type="text"
               value={publisherMongoUri}
               onChange={(e) => setPublisherMongoUri(e.target.value)}
-              placeholder="mongodb://host.docker.internal:27017/?directConnection=true"
+              placeholder="mongodb://root:nosqlbuddy-dev-root-pw@host.docker.internal:27020/?directConnection=true&authSource=admin"
             />
             <label className="field__label" style={{ marginTop: "var(--space-2)" }}>
               Attester MongoDB URI (independent member)
@@ -593,7 +597,7 @@ function SetupWizardModal({
               type="text"
               value={attesterMongoUri}
               onChange={(e) => setAttesterMongoUri(e.target.value)}
-              placeholder="mongodb://host.docker.internal:27019/?directConnection=true"
+              placeholder="mongodb://auditor:nosqlbuddy-dev-auditor-pw@host.docker.internal:27019/?directConnection=true&authSource=admin"
             />
             <p style={{ fontSize: "var(--font-size-xs)", color: "var(--ink-faint)", marginTop: "var(--space-2)", marginBottom: 0 }}>
               Use a replica member controlled by the audit team for a real trust anchor. Leave

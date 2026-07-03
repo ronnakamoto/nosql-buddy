@@ -199,6 +199,21 @@ pub struct AuditLog {
     /// new events are written as **v1** (pipe-delimited + SHA-256 leaf).
     /// Replay automatically dispatches on each event's stored `version`.
     leaf_key: Mutex<Option<[u8; 32]>>,
+    /// The Merkle root (hex) immediately after each leaf was inserted,
+    /// indexed by tree position (`root_after_by_index[i]` is the root right
+    /// after leaf `i` was inserted). Appended atomically under the same
+    /// `tree` lock guard as the insert itself in `record()`.
+    ///
+    /// This lets any caller freeze an epoch boundary at a *specific,
+    /// historical* index by looking up its root here, instead of calling
+    /// `root_hex()` (which always reflects the tree's *current, latest*
+    /// state). The latter is a TOCTOU hazard for out-of-band epoch tracking
+    /// (e.g. a periodic catch-up scan running concurrently with live leaf
+    /// insertion): by the time the scan gets around to processing index N
+    /// and reads `root_hex()`, more leaves may have already been inserted
+    /// by the concurrent writer, silently pulling events past N into the
+    /// "frozen" root for an epoch that's only supposed to end at N.
+    root_after_by_index: Mutex<Vec<String>>,
 }
 
 impl AuditLog {
@@ -214,7 +229,21 @@ impl AuditLog {
             legal_holds: Mutex::new(HashSet::new()),
             retained_domain_roots: Mutex::new(HashMap::new()),
             leaf_key: Mutex::new(None),
+            root_after_by_index: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Look up the Merkle root (hex) immediately after the leaf at `index`
+    /// was inserted. Returns `None` if `index` hasn't been inserted yet
+    /// (out of range) — this is a historical, point-in-time value, never
+    /// the tree's current/latest root once other leaves are inserted after
+    /// it. See [`AuditLog::root_after_by_index`] for why this exists.
+    pub fn root_after_at(&self, index: u64) -> Option<String> {
+        self.root_after_by_index
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(index as usize)
+            .cloned()
     }
 
     /// Set the HMAC leaf derivation key. After this is called, all new
@@ -531,6 +560,15 @@ impl AuditLog {
 
         *self.sequences.lock().unwrap_or_else(|e| e.into_inner()) = seq_counters;
 
+        // Restore the per-index root history from the persisted (and
+        // already leaf/tamper-verified above) `root_after` values, so
+        // `root_after_at()` keeps working across restarts.
+        {
+            let mut roots = self.root_after_by_index.lock().unwrap_or_else(|e| e.into_inner());
+            roots.clear();
+            roots.extend(parsed.iter().map(|ev| ev.root_after.clone()));
+        }
+
         // Verify the final root matches.
         let tree_root_hex = fr_to_hex(tree.root()?);
         if let Some(last) = parsed.last() {
@@ -648,6 +686,14 @@ impl AuditLog {
                     ev.index, ev.root_after, recomputed_root_hex
                 )));
             }
+
+            // Restore this index's historical root so `root_after_at()`
+            // keeps working after a restart (replay), not just for events
+            // recorded fresh in this process's lifetime.
+            self.root_after_by_index
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(recomputed_root_hex);
 
             let counter = seq_counters
                 .entry((ev.deployment_id.clone(), ev.database.clone()))
@@ -802,6 +848,16 @@ impl AuditLog {
         // `root_after` — the chain link that lets replay detect
         // reordering / deletion.
         let root_after = fr_to_hex(tree.root()?);
+
+        // Record this index's root atomically while still holding the tree
+        // lock, so `root_after_by_index[index]` can never observe a root
+        // more advanced than "immediately after this exact insert" — see
+        // `root_after_at()` for why this matters.
+        {
+            let mut roots = self.root_after_by_index.lock().unwrap_or_else(|e| e.into_inner());
+            debug_assert_eq!(roots.len() as u64, index, "root_after_by_index must stay index-aligned with the tree");
+            roots.push(root_after.clone());
+        }
 
         let timestamp = chrono::Utc::now().to_rfc3339();
 

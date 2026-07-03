@@ -837,7 +837,16 @@ pub async fn list_databases(client: &Client) -> AppResult<Vec<DatabaseSummary>> 
     // Use the native listDatabases admin command to get name + size_on_disk
     // + empty in a single round trip. This is more reliable than running
     // dbStats per database (which can fail for system DBs on some deployments).
-    let specs = client.list_databases().await?;
+    //
+    // Gracefully handle "not authorized": a narrowly scoped user (e.g. an
+    // auditor who can only read local.oplog.rs) passes SCRAM auth but is
+    // denied listDatabases. Return an empty list so the connection still
+    // establishes and the user can proceed with whatever their role allows.
+    let specs = match client.list_databases().await {
+        Ok(s) => s,
+        Err(ref e) if format!("{e}").contains("not authorized") => return Ok(vec![]),
+        Err(e) => return Err(crate::error::AppError::Mongo(format!("{e}"))),
+    };
     let mut out = Vec::with_capacity(specs.len());
     for spec in specs {
         // Enrich with dbStats for document/index counts. Best-effort: if the

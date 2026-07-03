@@ -1284,6 +1284,19 @@ export interface DevStackIdentities {
   contractId: string;
 }
 
+/** Material the operator hands to the auditor for independent verification. */
+export interface AuditorHandoffMaterial {
+  contractId: string;
+  rpcUrl: string;
+  networkPassphrase: string;
+  agePublicKeyOperator: string;
+  agePublicKeyAttester: string;
+  ageAttesterSecret: string;
+  auditLeafKeyHex: string;
+  auditorMongoUri: string;
+  operatorMongoUri: string;
+}
+
 /** One audit-stack container. */
 export interface DevStackService {
   name: string;
@@ -1462,6 +1475,20 @@ const commands = {
     invoke<VerificationReport>("audit_verify_reader_mode"),
   auditListVerificationHistory: () =>
     invoke<VerificationRecord[]>("audit_list_verification_history"),
+  auditRebuildFromChain: (
+    ageIdentity: string,
+    pinataApiKey?: string,
+    pinataApiSecret?: string,
+    pinataGatewayUrl?: string,
+    auditLeafKeyHex?: string,
+  ) =>
+    invoke<VerificationReport>("audit_rebuild_from_chain", {
+      ageIdentity,
+      pinataApiKey,
+      pinataApiSecret,
+      pinataGatewayUrl,
+      auditLeafKeyHex,
+    }),
   auditPublishEpochToIpfs: (epochNumber: number, apiUrl?: string) =>
     invoke<IpfsPublishResult>("audit_publish_epoch_to_ipfs", {
       epochNumber,
@@ -1592,6 +1619,8 @@ const commands = {
     invoke<DevSetupResult>("audit_dev_stack_setup", { params }),
   auditDevStackIdentities: () =>
     invoke<DevStackIdentities | null>("audit_dev_stack_identities"),
+  auditDevStackAuditorMaterial: () =>
+    invoke<AuditorHandoffMaterial | null>("audit_dev_stack_auditor_material"),
 
   // --- ZK Audit: Dev mode audit service HTTP proxy (to docker) ---
   auditDevProxyGet: (port: number, path: string) =>

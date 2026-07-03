@@ -287,6 +287,7 @@ pub fn run() {
             audit::commands::audit_prune_domain,
             audit::commands::audit_verify_reader_mode,
             audit::commands::audit_list_verification_history,
+            audit::commands::audit_rebuild_from_chain,
             audit::commands::audit_publish_epoch_to_ipfs,
             audit::commands::audit_get_ipfs_cid,
             audit::commands::audit_check_ipfs_daemon,
@@ -331,6 +332,7 @@ pub fn run() {
             audit::dev_stack::audit_dev_stack_logs,
             audit::dev_stack::audit_dev_stack_setup,
             audit::dev_stack::audit_dev_stack_identities,
+            audit::dev_stack::audit_dev_stack_auditor_material,
             // ─── Dev mode daemon HTTP proxy ────────────────────────────
             audit::audit_dev_proxy_get,
             audit::audit_dev_proxy_post,

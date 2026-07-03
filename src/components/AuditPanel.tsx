@@ -6,6 +6,7 @@ import { AuditDevFlow } from "./AuditDevFlow";
 import { AuditProductionFlow } from "./AuditProductionFlow";
 import { AuditSettings } from "./AuditSettings";
 import { AuditSurface } from "./AuditSurface";
+import AuditorMode from "./AuditorMode";
 import { injectAuditKeyframes, Spinner } from "./AuditUi";
 
 /**
@@ -19,7 +20,7 @@ import { injectAuditKeyframes, Spinner } from "./AuditUi";
  *   - "dev"/"production" with stack not configured → DevFlow/ProductionFlow setup
  *   - "dev"/"production" configured → AuditSurface (unified surface)
  */
-type View = "chooser" | "dev" | "production" | "settings";
+type View = "chooser" | "dev" | "production" | "settings" | "auditor";
 
 export interface AuditPanelProps {
   mode: AuditMode;
@@ -104,6 +105,13 @@ export default function AuditPanel({
     [onModeChange, onViewChange, loadConfig],
   );
 
+  const switchToAuditor = useCallback(
+    () => {
+      onViewChange("auditor");
+    },
+    [onViewChange],
+  );
+
   // ─── Is configured? ──────────────────────────────────────────────────
   // Production mode needs a keypair before it shows the in-app surface. Dev
   // mode ALWAYS uses AuditDevFlow, which is the dashboard for the Dockerized
@@ -145,6 +153,9 @@ export default function AuditPanel({
         onShowSettings={showSettings}
       />
     );
+  } else if (view === "auditor") {
+    // Independent auditor verification — no MongoDB required.
+    body = <AuditorMode />;
   } else if (view === "dev") {
     // Dev mode → Docker stack flow (Set up / Start Stack / live view).
     body = (
@@ -187,7 +198,9 @@ export default function AuditPanel({
                   ? "Local Docker stack"
                   : view === "production"
                     ? "Production pipeline"
-                    : "Choose a mode"}
+                    : view === "auditor"
+                      ? "Independent verification"
+                      : "Choose a mode"}
             </span>
           </div>
 
@@ -207,6 +220,12 @@ export default function AuditPanel({
               >
                 Production
                 <span className="audit-mode-tab__soon">Soon</span>
+              </button>
+              <button
+                className={`audit-mode-tab ${view === "auditor" ? "is-active" : ""}`}
+                onClick={switchToAuditor}
+              >
+                Auditor
               </button>
             </div>
           )}

@@ -33,6 +33,10 @@ x-secrets: &secrets
   PINATA_API_KEY: ${PINATA_API_KEY:-}
   PINATA_API_SECRET: ${PINATA_API_SECRET:-}
   PINATA_GATEWAY_URL: ${PINATA_GATEWAY_URL:-https://gateway.pinata.cloud}
+  AGE_OPERATOR_SECRET: ${AGE_OPERATOR_SECRET:-}
+  AGE_ATTESTER_SECRET: ${AGE_ATTESTER_SECRET:-}
+  AGE_RECIPIENTS: ${AGE_RECIPIENTS:-}
+  AUDIT_LEAF_KEY: ${AUDIT_LEAF_KEY:-}
 
 services:
   # ─── Publisher (operator) ───────────────────────────────────────────

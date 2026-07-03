@@ -103,6 +103,26 @@ pub async fn commit_epoch(
         state.audit_log.root_hex().unwrap_or_default()
     });
 
+    // Idempotency: if this epoch was already committed (e.g. a retried or
+    // double-fired request), return the tx hash recorded from that first
+    // successful commit rather than re-submitting to Stellar. Re-submitting
+    // would hit the contract's RootAlreadyCommitted error, whose recovery
+    // path can't retrieve the original transaction hash (Soroban contracts
+    // don't store tx hashes) — that path would discard a real hash we
+    // already have on file.
+    if epoch.committed {
+        if let Some(tx_hash) = epoch.tx_hash.clone() {
+            log::info!(
+                "commit_epoch {epoch_number}: already committed (tx {tx_hash}) — returning cached result"
+            );
+            return Ok(Json(CommitResult {
+                sequence: 0,
+                tx_hash,
+                root_hex,
+            }));
+        }
+    }
+
     // Get the IPFS CID if available, include it in metadata.
     let cid = state.audit_log.load_ipfs_cid(epoch_number).ok().flatten();
 

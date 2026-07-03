@@ -61,7 +61,7 @@ import {
   Info,
 } from "lucide-react";
 
-type AuditView = "chooser" | "dev" | "production" | "settings";
+type AuditView = "chooser" | "dev" | "production" | "settings" | "auditor";
 
 type Tab =
   | { id: string; kind: "query"; connectionId: string; database: string; collection: string }

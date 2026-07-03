@@ -41,6 +41,21 @@ fn published_image_ref() -> String {
     format!("{PUBLISHED_IMAGE_REPO}:{}", env!("CARGO_PKG_VERSION"))
 }
 
+/// Parse the age public key from an age secret identity string.
+///
+/// Age secret key strings contain a comment line like:
+///   `# public key: age1v4d...`
+///
+/// Returns the public key (e.g. `age1...`) if found, otherwise empty.
+fn extract_age_public_key(secret: &str) -> String {
+    for line in secret.lines() {
+        if let Some(val) = line.strip_prefix("# public key:") {
+            return val.trim().to_string();
+        }
+    }
+    String::new()
+}
+
 /// Where the audit stack runs from, and how.
 ///
 /// - **Source builds** run from the project root and build the image locally
@@ -115,6 +130,8 @@ fn sync_bundled_stack(src: &Path, dest: &Path) -> AppResult<()> {
         AUDIT_DB_COMPOSE_FILE,
         "scripts/rs-init-audit.js",
         "scripts/seed.js",
+        "scripts/mongo-keyfile",
+        "scripts/mongo-entrypoint.sh",
         "audit-stack.env.example",
     ] {
         let from = src.join(rel);
@@ -399,6 +416,13 @@ fn friendly_compose_error(args: &[&str], stderr: &str) -> String {
                 root, then try again."
             .to_string();
     }
+    if s.contains("trying to mount a directory onto a file") || s.contains("not a directory") {
+        return "A Docker volume has a stale mount point for the attester key (a leftover from \
+                an earlier setup issue). Use 'Reset Data' to wipe the audit stack's Docker \
+                volumes and try again — this does not affect your Stellar keys or on-chain \
+                history."
+            .to_string();
+    }
 
     // The command ran a subprocess (e.g. the audit setup wizard) that failed
     // with its own already-user-facing message. Prefer surfacing that over a
@@ -680,6 +704,54 @@ fn parse_compose_ps(output: &str) -> Vec<DevStackService> {
     services
 }
 
+/// Repair a stale mount-point type mismatch left behind in the
+/// `audit-attester-data` named volume.
+///
+/// The attester/reader services bind-mount the host `attester.key` file to
+/// `/data/attester/audit/attester.key`, nested *inside* the named volume
+/// `audit-attester-data`. The first time that mount is created, Docker
+/// materializes the destination inside the volume with the same type as the
+/// host source at that moment. If `attester.key` was ever a directory on the
+/// host (see the Docker bind-mount footgun documented on
+/// [`crate::audit::dev_stack`]'s attester key handling) when a container
+/// first started, the volume permanently gets a *directory* at
+/// `audit/attester.key` — and since named volumes persist across container
+/// recreation (`down`/`up`, even `rm -f`), that stale directory keeps
+/// mismatching the now-correct file source forever, failing every future
+/// `up` with "Are you trying to mount a directory onto a file?" even after
+/// the host-side directory has been fixed.
+///
+/// This runs a disposable Alpine container to remove that stale directory
+/// (only if it's empty — never touches user data) before compose starts the
+/// real services. It's a no-op if the volume doesn't exist yet or the path
+/// is already the correct type.
+fn heal_stale_attester_key_mount(ctx: &StackCtx) {
+    let volume_name = format!("{AUDIT_PROJECT}_audit-attester-data");
+    let output = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-v",
+            &format!("{volume_name}:/data"),
+            "alpine",
+            "sh",
+            "-c",
+            // Only remove if it's an empty directory; a non-empty one or a
+            // regular file is left completely alone.
+            "if [ -d /data/audit/attester.key ]; then rmdir /data/audit/attester.key 2>/dev/null; fi",
+        ])
+        .current_dir(&ctx.dir)
+        .output();
+    if let Ok(out) = output {
+        if out.status.success() {
+            log::debug!("heal_stale_attester_key_mount: checked/repaired audit-attester-data volume");
+        }
+    }
+    // Errors (e.g. volume doesn't exist yet on first-ever run) are expected
+    // and harmless — this is best-effort preventive maintenance, not a
+    // required step, so failures here must never block `stack_up`.
+}
+
 /// Bring up the audit stack.
 ///
 /// Ensures the 3-node replica set is running first, then starts the audit
@@ -691,6 +763,8 @@ fn parse_compose_ps(output: &str) -> Vec<DevStackService> {
 /// however long this takes.
 pub fn stack_up(app: &AppHandle) -> AppResult<String> {
     let ctx = stack_ctx(app)?;
+
+    heal_stale_attester_key_mount(&ctx);
 
     crate::events::emit_audit_stack_progress(app, "── Starting MongoDB replica set ──");
     // The DB Compose declares its own project name, so do not override it.
@@ -963,6 +1037,16 @@ pub fn setup_audit_config(app: &AppHandle, params: DevSetupParams) -> AppResult<
         persist_dev_mongo_uris(&env_audit, publisher_uri, attester_uri)?;
     }
 
+    // Sync the freshly deployed contract ID into the app's AuditModeConfig so
+    // in-app Stellar commands (oplog verify, rebuild from chain, etc.) know
+    // which contract to query without the user having to manually copy it from
+    // .env.audit into Settings.
+    if let Some(cid) = read_env_var(&env_audit, "CONTRACT_ID").filter(|s| !s.is_empty()) {
+        if let Err(e) = crate::audit::audit_mode::save_testnet_contract_id(app, cid) {
+            tracing::warn!("setup succeeded but contract ID sync to settings failed: {e}");
+        }
+    }
+
     Ok(DevSetupResult {
         success: true,
         log: redact_secrets(&log),
@@ -1114,6 +1198,129 @@ pub async fn audit_dev_stack_identities(
         publisher_address,
         attester_address,
         contract_id,
+    }))
+}
+
+/// Material the operator hands to the auditor out-of-band so the auditor
+/// can independently verify the audit trail.
+///
+/// This includes:
+/// - The operator's age public key (the auditor encrypts to this + their own)
+/// - The auditor's age public key (for reference)
+/// - The auditor's age secret key (the sensitive decryption key)
+/// - The audit leaf key (k_audit, needed for HMAC leaf verification)
+/// - The Soroban contract ID (needed to query on-chain roots)
+/// - A ready-made MongoDB connection string for the independent replica member
+///
+/// The age secret key is sensitive material. The frontend shows it only behind
+/// an explicit "reveal" interaction. In a real deployment this would be exchanged
+/// via a secure channel (Signal, 1Password, PGP) rather than copy-paste.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditorHandoffMaterial {
+    pub contract_id: String,
+    pub rpc_url: String,
+    pub network_passphrase: String,
+    pub age_public_key_operator: String,
+    pub age_public_key_attester: String,
+    pub age_attester_secret: String,
+    pub audit_leaf_key_hex: String,
+    pub auditor_mongo_uri: String,
+    pub operator_mongo_uri: String,
+}
+
+/// Read `.env.audit` and return the auditor's handoff material.
+#[tauri::command]
+pub async fn audit_dev_stack_auditor_material(
+    app: AppHandle,
+) -> AppResult<Option<AuditorHandoffMaterial>> {
+    let ctx = stack_ctx(&app).ok();
+    let ctx = match ctx {
+        Some(c) => c,
+        None => return Ok(None),
+    };
+    let env_path = ctx.dir.join(".env.audit");
+    if !env_path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&env_path)
+        .map_err(|e| AppError::Internal(format!("read .env.audit: {e}")))?;
+
+    let mut contract_id = String::new();
+    let mut rpc_url = String::new();
+    let mut network_passphrase = String::new();
+    let mut age_public_key_operator = String::new();
+    let mut age_public_key_attester = String::new();
+    let mut age_operator_secret = String::new();
+    let mut age_attester_secret = String::new();
+    let mut audit_leaf_key_hex = String::new();
+    let mut auditor_mongo_uri = String::new();
+    let mut operator_mongo_uri = String::new();
+
+    for line in content.lines() {
+        if let Some(val) = line.strip_prefix("CONTRACT_ID=") {
+            contract_id = val.trim().to_string();
+        } else if let Some(val) = line.strip_prefix("STELLAR_RPC_URL=") {
+            rpc_url = val.trim().to_string();
+        } else if let Some(val) = line.strip_prefix("STELLAR_NETWORK_PASSPHRASE=") {
+            network_passphrase = val.trim().to_string();
+        } else if let Some(val) = line.strip_prefix("AGE_OPERATOR_PUBLIC_KEY=") {
+            age_public_key_operator = val.trim().to_string();
+        } else if let Some(val) = line.strip_prefix("AGE_ATTESTER_PUBLIC_KEY=") {
+            age_public_key_attester = val.trim().to_string();
+        } else if let Some(val) = line.strip_prefix("AGE_OPERATOR_SECRET=") {
+            age_operator_secret = val.trim().to_string();
+        } else if let Some(val) = line.strip_prefix("AGE_ATTESTER_SECRET=") {
+            age_attester_secret = val.trim().to_string();
+        } else if let Some(val) = line.strip_prefix("AUDIT_LEAF_KEY_HEX=") {
+            audit_leaf_key_hex = val.trim().to_string();
+        } else if let Some(val) = line.strip_prefix("AUDIT_LEAF_KEY=") {
+            if audit_leaf_key_hex.is_empty() {
+                audit_leaf_key_hex = val.trim().to_string();
+            }
+        } else if let Some(val) = line.strip_prefix("READER_MONGO_URI=") {
+            auditor_mongo_uri = val.trim().to_string();
+        } else if let Some(val) = line.strip_prefix("PUBLISHER_MONGO_URI=") {
+            operator_mongo_uri = val.trim().to_string();
+        }
+    }
+
+    if contract_id.is_empty() {
+        return Ok(None);
+    }
+
+    // Fallbacks for older .env.audit files that may not have these fields.
+    if rpc_url.is_empty() {
+        rpc_url = "https://soroban-testnet.stellar.org:443".to_string();
+    }
+    if network_passphrase.is_empty() {
+        network_passphrase = "Test SDF Network ; September 2015".to_string();
+    }
+    if auditor_mongo_uri.is_empty() {
+        auditor_mongo_uri = "mongodb://auditor:nosqlbuddy-dev-auditor-pw@localhost:27019/?authSource=admin&directConnection=true".to_string();
+    }
+    if operator_mongo_uri.is_empty() {
+        operator_mongo_uri = "mongodb://root:nosqlbuddy-dev-root-pw@localhost:27020/?authSource=admin&directConnection=true".to_string();
+    }
+    // Older .env.audit files store secrets but not public keys. Derive the
+    // public key from the age secret key string (it contains a comment line).
+    if age_public_key_operator.is_empty() && !age_operator_secret.is_empty() {
+        age_public_key_operator = extract_age_public_key(&age_operator_secret);
+    }
+    if age_public_key_attester.is_empty() && !age_attester_secret.is_empty() {
+        age_public_key_attester = extract_age_public_key(&age_attester_secret);
+    }
+
+    Ok(Some(AuditorHandoffMaterial {
+        contract_id,
+        rpc_url,
+        network_passphrase,
+        age_public_key_operator,
+        age_public_key_attester,
+        age_attester_secret,
+        audit_leaf_key_hex,
+        auditor_mongo_uri,
+        operator_mongo_uri,
     }))
 }
 

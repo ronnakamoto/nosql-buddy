@@ -247,26 +247,45 @@ pub async fn open_connection(
     // Confirm we can actually reach and authenticate with the server before
     // publishing the handle. listDatabases requires authentication (unlike
     // ping/connectionStatus which can pass without auth on some proxies).
+    //
+    // We gracefully handle "not authorized" here: a user with a narrowly
+    // scoped credential (e.g. an auditor who can only read local.oplog.rs)
+    // passes SCRAM auth but is denied listDatabases. That is still a valid
+    // connection — we just skip database discovery for them.
     emit_connection_progress(
         &app,
         "authenticate",
         "Authenticating with the server",
         "active",
     );
-    tokio::time::timeout(
+    let auth_probe = tokio::time::timeout(
         std::time::Duration::from_secs(8),
         client
             .database("admin")
             .run_command(bson::doc! { "listDatabases": 1, "nameOnly": true }),
     )
-    .await
-    .map_err(|_| AppError::Timeout("listDatabases".into()))??;
-    emit_connection_progress(
-        &app,
-        "authenticate",
-        "Authenticating with the server",
-        "done",
-    );
+    .await;
+    match auth_probe {
+        Ok(Ok(_)) => {
+            emit_connection_progress(
+                &app,
+                "authenticate",
+                "Authenticating with the server",
+                "done",
+            );
+        }
+        Ok(Err(ref e)) if format!("{e}").contains("not authorized") => {
+            tracing::warn!("listDatabases denied for connection {profile_id}: authenticated but scoped credential — proceeding with limited discovery");
+            emit_connection_progress(
+                &app,
+                "authenticate",
+                "Authenticated (limited privileges — database discovery skipped)",
+                "done",
+            );
+        }
+        Ok(Err(e)) => return Err(AppError::Mongo(format!("{e}"))),
+        Err(_) => return Err(AppError::Timeout("listDatabases".into())),
+    }
     let connection_id = Uuid::new_v4().to_string();
     // Derive a stable per-deployment identity so audit events are segmented
     // by the deployment they originate from. Resolved once at connect time.

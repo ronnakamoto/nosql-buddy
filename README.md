@@ -342,7 +342,7 @@ Runs the **complete audit system** on your machine via Docker — publisher, ind
 
 3. Click **Start Stack**. This brings up the 3-node MongoDB replica set and the publisher, attester, and reader containers using the `.env.audit` and `attester.key` that setup produced.
 
-4. Write data to the audited MongoDB endpoint (`mongodb://127.0.0.1:27020/?directConnection=true`) to populate the audit log. The live view shows:
+4. Write data to the audited MongoDB endpoint (`mongodb://root:nosqlbuddy-dev-root-pw@127.0.0.1:27020/?directConnection=true&authSource=admin`) to populate the audit log. The dev-mode replica set runs with auth enabled; `root`/`nosqlbuddy-dev-root-pw` are fixed, non-secret dev-only credentials (see [Security -> Auditor access model](#auditor-access-model-dev-mode) for why, and what a real auditor's credentials look like). The live view shows:
    - **Event feed** — real-time stream of captured inserts, updates, and deletes
    - **Epoch progress** — how many events are in the current batch (fills up to 100 by default)
    - **On-chain root** — the last Merkle root committed to Stellar
@@ -835,6 +835,37 @@ Both use the **published Docker image** (`ghcr.io/ronnakamoto/nosqlbuddy-audit`,
    docker compose --env-file .env.audit --profile attester up -d
    ```
 
+### In-app Auditor Mode (no MongoDB required)
+
+NoSQLBuddy includes a built-in **Auditor Mode** that lets an independent auditor verify the audit trail **without any MongoDB connection**. The auditor only needs:
+
+- The **Soroban contract ID** (to query on-chain roots)
+- The **Stellar RPC URL** (to reach the network)
+- Their **age secret identity** (to decrypt IPFS batches)
+- Optional **Pinata credentials** (for faster IPFS gateway access)
+
+This is useful when:
+- The auditor is on a different machine with no access to the replica set
+- You want to demonstrate the audit trail to a third party who shouldn't see the database
+- You need to verify historical commitments long after the oplog has rolled
+
+**How it works:**
+1. Open NoSQLBuddy and go to **Audit Log → Auditor** tab.
+2. Enter the contract ID, RPC URL, and age identity (or click **Load Handoff Material** if running on the same machine as the operator).
+3. Click **Rebuild from Chain**. The app will:
+   - Query the on-chain root history from Stellar
+   - Extract IPFS CIDs from the metadata of each committed root
+   - Fetch the encrypted batches from IPFS
+   - Decrypt them with the auditor's age identity
+   - Replay all events into a fresh, isolated Merkle tree
+   - Compare the rebuilt root with the on-chain commitment
+
+The reconstructed tree lives in `<app_data_dir>/audit/auditor-rebuild/` — completely isolated from the operator's own audit log, so running this on the same machine never collides.
+
+**Handoff material:** When Dev Mode is active, the **Load Handoff Material** button fetches the ready-made values from `.env.audit` (contract ID, RPC URL, age keys, leaf key, and the auditor's MongoDB connection string). In a real deployment, these are exchanged via a secure channel (Signal, 1Password, PGP) rather than copy-paste.
+
+**Security note:** The auditor's age secret key is sensitive material. The UI shows it only behind an explicit **Reveal** button. Never share age secret keys over unencrypted channels.
+
 ### Managing the stack
 
 Each party manages their own containers independently:
@@ -875,6 +906,35 @@ cargo test -p nosqlbuddy-audit-service --all-targets
 - Connection secrets are stored in the OS keychain, not in plaintext files or settings.
 - Passwords and URIs are redacted from error messages, logs, and IPC responses.
 - Tauri capabilities are scoped to the minimum permissions required by the main window.
+
+### Auditor access model (Dev Mode)
+
+In a real audit, the auditor/regulator does not get free rein over the operator's database — they get **controlled, read-only access** scoped to what they need to independently verify completeness. The Dev Mode replica set (`docker-compose.audit-db.yml`) models this instead of hand-waving it:
+
+- The 3-node replica set runs with `--auth` + a shared keyFile (intra-cluster auth) enabled from first boot. Unauthenticated connections are rejected outright.
+- **`root`** (full admin) is the operator's credential — used by the publisher and the demo seeder.
+- **`auditor`** is a dedicated, minimal-privilege credential: it can `find` on `local.oplog.rs` (enough to independently recompute the oplog Merkle hash) and run `replSetGetStatus` (replication topology) — nothing else. It cannot read `shopkeeper.orders` or any other application data, and cannot write anything.
+- `mongo3` (the independent member) is configured `priority: 0, hidden: true` — it can never become primary and is invisible to normal driver topology discovery / default read preference, so it never serves app traffic. It still counts as a full voting member (`votes: 1`), which matters: the oplog-completeness trust model relies on `w:"majority"` forcing replication to this member before a write acknowledges, so it must count toward the majority.
+
+Both users are created once, automatically, by `scripts/rs-init-audit.js` (run via a custom entrypoint, `scripts/mongo-entrypoint.sh`, against the primary's own loopback while MongoDB's "localhost exception" is open — i.e. before any user exists anywhere in the deployment). The credentials are fixed, non-secret, and documented directly in that script — appropriate for an isolated local Docker network used purely to demonstrate the concept. A real deployment must generate and rotate its own credentials out of band, exactly like the Stellar/age keys the setup wizard generates fresh per run.
+
+Try the boundary yourself:
+```bash
+# Full access with the operator's credential:
+docker exec nosqlbuddy-audit-db-mongo1-1 mongosh \
+  "mongodb://root:nosqlbuddy-dev-root-pw@127.0.0.1:27017/?authSource=admin" \
+  --eval "db.getSiblingDB('shopkeeper').orders.countDocuments()"
+
+# The auditor's credential can read the oplog...
+docker exec nosqlbuddy-audit-db-mongo3-1 mongosh \
+  "mongodb://auditor:nosqlbuddy-dev-auditor-pw@127.0.0.1:27017/?authSource=admin" \
+  --eval "db.getSiblingDB('local').oplog.rs.find().limit(1).count()"
+
+# ...but is denied on application data, both for reads and writes.
+docker exec nosqlbuddy-audit-db-mongo3-1 mongosh \
+  "mongodb://auditor:nosqlbuddy-dev-auditor-pw@127.0.0.1:27017/?authSource=admin" \
+  --eval "db.getSiblingDB('shopkeeper').orders.countDocuments()"
+```
 
 ### Oplog completeness protocol
 

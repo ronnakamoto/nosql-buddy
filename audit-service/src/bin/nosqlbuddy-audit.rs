@@ -540,7 +540,9 @@ async fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         &pinata_api_secret,
         &pinata_gateway,
         &age_operator_secret,
+        &age_operator_public,
         &age_attester_secret,
+        &age_attester_public,
         &age_recipients,
         &leaf_key_hex,
     )?;
@@ -1083,7 +1085,9 @@ fn write_env_file(
     pinata_api_secret: &str,
     pinata_gateway: &str,
     age_operator_secret: &str,
+    age_operator_public: &str,
     age_attester_secret: &str,
+    age_attester_public: &str,
     age_recipients: &str,
     leaf_key_hex: &str,
 ) -> Result<(), String> {
@@ -1105,10 +1109,18 @@ fn write_env_file(
         format!("PINATA_GATEWAY_URL={pinata_gateway}"),
     ];
 
-    if !age_operator_secret.is_empty() {
+    if !age_operator_secret.is_empty() || !age_operator_public.is_empty() {
         lines.push(String::new());
         lines.push("# Age encryption identities (for encrypted IPFS batches)".to_string());
+    }
+    if !age_operator_public.is_empty() {
+        lines.push(format!("AGE_OPERATOR_PUBLIC_KEY={age_operator_public}"));
+    }
+    if !age_operator_secret.is_empty() {
         lines.push(format!("AGE_OPERATOR_SECRET={age_operator_secret}"));
+    }
+    if !age_attester_public.is_empty() {
+        lines.push(format!("AGE_ATTESTER_PUBLIC_KEY={age_attester_public}"));
     }
     if !age_attester_secret.is_empty() {
         lines.push(format!("AGE_ATTESTER_SECRET={age_attester_secret}"));
@@ -1119,6 +1131,7 @@ fn write_env_file(
     if !leaf_key_hex.is_empty() {
         lines.push(String::new());
         lines.push("# HMAC key for v2 audit leaf derivation (32 bytes, hex)".to_string());
+        lines.push(format!("AUDIT_LEAF_KEY_HEX={leaf_key_hex}"));
         lines.push(format!("AUDIT_LEAF_KEY={leaf_key_hex}"));
     }
 
@@ -1176,6 +1189,27 @@ async fn cmd_start(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize the audit log with persistence.
     let audit_log = Arc::new(AuditLog::new()?);
+
+    // Set the leaf key BEFORE replay so v2 events (HMAC leaves) can be
+    // verified during persistence restoration. If set after replay, any
+    // existing v2 events in the log will fail with "v2 event requires leaf
+    // key, but none is configured".
+    if let Some(leaf_key_hex) = &config.leaf_key_hex {
+        let leaf_key = hex::decode(leaf_key_hex)
+            .map_err(|e| format!("invalid AUDIT_LEAF_KEY hex: {e}"))?;
+        if leaf_key.len() != 32 {
+            return Err(format!(
+                "AUDIT_LEAF_KEY must be 32 bytes, got {}",
+                leaf_key.len()
+            )
+            .into());
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&leaf_key);
+        audit_log.set_leaf_key(key);
+        log::info!("audit log: v2 leaf derivation enabled (HMAC-SHA-256)");
+    }
+
     audit_log.set_persistence_dir(&config.data_dir)?;
     log::info!(
         "audit log initialized: {} events, root: {}",
@@ -1364,19 +1398,6 @@ async fn cmd_start(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             None
         };
-
-    // Set the leaf key on the audit log if configured.
-    if let Some(leaf_key_hex) = &config.leaf_key_hex {
-        let leaf_key = hex::decode(leaf_key_hex)
-            .map_err(|e| format!("invalid AUDIT_LEAF_KEY hex: {e}"))?;
-        if leaf_key.len() != 32 {
-            return Err(format!("AUDIT_LEAF_KEY must be 32 bytes, got {}", leaf_key.len()).into());
-        }
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&leaf_key);
-        audit_log.set_leaf_key(key);
-        log::info!("audit log: v2 leaf derivation enabled (HMAC-SHA-256)");
-    }
 
     // Build the daemon state.
     let state = Arc::new(DaemonState {
