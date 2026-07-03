@@ -9,6 +9,7 @@
 //! - `audit_commit_root` — commit the current root to Stellar testnet.
 //! - `audit_get_onchain_root` — query the latest committed root from Stellar.
 
+use base64::Engine;
 use serde::Serialize;
 use tauri::State;
 
@@ -352,16 +353,27 @@ pub async fn audit_record_event(
     deployment_id: Option<String>,
     payload: String,
 ) -> AppResult<u64> {
-    // The leaf is derived from the raw payload string. The same payload
-    // is stored on disk so replay can recompute and verify the leaf.
-    let leaf = crate::audit::leaf_from_payload(&operation, &database, &collection, &payload);
+    // When v2 leaf derivation is active, treat the user-supplied payload
+    // as the `data` field of a canonical payload.
+    let (payload_to_store, leaf) = if state.audit_log.has_leaf_key() {
+        let canonical = crate::audit::crypto::canonical_payload_bytes(
+            &operation, &database, &collection, &payload,
+        );
+        let payload_b64 = base64::engine::general_purpose::STANDARD.encode(&canonical);
+        let key = state.audit_log.leaf_key().expect("leaf key checked above");
+        let leaf = crate::audit::crypto::hmac_leaf(&key, &canonical);
+        (payload_b64, leaf)
+    } else {
+        let leaf = crate::audit::leaf_from_payload(&operation, &database, &collection, &payload);
+        (payload, leaf)
+    };
 
     let index = state.audit_log.record(
         deployment_id.as_deref().unwrap_or(""),
         &operation,
         &database,
         &collection,
-        &payload,
+        &payload_to_store,
         leaf,
     )?;
 
@@ -869,7 +881,7 @@ pub async fn audit_publish_epoch_to_ipfs(
 
     // Publish to IPFS.
     let result =
-        crate::audit::ipfs::publish_epoch_batch(&config, epoch_number, &batch_content).await?;
+        crate::audit::ipfs::publish_epoch_batch(&config, epoch_number, batch_content.as_bytes()).await?;
 
     // Save the CID to sled.
     state.audit_log.save_ipfs_cid(epoch_number, &result.cid)?;
@@ -1437,7 +1449,7 @@ pub async fn audit_publish_epoch_to_pinata(
 
     // Publish to Pinata.
     let result =
-        crate::audit::pinata::publish_epoch_batch(&pinata_config, epoch_number, &batch_content)
+        crate::audit::pinata::publish_epoch_batch(&pinata_config, epoch_number, batch_content.as_bytes())
             .await?;
 
     // Save the CID to sled.

@@ -58,17 +58,19 @@ pub struct IpfsPublishResult {
     pub batch_size_bytes: u64,
     /// The IPFS gateway URL for viewing the batch.
     pub gateway_url: String,
+    /// Whether the batch was age-encrypted before pinning.
+    pub encrypted: bool,
 }
 
 /// Publish an epoch's event batch to IPFS.
 ///
-/// `batch_content` is the JSONL representation of the epoch's events.
-/// The content is added to IPFS via the HTTP API, and the resulting
-/// CID is returned.
+/// `batch_content` is the raw bytes of the epoch batch (plaintext JSONL or
+/// encrypted ciphertext). The content is added to IPFS via the HTTP API,
+/// and the resulting CID is returned.
 pub async fn publish_epoch_batch(
     config: &IpfsConfig,
     epoch_number: u64,
-    batch_content: &str,
+    batch_content: &[u8],
 ) -> AuditResult<IpfsPublishResult> {
     if batch_content.is_empty() {
         return Err(AuditError::Validation(
@@ -76,7 +78,9 @@ pub async fn publish_epoch_batch(
         ));
     }
 
-    let event_count = batch_content.lines().filter(|l| !l.trim().is_empty()).count() as u64;
+    let event_count = std::str::from_utf8(batch_content)
+        .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count() as u64)
+        .unwrap_or(0);
     let batch_size_bytes = batch_content.len() as u64;
 
     // Construct the IPFS API URL for adding a file.
@@ -86,20 +90,19 @@ pub async fn publish_epoch_batch(
         config.cid_version
     );
 
-    // The IPFS /add endpoint expects multipart/form-data with the file
-    // content. We construct a simple multipart body manually.
-    let boundary = "nosqlbuddy-ipfs-boundary";
-    let filename = format!("epoch-{}.jsonl", epoch_number);
-    let body = format_multipart_body(boundary, &filename, batch_content);
+    let filename = format!("epoch-{}", epoch_number);
+    let form = reqwest::multipart::Form::new().part(
+        "file",
+        reqwest::multipart::Part::bytes(batch_content.to_vec())
+            .file_name(filename)
+            .mime_str("application/octet-stream")
+            .map_err(|e| AuditError::Validation(format!("multipart mime: {e}")))?,
+    );
 
     let client = reqwest::Client::new();
     let response = client
         .post(&url)
-        .header(
-            "Content-Type",
-            format!("multipart/form-data; boundary={}", boundary),
-        )
-        .body(body)
+        .multipart(form)
         .send()
         .await
         .map_err(|e| AuditError::Validation(format!("IPFS API request failed: {e}")))?;
@@ -114,7 +117,7 @@ pub async fn publish_epoch_batch(
     }
 
     // The IPFS /add API returns JSON with the CID.
-    // Format: {"Name":"epoch-0.jsonl","Hash":"bafy...","Size":"123"}
+    // Format: {"Name":"epoch-0","Hash":"bafy...","Size":"123"}
     let ipfs_response: IpfsAddResponse = response
         .json()
         .await
@@ -135,7 +138,38 @@ pub async fn publish_epoch_batch(
         event_count,
         batch_size_bytes,
         gateway_url,
+        encrypted: false,
     })
+}
+
+/// Fetch raw bytes for a CID from the local IPFS daemon.
+pub async fn fetch_batch(config: &IpfsConfig, cid: &str) -> AuditResult<Vec<u8>> {
+    let url = format!(
+        "{}/api/v0/cat?arg={}",
+        config.api_url.trim_end_matches('/'),
+        cid
+    );
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&url)
+        .send()
+        .await
+        .map_err(|e| AuditError::Validation(format!("IPFS cat request failed: {e}")))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(AuditError::Validation(format!(
+            "IPFS cat returned error: {} {}",
+            status, text
+        )));
+    }
+
+    response
+        .bytes()
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|e| AuditError::Validation(format!("failed to read IPFS cat response: {e}")))
 }
 
 /// Check if an IPFS daemon is reachable at the configured URL.
@@ -146,21 +180,6 @@ pub async fn check_daemon(config: &IpfsConfig) -> AuditResult<bool> {
         Ok(resp) => Ok(resp.status().is_success()),
         Err(_) => Ok(false),
     }
-}
-
-/// Construct a multipart/form-data body for the IPFS /add endpoint.
-/// This is a minimal implementation — just one file field.
-fn format_multipart_body(boundary: &str, filename: &str, content: &str) -> String {
-    format!(
-        "--{boundary}\r\n\
-         Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n\
-         Content-Type: application/octet-stream\r\n\r\n\
-         {content}\r\n\
-         --{boundary}--\r\n",
-        boundary = boundary,
-        filename = filename,
-        content = content,
-    )
 }
 
 /// The IPFS /add API response.
@@ -189,27 +208,20 @@ mod tests {
             event_count: 100,
             batch_size_bytes: 4096,
             gateway_url: "https://dweb.link/ipfs/bafy123".to_string(),
+            encrypted: true,
         };
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("\"epochNumber\":5"));
         assert!(json.contains("\"eventCount\":100"));
         assert!(json.contains("\"batchSizeBytes\":4096"));
         assert!(json.contains("\"gatewayUrl\""));
-    }
-
-    #[test]
-    fn format_multipart_body_contains_boundary_and_content() {
-        let body = format_multipart_body("test-boundary", "epoch-0.jsonl", "hello world");
-        assert!(body.contains("--test-boundary"));
-        assert!(body.contains("filename=\"epoch-0.jsonl\""));
-        assert!(body.contains("hello world"));
-        assert!(body.contains("--test-boundary--"));
+        assert!(json.contains("\"encrypted\":true"));
     }
 
     #[tokio::test]
     async fn publish_empty_batch_returns_error() {
         let config = IpfsConfig::default();
-        let result = publish_epoch_batch(&config, 0, "").await;
+        let result = publish_epoch_batch(&config, 0, b"").await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()

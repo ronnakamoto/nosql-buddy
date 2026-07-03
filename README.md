@@ -106,7 +106,7 @@ docker compose run --rm seeder   # re-seed the demo data
 - **Schema and index analysis** — Infer schema shape, cardinality, and index usage from sampled documents.
 - **Explain plan visualization** — Parse `explain` output into a navigable tree to diagnose slow queries.
 - **Driver code generation** — Export queries and pipelines to Node.js, Python, Java, C#, Ruby, Rust, and the MongoDB shell.
-- **ZK audit log** — Tamper-evident Poseidon Merkle tree, Groth16 inclusion proofs, epoch batching with IPFS publishing and Stellar on-chain commitments (testnet or mainnet), multi-publisher K-of-N threshold attestation, and reader-mode verification against on-chain roots. Two modes: **Dev Mode** (full stack locally via Docker, available now) and **Production Mode** (in-app pipeline with your own keys, coming soon).
+- **ZK audit log** — Tamper-evident Poseidon Merkle tree, Groth16 inclusion proofs, epoch batching with IPFS publishing and Stellar on-chain commitments (testnet or mainnet), multi-publisher K-of-N threshold attestation, and reader-mode verification against on-chain roots. Two modes: **Dev Mode** (full stack locally via Docker, available now) and **Production Mode** (in-app pipeline with your own keys, coming soon). **Batch encryption** with age (X25519 multi-recipient) ensures only authorized auditors can read published epoch batches. **Keyed leaf derivation** (HMAC-SHA-256) resists offline dictionary attacks against public circuit signals.
 - **Audit domains & selective disclosure** — Events are segmented per `(deployment, database)` domain, each with its own secondary Merkle root, so you can prove one tenant's record without revealing any other domain's data. An aggregation **super-root** over all domain roots (anchored in the on-chain commit metadata) lets you prove a domain is part of the committed state, and per-domain **legal hold** and **retention/pruning** manage lifecycle while keeping the anchored history intact and verifiable.
 - **Oplog completeness** — Deterministic SHA-256 Merkle tree over MongoDB's oplog (`local.oplog.rs`), binding the audit log to the same ground truth that MongoDB's replication protocol uses. An independent replica member (run by the auditor/regulator) provides a trust anchor that detects any omitted writes. The on-chain commitment stores both the audit log root and the oplog root, and independent attesters submit ed25519 attestations over the oplog root for durable, post-rollover verification.
 - **Standalone audit service** — `nosqlbuddy-audit` runs independently of the desktop app, capturing MongoDB change stream events, batching into epochs, publishing to IPFS, and committing Merkle roots on-chain via an HTTP API. Signs transactions natively (ed25519 + Soroban RPC) — no `stellar` CLI required. Includes an interactive `setup` wizard for one-command key generation, contract deployment, and attester authorization.
@@ -913,13 +913,19 @@ Two preconditions (both required, both explicit):
 
 The public sees only hashes — the oplog Merkle root, the audit log root, and ZK proofs. No database content is leaked on-chain. The auditor/regulator sees the oplog on the independent member (they are legally entitled to this access). NoSQLBuddy's reader mode shows only the hash comparison result, not the raw oplog data.
 
+**Batch encryption (age).** Every epoch batch published to IPFS is encrypted with the age file encryption format (XChaCha20-Poly1305 + X25519 recipient envelopes) before pinning. The ciphertext is what goes on-chain as the CID — plaintext never leaves the operator's machine unencrypted. Only age recipients (the operator + each authorized auditor) can decrypt. The on-chain metadata still commits to the CID, so integrity is unchanged: anyone can verify *that* a batch was published at a given time, but only key-holders can read it.
+
+**Keyed leaf derivation (HMAC-SHA-256).** The Merkle leaf for each event is derived from the canonical payload using a 32-byte HMAC key (`k_audit`) shared with auditors. This prevents offline dictionary attacks: an attacker who sees the `leaf` public signal in a ZK proof cannot confirm "did operation X on document Y happen?" by guessing payloads and comparing SHA-256 hashes. The key is generated at setup and written to `.env.audit` (`AUDIT_LEAF_KEY`).
+
+**Canonical payload encoding (v2).** The payload format switched from pipe-delimited strings (`"op|db|col|data"`) to an unambiguous, length-prefixed binary encoding (`[op_len: u32 BE][op_bytes][db_len][db_bytes][col_len][col_bytes][data_len][data_bytes]`). This eliminates delimiter-injection vulnerabilities: a collection name containing `|` or JSON delimiters can no longer be confused with format boundaries.
+
 CSFLE (Client-Side Field-Level Encryption) is an optional privacy enhancement (T2 tier) that makes the independent member see ciphertext instead of plaintext. T3 adds TEE-based observers for plaintext-capable independent compute under hardware attestation. The hackathon deliverable is T1 (base tier).
 
 #### Secure-config tiers
 
 | Tier | Config | What it adds |
 |---|---|---|
-| **T1 — Base (this project)** | Oplog binding + independent member + NoSQLBuddy reader | Deterministic completeness; auditor sees oplog on the independent member; public sees only hashes |
+| **T1 — Base (this project)** | Oplog binding + independent member + NoSQLBuddy reader + age-encrypted batches + HMAC leaves | Deterministic completeness; encrypted batch availability; auditor sees oplog on the independent member; public sees only hashes |
 | **T2 — + CSFLE** | T1 + field-level encryption | Independent member sees ciphertext, not plaintext — full privacy-preserving verification |
 | **T3 — + TEE** | T2 + TEE observers | Plaintext-capable independent compute under hardware attestation |
 
@@ -941,6 +947,9 @@ There is **one** assumption: at least one independent replica member computes an
 | Oplog entries roll over (capped collection) | The independent attester signs each epoch's oplog hash while present, providing a durable on-chain record |
 | Operator commits a different hash than their oplog contains | The on-chain oplog root is compared with the auditor's independent computation |
 | Replication lag causes inconsistent views | Only entries up to the majority-committed point are hashed |
+| IPFS batch content is public | Every batch is age-encrypted to operator + auditor recipients before pinning; only ciphertext is public |
+| Offline dictionary attack against published leaf hashes | HMAC-SHA-256 leaf derivation with a shared secret key (`k_audit`) prevents guessing-and-checking against the public `leaf` circuit signal |
+| Payload delimiter injection | Canonical v2 encoding uses explicit 4-byte length prefixes instead of pipe delimiters — no byte sequence can be confused with a boundary |
 
 #### Running the demo
 

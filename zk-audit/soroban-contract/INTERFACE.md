@@ -377,9 +377,24 @@ auditor can verify inclusion without trusting the committer.
 
 `metadata` is a free-form `String` supplied by the committer. Recommended
 off-chain convention (enforced by the off-chain client, not the contract):
-a short JSON blob such as `{"tree_height":20,"leaf_count":1024,"db_epoch":42}`.
+a short key-value string such as `epoch=42 cid=bafy... oplog_root=0x...`.
 The contract does **not** parse it; it only stores and echoes it. A max
 length (e.g. 256 bytes) should be enforced to bound gas — see §7.
+
+**Encrypted batches.** The `cid` value in metadata refers to an **age-encrypted**
+ciphertext, not plaintext JSONL. The off-chain publisher encrypts each epoch
+batch with `age` (XChaCha20-Poly1305, X25519 recipients) before pinning to
+IPFS. The on-chain commitment binds to the ciphertext CID, so:
+- Anyone can verify *that* a batch was published at a given time (integrity).
+- Only age recipients (operator + authorized auditors) can decrypt and read it
+  (confidentiality).
+
+**Keyed leaf derivation.** The `leaf` public signal in inclusion proofs is
+derived with `HMAC-SHA-256(k_audit, canonical_payload)` rather than raw
+`SHA-256(payload)`. This prevents offline dictionary attacks: an observer who
+sees the `leaf` signal cannot confirm "did operation X on document Y happen?"
+by guessing payloads and comparing hashes. The auditor must know `k_audit` to
+verify leaves, which is shared out-of-band during setup.
 
 ---
 

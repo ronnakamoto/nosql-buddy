@@ -44,6 +44,7 @@
 
 pub mod attestation;
 pub mod change_stream;
+pub mod crypto;
 pub mod dev_proxy;
 pub mod dev_setup;
 pub mod epoch;
@@ -72,6 +73,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use base64::Engine;
 use zk_audit::merkle::AuditMerkleTree;
 use zk_audit::InclusionProof;
 
@@ -121,15 +123,30 @@ struct PersistedEvent {
     /// is recomputed on replay from event ordering.
     #[serde(default)]
     sequence: u64,
-    /// The canonical payload string the leaf was derived from
-    /// (`"{op}|{db}|{col}|{args}"`). Stored verbatim so the leaf can be
-    /// recomputed and checked against `leaf_hex`.
+    /// The canonical payload string the leaf was derived from.
+    ///
+    /// - **v1** (legacy): `"{op}|{db}|{col}|{args}"` — pipe-delimited,
+    ///   leaf derived via `SHA-256(payload)`.
+    /// - **v2** (current): base64-encoded canonical bytes
+    ///   (`canonical_payload_bytes(op, db, col, data)`), leaf derived via
+    ///   `HMAC-SHA-256(k_audit, canonical_bytes)`.
     payload: String,
     leaf_hex: String,
     /// Merkle root hex computed *after* this leaf was inserted. Forms a
     /// chain: each event's `root_after` is a function of all prior leaves.
     root_after: String,
     timestamp: String,
+    /// Event format version.
+    ///
+    /// - `1` (or missing, which deserializes to `0`) = legacy pipe-delimited
+    ///   payload + SHA-256 leaf.
+    /// - `2` = canonical binary payload + HMAC leaf.
+    #[serde(default = "default_event_version")]
+    version: u32,
+}
+
+fn default_event_version() -> u32 {
+    1
 }
 
 /// A retained commitment for a logically pruned audit domain segment.
@@ -177,6 +194,11 @@ pub struct AuditLog {
     legal_holds: Mutex<HashSet<(String, String)>>,
     /// Retained roots for logically pruned domain segments.
     retained_domain_roots: Mutex<HashMap<(String, String), Vec<DomainRetentionRoot>>>,
+    /// HMAC key for v2 leaf derivation (`k_audit`). When `Some`, new events
+    /// are written as **v2** (canonical payload + HMAC leaf). When `None`,
+    /// new events are written as **v1** (pipe-delimited + SHA-256 leaf).
+    /// Replay automatically dispatches on each event's stored `version`.
+    leaf_key: Mutex<Option<[u8; 32]>>,
 }
 
 impl AuditLog {
@@ -191,7 +213,69 @@ impl AuditLog {
             sled_store: Mutex::new(None),
             legal_holds: Mutex::new(HashSet::new()),
             retained_domain_roots: Mutex::new(HashMap::new()),
+            leaf_key: Mutex::new(None),
         })
+    }
+
+    /// Set the HMAC leaf derivation key. After this is called, all new
+    /// events are recorded as **v2** (canonical payload + HMAC leaf).
+    pub fn set_leaf_key(&self, key: [u8; 32]) {
+        *self.leaf_key.lock().unwrap_or_else(|e| e.into_inner()) = Some(key);
+    }
+
+    /// Clear the HMAC leaf derivation key. New events revert to **v1**.
+    #[allow(dead_code)]
+    pub fn clear_leaf_key(&self) {
+        *self.leaf_key.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// Whether a leaf key is configured (v2 mode is active).
+    pub fn has_leaf_key(&self) -> bool {
+        self.leaf_key.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    }
+
+    /// Get the configured leaf key, if any.
+    pub fn leaf_key(&self) -> Option<[u8; 32]> {
+        *self.leaf_key.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Recompute the leaf for a persisted event, dispatching on its
+    /// stored `version`.
+    ///
+    /// - v1 (or missing): uses the legacy `leaf_from_payload` (SHA-256).
+    /// - v2: base64-decodes the payload and computes `HMAC-SHA-256(k_audit,
+    ///   canonical_bytes)`.
+    fn recompute_leaf(&self, event: &PersistedEvent) -> AuditResult<ark_bn254::Fr> {
+        match event.version {
+            1 | 0 => Ok(leaf_from_payload(
+                &event.operation,
+                &event.database,
+                &event.collection,
+                &event.payload,
+            )),
+            2 => {
+                let key = self
+                    .leaf_key
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .ok_or_else(|| {
+                        AuditError::Validation(
+                            "v2 event requires leaf key, but none is configured".to_string(),
+                        )
+                    })?;
+                let canonical = base64::engine::general_purpose::STANDARD.decode(&event.payload).map_err(|e| {
+                    AuditError::Validation(format!(
+                        "v2 event base64 decode failed at index {}: {e}",
+                        event.index
+                    ))
+                })?;
+                Ok(crate::audit::crypto::hmac_leaf(&key, &canonical))
+            }
+            v => Err(AuditError::Validation(format!(
+                "unknown event version {v} at index {}",
+                event.index
+            ))),
+        }
     }
 
     /// Enable on-disk persistence and replay any existing log.
@@ -406,8 +490,7 @@ impl AuditLog {
         let mut seq_counters: HashMap<(String, String), u64> = HashMap::new();
 
         for ev in &parsed {
-            let recomputed_leaf =
-                leaf_from_payload(&ev.operation, &ev.database, &ev.collection, &ev.payload);
+            let recomputed_leaf = self.recompute_leaf(ev)?;
             let recomputed_hex = fr_to_hex(recomputed_leaf);
             if recomputed_hex != ev.leaf_hex {
                 return Err(AuditError::ZkAudit(format!(
@@ -538,8 +621,7 @@ impl AuditLog {
             // 1. Recompute the leaf from the stored payload and verify
             //    it matches the stored leaf_hex. Mismatch ⇒ payload was
             //    edited after the fact.
-            let recomputed_leaf =
-                leaf_from_payload(&ev.operation, &ev.database, &ev.collection, &ev.payload);
+            let recomputed_leaf = self.recompute_leaf(ev)?;
             let recomputed_hex = fr_to_hex(recomputed_leaf);
             if recomputed_hex != ev.leaf_hex {
                 return Err(AuditError::ZkAudit(format!(
@@ -735,6 +817,9 @@ impl AuditLog {
             timestamp: timestamp.clone(),
         });
 
+        // Determine event version from the configured leaf key.
+        let version = if self.has_leaf_key() { 2 } else { 1 };
+
         // Persist atomically: append one JSONL line + fsync, all while
         // holding the persistence mutex. If persistence isn't wired yet
         // (e.g. in unit tests), this is a no-op.
@@ -751,6 +836,7 @@ impl AuditLog {
                 leaf_hex: leaf_hex.clone(),
                 root_after: root_after.clone(),
                 timestamp: timestamp.clone(),
+                version,
             };
             let line = serde_json::to_string(&persisted)?;
             writeln!(state.file, "{line}")?;

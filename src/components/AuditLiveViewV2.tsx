@@ -393,7 +393,7 @@ export function AuditLiveViewV2({
                 {pinataResult && (
                   <KeyValue
                     label="IPFS CID"
-                    value={<IpfsCidLink cid={pinataResult.cid} gatewayUrl={pinataResult.gatewayUrl} />}
+                    value={<IpfsCidLink cid={pinataResult.cid} gatewayUrl={pinataResult.gatewayUrl} encrypted={pinataResult.encrypted} />}
                   />
                 )}
               </div>
@@ -550,7 +550,7 @@ export function AuditLiveViewV2({
           {pinataResult && (
             <KeyValue
               label="IPFS CID (full)"
-              value={<IpfsCidLink cid={pinataResult.cid} gatewayUrl={pinataResult.gatewayUrl} showExternalIcon={true} />}
+              value={<IpfsCidLink cid={pinataResult.cid} gatewayUrl={pinataResult.gatewayUrl} showExternalIcon={true} encrypted={pinataResult.encrypted} />}
             />
           )}
         </Card>

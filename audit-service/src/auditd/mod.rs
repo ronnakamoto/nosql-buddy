@@ -123,6 +123,17 @@ pub struct DaemonConfig {
     pub pinata_config: Option<PinataConfig>,
     /// Chain configuration (network, RPC, Horizon, contract ID, passphrase).
     pub chain: DaemonChainConfig,
+    /// Age recipient public keys for encrypting epoch batches before IPFS
+    /// pinning. When non-empty, every published batch is encrypted to these
+    /// recipients using the age file encryption format.
+    pub age_recipients: Vec<String>,
+    /// The operator's age secret key (for decrypting their own batches).
+    pub age_operator_identity: Option<String>,
+    /// The attester's age secret key (for decrypting batches as an auditor).
+    pub age_attester_identity: Option<String>,
+    /// Hex-encoded 32-byte HMAC key for v2 leaf derivation. When set, the
+    /// audit log writes v2 events (canonical payload + HMAC leaf).
+    pub leaf_key_hex: Option<String>,
 }
 
 impl Default for DaemonConfig {
@@ -146,6 +157,10 @@ impl Default for DaemonConfig {
             attester_secret_key: None,
             pinata_config: None,
             chain: DaemonChainConfig::testnet(),
+            age_recipients: Vec::new(),
+            age_operator_identity: None,
+            age_attester_identity: None,
+            leaf_key_hex: None,
         }
     }
 }
@@ -183,6 +198,13 @@ pub struct DaemonState {
     pub attester_stellar_keypair: Option<StellarKeypair>,
     /// Chain configuration for native signing (network, RPC, Horizon, contract).
     pub chain: DaemonChainConfig,
+    /// Age recipient public keys for encrypting epoch batches before IPFS
+    /// pinning. When non-empty, every published batch is encrypted.
+    pub age_recipients: Vec<String>,
+    /// The operator's age secret key (for decrypting their own batches).
+    pub age_operator_identity: Option<String>,
+    /// The attester's age secret key (for decrypting batches as an auditor).
+    pub age_attester_identity: Option<String>,
 }
 
 /// HTTP error wrapper for AuditError. Converts domain errors into appropriate
@@ -352,17 +374,40 @@ pub async fn run_server(state: Arc<DaemonState>, port: u16) -> Result<(), Box<dy
 
 /// Publish an epoch batch to IPFS, preferring Pinata when credentials are
 /// configured, otherwise falling back to the local Kubo daemon.
+///
+/// When `state.age_recipients` is non-empty, the batch is encrypted with
+/// age before pinning so only authorized auditors can read it.
 async fn publish_epoch_batch_to_ipfs(
     state: &DaemonState,
     epoch_number: u64,
     batch_content: &str,
 ) -> Result<crate::audit::ipfs::IpfsPublishResult, crate::error::AuditError> {
-    if let Some(pinata) = &state.pinata_config {
-        if !pinata.api_key.is_empty() || !pinata.api_secret.is_empty() {
-            return crate::audit::pinata::publish_epoch_batch(pinata, epoch_number, batch_content).await;
+    let bytes_to_publish = if !state.age_recipients.is_empty() {
+        match crate::audit::crypto::encrypt_batch(batch_content, &state.age_recipients) {
+            Ok(encrypted) => {
+                tracing::info!("epoch {epoch_number}: encrypted batch for {} recipient(s)", state.age_recipients.len());
+                encrypted
+            }
+            Err(e) => {
+                tracing::warn!("epoch {epoch_number}: age encryption failed: {e} — publishing plaintext");
+                batch_content.as_bytes().to_vec()
+            }
         }
-    }
-    crate::audit::ipfs::publish_epoch_batch(&state.ipfs_config, epoch_number, batch_content).await
+    } else {
+        batch_content.as_bytes().to_vec()
+    };
+
+    let mut result = if let Some(pinata) = &state.pinata_config {
+        if !pinata.api_key.is_empty() || !pinata.api_secret.is_empty() {
+            crate::audit::pinata::publish_epoch_batch(pinata, epoch_number, &bytes_to_publish).await?
+        } else {
+            crate::audit::ipfs::publish_epoch_batch(&state.ipfs_config, epoch_number, &bytes_to_publish).await?
+        }
+    } else {
+        crate::audit::ipfs::publish_epoch_batch(&state.ipfs_config, epoch_number, &bytes_to_publish).await?
+    };
+    result.encrypted = !state.age_recipients.is_empty();
+    Ok(result)
 }
 
 /// Check whether the configured IPFS backend is reachable.

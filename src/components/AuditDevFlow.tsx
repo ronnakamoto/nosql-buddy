@@ -659,7 +659,7 @@ function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
   const [closeBusy, setCloseBusy] = useState(false);
   const [commitBusy, setCommitBusy] = useState(false);
   const [commitStep, setCommitStep] = useState("");
-  const [commitResult, setCommitResult] = useState<{ txHash: string; cid: string; gatewayUrl?: string } | null>(null);
+  const [commitResult, setCommitResult] = useState<{ txHash: string; cid: string; gatewayUrl?: string; encrypted?: boolean } | null>(null);
   const toast = useToast();
   // Track the most recently committed epoch so attestation queries the
   // right epoch number (not `current`, which becomes the new open epoch).
@@ -804,6 +804,7 @@ function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
     setCommitResult(null);
     let cid = "";
     let gatewayUrl: string | undefined;
+    let encrypted = false;
     try {
       const num = lastClosedEpoch.epochNumber;
 
@@ -813,9 +814,10 @@ function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
           PUBLISHER_PORT,
           `epoch/${num}/publish-ipfs`,
           {},
-        )) as { cid?: string; gatewayUrl?: string };
+        )) as { cid?: string; gatewayUrl?: string; encrypted?: boolean };
         cid = pub?.cid ?? "";
         gatewayUrl = pub?.gatewayUrl;
+        encrypted = pub?.encrypted ?? false;
       } catch (e) {
         // IPFS publishing is optional. Continue to on-chain commit without a
         // CID so the root is still anchored even if no IPFS backend is up.
@@ -829,7 +831,7 @@ function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
         {},
       )) as { txHash?: string };
 
-      setCommitResult({ txHash: res?.txHash ?? "", cid, gatewayUrl });
+      setCommitResult({ txHash: res?.txHash ?? "", cid, gatewayUrl, encrypted });
       setCommitStep("Confirmed");
       setCommittedEpochNum(num);
       setPollingOnchain(true);
@@ -1086,7 +1088,7 @@ function DevLiveViewInner({ auditedMongoUri }: { auditedMongoUri: string }) {
                       {commitResult.cid && (
                         <KeyValue
                           label="IPFS CID"
-                          value={<IpfsCidLink cid={commitResult.cid} gatewayUrl={commitResult.gatewayUrl} />}
+                          value={<IpfsCidLink cid={commitResult.cid} gatewayUrl={commitResult.gatewayUrl} encrypted={commitResult.encrypted} />}
                         />
                       )}
                     </div>

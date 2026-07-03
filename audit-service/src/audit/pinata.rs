@@ -59,13 +59,13 @@ struct PinataPinResponse {
 
 /// Publish an epoch's event batch to IPFS via Pinata cloud pinning.
 ///
-/// `batch_content` is the JSONL representation of the epoch's events.
-/// The content is uploaded to Pinata's `pinFileToIPFS` endpoint, and
-/// the resulting CID is returned.
+/// `batch_content` is the raw bytes of the epoch batch (plaintext JSONL or
+/// encrypted ciphertext). The content is uploaded to Pinata's
+/// `pinFileToIPFS` endpoint, and the resulting CID is returned.
 pub async fn publish_epoch_batch(
     config: &PinataConfig,
     epoch_number: u64,
-    batch_content: &str,
+    batch_content: &[u8],
 ) -> AuditResult<IpfsPublishResult> {
     if batch_content.is_empty() {
         return Err(AuditError::Validation(
@@ -73,26 +73,26 @@ pub async fn publish_epoch_batch(
         ));
     }
 
-    let event_count = batch_content.lines().filter(|l| !l.trim().is_empty()).count() as u64;
+    let event_count = std::str::from_utf8(batch_content)
+        .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count() as u64)
+        .unwrap_or(0);
     let batch_size_bytes = batch_content.len() as u64;
 
-    // Pinata's pinFileToIPFS endpoint expects multipart/form-data with
-    // the file content. We construct the multipart body manually, the
-    // same way `ipfs.rs` does for the Kubo daemon.
-    let boundary = "nosqlbuddy-pinata-boundary";
-    let filename = format!("epoch-{}.jsonl", epoch_number);
-    let body = format_multipart_body(boundary, &filename, batch_content);
+    let filename = format!("epoch-{}", epoch_number);
+    let form = reqwest::multipart::Form::new().part(
+        "file",
+        reqwest::multipart::Part::bytes(batch_content.to_vec())
+            .file_name(filename)
+            .mime_str("application/octet-stream")
+            .map_err(|e| AuditError::Validation(format!("multipart mime: {e}")))?,
+    );
 
     let client = reqwest::Client::new();
     let response = client
         .post("https://api.pinata.cloud/pinning/pinFileToIPFS")
         .header("pinata_api_key", &config.api_key)
         .header("pinata_secret_api_key", &config.api_secret)
-        .header(
-            "Content-Type",
-            format!("multipart/form-data; boundary={}", boundary),
-        )
-        .body(body)
+        .multipart(form)
         .send()
         .await
         .map_err(|e| AuditError::Validation(format!("Pinata API request failed: {e}")))?;
@@ -130,13 +130,14 @@ pub async fn publish_epoch_batch(
         event_count,
         batch_size_bytes,
         gateway_url,
+        encrypted: false,
     })
 }
 
 /// Fetch a pinned batch from the Pinata gateway.
 ///
-/// Returns the raw content stored at the given CID.
-pub async fn fetch_batch(config: &PinataConfig, cid: &str) -> AuditResult<String> {
+/// Returns the raw bytes stored at the given CID.
+pub async fn fetch_batch(config: &PinataConfig, cid: &str) -> AuditResult<Vec<u8>> {
     let url = format!(
         "{}/ipfs/{}",
         config.gateway_url.trim_end_matches('/'),
@@ -160,8 +161,9 @@ pub async fn fetch_batch(config: &PinataConfig, cid: &str) -> AuditResult<String
     }
 
     response
-        .text()
+        .bytes()
         .await
+        .map(|b| b.to_vec())
         .map_err(|e| AuditError::Validation(format!("failed to read Pinata gateway response: {e}")))
 }
 
@@ -180,21 +182,6 @@ pub async fn check(config: &PinataConfig) -> AuditResult<bool> {
         Ok(resp) => Ok(resp.status().is_success()),
         Err(_) => Ok(false),
     }
-}
-
-/// Construct a multipart/form-data body for the Pinata `pinFileToIPFS`
-/// endpoint. This is a minimal implementation — just one file field.
-fn format_multipart_body(boundary: &str, filename: &str, content: &str) -> String {
-    format!(
-        "--{boundary}\r\n\
-         Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n\
-         Content-Type: application/octet-stream\r\n\r\n\
-         {content}\r\n\
-         --{boundary}--\r\n",
-        boundary = boundary,
-        filename = filename,
-        content = content,
-    )
 }
 
 #[cfg(test)]
@@ -225,20 +212,11 @@ mod tests {
     #[tokio::test]
     async fn publish_empty_batch_returns_error() {
         let config = PinataConfig::default();
-        let result = publish_epoch_batch(&config, 0, "").await;
+        let result = publish_epoch_batch(&config, 0, b"").await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
             .to_string()
             .contains("empty batch"));
-    }
-
-    #[test]
-    fn format_multipart_body_contains_boundary_and_content() {
-        let body = format_multipart_body("test-boundary", "epoch-0.jsonl", "hello world");
-        assert!(body.contains("--test-boundary"));
-        assert!(body.contains("filename=\"epoch-0.jsonl\""));
-        assert!(body.contains("hello world"));
-        assert!(body.contains("--test-boundary--"));
     }
 }

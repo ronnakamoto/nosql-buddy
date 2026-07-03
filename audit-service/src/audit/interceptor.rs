@@ -8,7 +8,9 @@
 
 use std::sync::Arc;
 
-use crate::audit::{leaf_from_payload, AuditLog};
+use base64::Engine;
+
+use crate::audit::{crypto, leaf_from_payload, AuditLog};
 use crate::error::AuditResult;
 
 /// Record an insert operation in the audit log.
@@ -19,8 +21,16 @@ pub fn record_insert(
     collection: &str,
     document_json: &str,
 ) -> AuditResult<u64> {
-    let payload = format!("insert|{}|{}|{}", database, collection, document_json);
-    let leaf = leaf_from_payload("insert", database, collection, &payload);
+    let (payload, leaf) = if audit.has_leaf_key() {
+        let canonical = crypto::build_insert_payload(database, collection, document_json);
+        let payload_b64 = base64::engine::general_purpose::STANDARD.encode(&canonical);
+        let leaf = compute_leaf_v2(audit, &canonical);
+        (payload_b64, leaf)
+    } else {
+        let payload = format!("insert|{}|{}|{}", database, collection, document_json);
+        let leaf = leaf_from_payload("insert", database, collection, &payload);
+        (payload, leaf)
+    };
     audit.record(
         deployment_id,
         "insert",
@@ -40,11 +50,19 @@ pub fn record_update(
     filter_json: &str,
     update_json: &str,
 ) -> AuditResult<u64> {
-    let payload = format!(
-        "update|{}|{}|{}|{}",
-        database, collection, filter_json, update_json
-    );
-    let leaf = leaf_from_payload("update", database, collection, &payload);
+    let (payload, leaf) = if audit.has_leaf_key() {
+        let canonical = crypto::build_update_payload(database, collection, filter_json, update_json);
+        let payload_b64 = base64::engine::general_purpose::STANDARD.encode(&canonical);
+        let leaf = compute_leaf_v2(audit, &canonical);
+        (payload_b64, leaf)
+    } else {
+        let payload = format!(
+            "update|{}|{}|{}|{}",
+            database, collection, filter_json, update_json
+        );
+        let leaf = leaf_from_payload("update", database, collection, &payload);
+        (payload, leaf)
+    };
     audit.record(
         deployment_id,
         "update",
@@ -63,8 +81,16 @@ pub fn record_delete(
     collection: &str,
     filter_json: &str,
 ) -> AuditResult<u64> {
-    let payload = format!("delete|{}|{}|{}", database, collection, filter_json);
-    let leaf = leaf_from_payload("delete", database, collection, &payload);
+    let (payload, leaf) = if audit.has_leaf_key() {
+        let canonical = crypto::build_delete_payload(database, collection, filter_json);
+        let payload_b64 = base64::engine::general_purpose::STANDARD.encode(&canonical);
+        let leaf = compute_leaf_v2(audit, &canonical);
+        (payload_b64, leaf)
+    } else {
+        let payload = format!("delete|{}|{}|{}", database, collection, filter_json);
+        let leaf = leaf_from_payload("delete", database, collection, &payload);
+        (payload, leaf)
+    };
     audit.record(
         deployment_id,
         "delete",
@@ -82,8 +108,16 @@ pub fn record_drop_collection(
     database: &str,
     collection: &str,
 ) -> AuditResult<u64> {
-    let payload = format!("drop_collection|{}|{}", database, collection);
-    let leaf = leaf_from_payload("drop_collection", database, collection, &payload);
+    let (payload, leaf) = if audit.has_leaf_key() {
+        let canonical = crypto::build_drop_collection_payload(database, collection);
+        let payload_b64 = base64::engine::general_purpose::STANDARD.encode(&canonical);
+        let leaf = compute_leaf_v2(audit, &canonical);
+        (payload_b64, leaf)
+    } else {
+        let payload = format!("drop_collection|{}|{}", database, collection);
+        let leaf = leaf_from_payload("drop_collection", database, collection, &payload);
+        (payload, leaf)
+    };
     audit.record(
         deployment_id,
         "drop_collection",
@@ -100,8 +134,16 @@ pub fn record_drop_database(
     deployment_id: &str,
     database: &str,
 ) -> AuditResult<u64> {
-    let payload = format!("drop_database|{}", database);
-    let leaf = leaf_from_payload("drop_database", database, "", &payload);
+    let (payload, leaf) = if audit.has_leaf_key() {
+        let canonical = crypto::build_drop_database_payload(database);
+        let payload_b64 = base64::engine::general_purpose::STANDARD.encode(&canonical);
+        let leaf = compute_leaf_v2(audit, &canonical);
+        (payload_b64, leaf)
+    } else {
+        let payload = format!("drop_database|{}", database);
+        let leaf = leaf_from_payload("drop_database", database, "", &payload);
+        (payload, leaf)
+    };
     audit.record(deployment_id, "drop_database", database, "", &payload, leaf)
 }
 
@@ -113,8 +155,16 @@ pub fn record_rename_collection(
     collection: &str,
     new_name: &str,
 ) -> AuditResult<u64> {
-    let payload = format!("rename|{}|{}|{}", database, collection, new_name);
-    let leaf = leaf_from_payload("rename", database, collection, &payload);
+    let (payload, leaf) = if audit.has_leaf_key() {
+        let canonical = crypto::build_rename_payload(database, collection, new_name);
+        let payload_b64 = base64::engine::general_purpose::STANDARD.encode(&canonical);
+        let leaf = compute_leaf_v2(audit, &canonical);
+        (payload_b64, leaf)
+    } else {
+        let payload = format!("rename|{}|{}|{}", database, collection, new_name);
+        let leaf = leaf_from_payload("rename", database, collection, &payload);
+        (payload, leaf)
+    };
     audit.record(
         deployment_id,
         "rename",
@@ -134,11 +184,19 @@ pub fn record_create_index(
     keys_json: &str,
     options_json: &str,
 ) -> AuditResult<u64> {
-    let payload = format!(
-        "create_index|{}|{}|{}|{}",
-        database, collection, keys_json, options_json
-    );
-    let leaf = leaf_from_payload("create_index", database, collection, &payload);
+    let (payload, leaf) = if audit.has_leaf_key() {
+        let canonical = crypto::build_create_index_payload(database, collection, keys_json, options_json);
+        let payload_b64 = base64::engine::general_purpose::STANDARD.encode(&canonical);
+        let leaf = compute_leaf_v2(audit, &canonical);
+        (payload_b64, leaf)
+    } else {
+        let payload = format!(
+            "create_index|{}|{}|{}|{}",
+            database, collection, keys_json, options_json
+        );
+        let leaf = leaf_from_payload("create_index", database, collection, &payload);
+        (payload, leaf)
+    };
     audit.record(
         deployment_id,
         "create_index",
@@ -157,8 +215,16 @@ pub fn record_drop_index(
     collection: &str,
     index_name: &str,
 ) -> AuditResult<u64> {
-    let payload = format!("drop_index|{}|{}|{}", database, collection, index_name);
-    let leaf = leaf_from_payload("drop_index", database, collection, &payload);
+    let (payload, leaf) = if audit.has_leaf_key() {
+        let canonical = crypto::build_drop_index_payload(database, collection, index_name);
+        let payload_b64 = base64::engine::general_purpose::STANDARD.encode(&canonical);
+        let leaf = compute_leaf_v2(audit, &canonical);
+        (payload_b64, leaf)
+    } else {
+        let payload = format!("drop_index|{}|{}|{}", database, collection, index_name);
+        let leaf = leaf_from_payload("drop_index", database, collection, &payload);
+        (payload, leaf)
+    };
     audit.record(
         deployment_id,
         "drop_index",
@@ -167,6 +233,15 @@ pub fn record_drop_index(
         &payload,
         leaf,
     )
+}
+
+/// Compute a v2 leaf using the audit log's configured HMAC key.
+/// Panics if no key is configured (callers must check `has_leaf_key()` first).
+fn compute_leaf_v2(audit: &AuditLog, canonical_payload: &[u8]) -> ark_bn254::Fr {
+    let key = audit
+        .leaf_key()
+        .expect("compute_leaf_v2 called without leaf key configured");
+    crypto::hmac_leaf(&key, canonical_payload)
 }
 
 #[cfg(test)]

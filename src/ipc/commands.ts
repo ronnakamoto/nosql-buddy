@@ -1188,6 +1188,8 @@ export interface IpfsPublishResult {
   eventCount: number;
   batchSizeBytes: number;
   gatewayUrl: string;
+  /** Whether the batch was age-encrypted before pinning. */
+  encrypted: boolean;
 }
 
 /** Onboarding status — which components are already provisioned. */

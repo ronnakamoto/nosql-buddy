@@ -307,11 +307,20 @@ fn verify_root_chain(jsonl: &str, up_to_index: u64) -> bool {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let payload = ev.get("payload").and_then(|v| v.as_str()).unwrap_or("");
+        let version = ev.get("version").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let stored_leaf = event_str(&ev, "leaf_hex", "leafHex").unwrap_or("");
         let stored_root = event_str(&ev, "root_after", "rootAfter").unwrap_or("");
 
         // (a) Recompute the leaf and check it matches the stored leaf_hex.
-        let recomputed_leaf = leaf_from_payload(operation, database, collection, payload);
+        let recomputed_leaf = match version {
+            1 | 0 => leaf_from_payload(operation, database, collection, payload),
+            2 => {
+                // v2 events require the leaf key to recompute the HMAC leaf.
+                // If no key is available, we cannot verify v2 events.
+                return false;
+            }
+            _ => return false,
+        };
         if fr_to_hex(recomputed_leaf) != stored_leaf {
             return false;
         }
