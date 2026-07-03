@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use crate::audit::{leaf_from_payload, AuditLog};
+use crate::audit::{crypto, leaf_from_payload, AuditLog};
 use crate::error::AuditResult;
 
 /// Record an insert operation in the audit log.
@@ -19,6 +19,10 @@ pub fn record_insert(
     collection: &str,
     document_json: &str,
 ) -> AuditResult<u64> {
+    if audit.has_leaf_key() {
+        let canonical = crypto::build_insert_payload(database, collection, document_json);
+        return audit.record_v3(deployment_id, "insert", database, collection, &canonical);
+    }
     let payload = format!("insert|{}|{}|{}", database, collection, document_json);
     let leaf = leaf_from_payload("insert", database, collection, &payload);
     audit.record(
@@ -40,6 +44,11 @@ pub fn record_update(
     filter_json: &str,
     update_json: &str,
 ) -> AuditResult<u64> {
+    if audit.has_leaf_key() {
+        let canonical =
+            crypto::build_update_payload(database, collection, filter_json, update_json);
+        return audit.record_v3(deployment_id, "update", database, collection, &canonical);
+    }
     let payload = format!(
         "update|{}|{}|{}|{}",
         database, collection, filter_json, update_json
@@ -63,6 +72,10 @@ pub fn record_delete(
     collection: &str,
     filter_json: &str,
 ) -> AuditResult<u64> {
+    if audit.has_leaf_key() {
+        let canonical = crypto::build_delete_payload(database, collection, filter_json);
+        return audit.record_v3(deployment_id, "delete", database, collection, &canonical);
+    }
     let payload = format!("delete|{}|{}|{}", database, collection, filter_json);
     let leaf = leaf_from_payload("delete", database, collection, &payload);
     audit.record(
@@ -82,6 +95,16 @@ pub fn record_drop_collection(
     database: &str,
     collection: &str,
 ) -> AuditResult<u64> {
+    if audit.has_leaf_key() {
+        let canonical = crypto::build_drop_collection_payload(database, collection);
+        return audit.record_v3(
+            deployment_id,
+            "drop_collection",
+            database,
+            collection,
+            &canonical,
+        );
+    }
     let payload = format!("drop_collection|{}|{}", database, collection);
     let leaf = leaf_from_payload("drop_collection", database, collection, &payload);
     audit.record(
@@ -100,6 +123,10 @@ pub fn record_drop_database(
     deployment_id: &str,
     database: &str,
 ) -> AuditResult<u64> {
+    if audit.has_leaf_key() {
+        let canonical = crypto::build_drop_database_payload(database);
+        return audit.record_v3(deployment_id, "drop_database", database, "", &canonical);
+    }
     let payload = format!("drop_database|{}", database);
     let leaf = leaf_from_payload("drop_database", database, "", &payload);
     audit.record(deployment_id, "drop_database", database, "", &payload, leaf)
@@ -113,6 +140,10 @@ pub fn record_rename_collection(
     collection: &str,
     new_name: &str,
 ) -> AuditResult<u64> {
+    if audit.has_leaf_key() {
+        let canonical = crypto::build_rename_payload(database, collection, new_name);
+        return audit.record_v3(deployment_id, "rename", database, collection, &canonical);
+    }
     let payload = format!("rename|{}|{}|{}", database, collection, new_name);
     let leaf = leaf_from_payload("rename", database, collection, &payload);
     audit.record(
@@ -134,6 +165,17 @@ pub fn record_create_index(
     keys_json: &str,
     options_json: &str,
 ) -> AuditResult<u64> {
+    if audit.has_leaf_key() {
+        let canonical =
+            crypto::build_create_index_payload(database, collection, keys_json, options_json);
+        return audit.record_v3(
+            deployment_id,
+            "create_index",
+            database,
+            collection,
+            &canonical,
+        );
+    }
     let payload = format!(
         "create_index|{}|{}|{}|{}",
         database, collection, keys_json, options_json
@@ -157,6 +199,10 @@ pub fn record_drop_index(
     collection: &str,
     index_name: &str,
 ) -> AuditResult<u64> {
+    if audit.has_leaf_key() {
+        let canonical = crypto::build_drop_index_payload(database, collection, index_name);
+        return audit.record_v3(deployment_id, "drop_index", database, collection, &canonical);
+    }
     let payload = format!("drop_index|{}|{}|{}", database, collection, index_name);
     let leaf = leaf_from_payload("drop_index", database, collection, &payload);
     audit.record(

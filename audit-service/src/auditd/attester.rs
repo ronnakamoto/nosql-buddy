@@ -36,7 +36,39 @@ use sha2::{Digest, Sha256};
 /// If `key_file` exists, it is read as a 32-byte seed. Otherwise a new key is
 /// generated, saved to the file (with restrictive permissions), and returned.
 /// The public key is logged so the admin can authorize it on-chain.
+///
+/// ## Docker bind-mount footgun
+///
+/// If `docker compose up` starts the attester/reader services (which bind-mount
+/// `./attester.key:/data/attester/audit/attester.key:ro`) before this file has
+/// ever been created, Docker auto-creates an **empty directory** at that path
+/// on the host to satisfy the mount. A later `setup` run then finds this path
+/// "exists" and fails trying to read it as a file ("Is a directory"). Since a
+/// real attester key is never a directory, an empty directory here is always
+/// this artifact — self-heal by removing it. A non-empty directory is left
+/// alone and reported with an actionable error.
 pub fn load_or_generate_attester_key(key_file: &std::path::Path) -> Result<SigningKey, String> {
+    if key_file.is_dir() {
+        let is_empty = std::fs::read_dir(key_file)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false);
+        if is_empty {
+            std::fs::remove_dir(key_file).map_err(|e| {
+                format!(
+                    "attester key path {key_file:?} is an empty directory (likely created by \
+                     `docker compose up` running before setup) and could not be removed: {e}"
+                )
+            })?;
+        } else {
+            return Err(format!(
+                "attester key path {key_file:?} is a non-empty directory, not a file. This \
+                 usually happens when `docker compose up` starts the attester/reader services \
+                 before `setup` has created the key file. Remove it manually and re-run setup: \
+                 rm -rf {key_file:?}"
+            ));
+        }
+    }
+
     if key_file.exists() {
         let bytes = std::fs::read(key_file)
             .map_err(|e| format!("failed to read attester key file {key_file:?}: {e}"))?;

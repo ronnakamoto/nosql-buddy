@@ -18,11 +18,15 @@
 //! its authentication path in a binary Merkle tree whose root is public.
 //! Hash: Poseidon(2) (t=3), matching `light-poseidon::new_circom(2)`.
 
+pub mod commitment;
+pub mod disclosure;
 pub mod error;
 pub mod merkle;
 pub mod prover;
 pub mod serialize;
 
+pub use commitment::{poseidon_leaf_v3, LeafOpening};
+pub use disclosure::{DisclosureProver, DisclosureStatement};
 pub use error::ZkAuditError;
 pub use merkle::{AuditMerkleTree, InclusionProof};
 pub use prover::{AuditProver, Groth16Proof, VerifyingKey, generate_and_save_parameters};

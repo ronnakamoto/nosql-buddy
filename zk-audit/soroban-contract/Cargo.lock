@@ -1867,7 +1867,9 @@ name = "zk-audit-commitment"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "hex",
  "rand",
+ "serde_json",
  "sha2",
  "soroban-sdk",
  "stellar-strkey 0.0.16",

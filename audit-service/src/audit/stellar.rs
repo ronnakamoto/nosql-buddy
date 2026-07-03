@@ -50,6 +50,26 @@ pub struct VerifyInclusionResult {
     pub verified: bool,
 }
 
+/// The result of a read-only (simulated) on-chain proof verification.
+///
+/// Unlike [`VerifyInclusionResult`], this comes from a Soroban RPC
+/// `simulateTransaction` call: no transaction is submitted, no fee is paid,
+/// and no signing key is required. The pairing check still runs inside the
+/// Soroban runtime against the contract's pinned verifying key and committed
+/// root index, so the verdict is exactly as trustworthy as a submitted
+/// transaction — anyone (an auditor, a judge, a script) can obtain it with
+/// only the RPC URL and contract ID.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadonlyVerifyResult {
+    /// Whether the on-chain pairing check returned true.
+    pub verified: bool,
+    /// Human-readable failure reason when `verified` is false (e.g. the
+    /// root was never committed, the proof encoding was malformed, or the
+    /// pairing check itself failed).
+    pub reason: Option<String>,
+}
+
 /// The result of querying the current on-chain root.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -386,7 +386,7 @@ export function AuditStatusSection({
           {pinataResult && (
             <KeyValue
               label="IPFS CID"
-              value={<IpfsCidLink cid={pinataResult.cid} gatewayUrl={pinataResult.gatewayUrl} />}
+              value={<IpfsCidLink cid={pinataResult.cid} gatewayUrl={pinataResult.gatewayUrl} encrypted={pinataResult.encrypted} />}
             />
           )}
         </div>

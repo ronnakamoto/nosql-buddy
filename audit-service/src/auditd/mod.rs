@@ -123,6 +123,17 @@ pub struct DaemonConfig {
     pub pinata_config: Option<PinataConfig>,
     /// Chain configuration (network, RPC, Horizon, contract ID, passphrase).
     pub chain: DaemonChainConfig,
+    /// Age recipient public keys for encrypting epoch batches before IPFS
+    /// pinning. When non-empty, every published batch is encrypted to these
+    /// recipients using the age file encryption format.
+    pub age_recipients: Vec<String>,
+    /// The operator's age secret key (for decrypting their own batches).
+    pub age_operator_identity: Option<String>,
+    /// The attester's age secret key (for decrypting batches as an auditor).
+    pub age_attester_identity: Option<String>,
+    /// Hex-encoded 32-byte HMAC key for v2 leaf derivation. When set, the
+    /// audit log writes v2 events (canonical payload + HMAC leaf).
+    pub leaf_key_hex: Option<String>,
 }
 
 impl Default for DaemonConfig {
@@ -146,6 +157,10 @@ impl Default for DaemonConfig {
             attester_secret_key: None,
             pinata_config: None,
             chain: DaemonChainConfig::testnet(),
+            age_recipients: Vec::new(),
+            age_operator_identity: None,
+            age_attester_identity: None,
+            leaf_key_hex: None,
         }
     }
 }
@@ -183,6 +198,13 @@ pub struct DaemonState {
     pub attester_stellar_keypair: Option<StellarKeypair>,
     /// Chain configuration for native signing (network, RPC, Horizon, contract).
     pub chain: DaemonChainConfig,
+    /// Age recipient public keys for encrypting epoch batches before IPFS
+    /// pinning. When non-empty, every published batch is encrypted.
+    pub age_recipients: Vec<String>,
+    /// The operator's age secret key (for decrypting their own batches).
+    pub age_operator_identity: Option<String>,
+    /// The attester's age secret key (for decrypting batches as an auditor).
+    pub age_attester_identity: Option<String>,
 }
 
 /// HTTP error wrapper for AuditError. Converts domain errors into appropriate
@@ -284,6 +306,7 @@ pub fn build_router(state: Arc<DaemonState>) -> axum::Router {
         .route("/events", get(list_events))
         .route("/root", get(get_root))
         .route("/proof/:index", post(generate_proof))
+        .route("/disclosure/:index", post(generate_disclosure_proof))
         .route("/verify-onchain", post(verify_onchain));
 
     match state.mode {
@@ -352,17 +375,40 @@ pub async fn run_server(state: Arc<DaemonState>, port: u16) -> Result<(), Box<dy
 
 /// Publish an epoch batch to IPFS, preferring Pinata when credentials are
 /// configured, otherwise falling back to the local Kubo daemon.
+///
+/// When `state.age_recipients` is non-empty, the batch is encrypted with
+/// age before pinning so only authorized auditors can read it.
 async fn publish_epoch_batch_to_ipfs(
     state: &DaemonState,
     epoch_number: u64,
     batch_content: &str,
 ) -> Result<crate::audit::ipfs::IpfsPublishResult, crate::error::AuditError> {
-    if let Some(pinata) = &state.pinata_config {
-        if !pinata.api_key.is_empty() || !pinata.api_secret.is_empty() {
-            return crate::audit::pinata::publish_epoch_batch(pinata, epoch_number, batch_content).await;
+    let bytes_to_publish = if !state.age_recipients.is_empty() {
+        match crate::audit::crypto::encrypt_batch(batch_content, &state.age_recipients) {
+            Ok(encrypted) => {
+                tracing::info!("epoch {epoch_number}: encrypted batch for {} recipient(s)", state.age_recipients.len());
+                encrypted
+            }
+            Err(e) => {
+                tracing::warn!("epoch {epoch_number}: age encryption failed: {e} — publishing plaintext");
+                batch_content.as_bytes().to_vec()
+            }
         }
-    }
-    crate::audit::ipfs::publish_epoch_batch(&state.ipfs_config, epoch_number, batch_content).await
+    } else {
+        batch_content.as_bytes().to_vec()
+    };
+
+    let mut result = if let Some(pinata) = &state.pinata_config {
+        if !pinata.api_key.is_empty() || !pinata.api_secret.is_empty() {
+            crate::audit::pinata::publish_epoch_batch(pinata, epoch_number, &bytes_to_publish).await?
+        } else {
+            crate::audit::ipfs::publish_epoch_batch(&state.ipfs_config, epoch_number, &bytes_to_publish).await?
+        }
+    } else {
+        crate::audit::ipfs::publish_epoch_batch(&state.ipfs_config, epoch_number, &bytes_to_publish).await?
+    };
+    result.encrypted = !state.age_recipients.is_empty();
+    Ok(result)
 }
 
 /// Check whether the configured IPFS backend is reachable.
@@ -867,6 +913,188 @@ async fn generate_proof(
         network: state.chain.network.clone(),
         contract_id: state.chain.contract_id.clone(),
         tx_hash,
+    }))
+}
+
+// ─── Audited-Action Disclosure proofs ─────────────────────────────────
+
+/// Claim parameters for a disclosure proof. Each `check_*` flag enables a
+/// predicate over the (still-private) event; disabled predicates reveal
+/// nothing. When `check_ts` is set without explicit bounds, the range
+/// defaults to the surrounding UTC day of the event.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisclosureRequest {
+    #[serde(default)]
+    pub check_op: bool,
+    #[serde(default)]
+    pub check_coll: bool,
+    #[serde(default)]
+    pub check_ts: bool,
+    pub ts_min: Option<u64>,
+    pub ts_max: Option<u64>,
+}
+
+/// Self-contained disclosure bundle. Mirrors the desktop app's
+/// `DisclosureProofResult` so both surfaces produce bundles the auditor's
+/// "Verify a proof bundle" flow (and `verify_disclosure` on-chain) accepts.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisclosureResponse {
+    pub root_hex: String,
+    pub leaf_hex: String,
+    pub leaf_index: u64,
+    pub claim: crate::audit::stellar_native::DisclosureClaim,
+    pub claim_text: String,
+    pub proof: zk_audit::serialize::SorobanProof,
+    pub network: String,
+    pub contract_id: String,
+}
+
+/// Generate an **Audited-Action Disclosure** proof for the v3 event at
+/// `index`: a Groth16 proof that an event with the claimed operation /
+/// collection / time-range exists in the committed tree, revealing nothing
+/// else about it (not the document, database, or exact timestamp).
+///
+/// Requires the leaf key (v3 commitments), event persistence, and the
+/// `audited_action` ceremony artifacts in `--circuit-dir`.
+async fn generate_disclosure_proof(
+    state: axum::extract::State<Arc<DaemonState>>,
+    axum::extract::Path(index): axum::extract::Path<u64>,
+    axum::Json(req): axum::Json<DisclosureRequest>,
+) -> ApiResult<DisclosureResponse> {
+    use ark_ff::{BigInteger, PrimeField};
+    use zk_audit::commitment::str_to_field;
+
+    // 1. The private opening (validated against the stored leaf).
+    let (opening, leaf) = state
+        .audit_log
+        .disclosure_opening(index)
+        .map_err(ApiError::from)?;
+
+    // 2. The event metadata for the public claim parameters.
+    let event = state
+        .audit_log
+        .list_events()
+        .into_iter()
+        .find(|e| e.index == index)
+        .ok_or_else(|| {
+            ApiError(AuditError::Validation(format!("no event at index {index}")))
+        })?;
+
+    // 3. Merkle path for the leaf against the current tree.
+    let inclusion = state.audit_log.prove_inclusion(index).map_err(ApiError::from)?;
+    if inclusion.leaf != leaf {
+        return Err(ApiError(AuditError::Validation(format!(
+            "tree leaf at {index} does not match the recomputed v3 commitment"
+        ))));
+    }
+
+    // 4. Build the statement. Default time range: the surrounding UTC day.
+    let day_start = opening.ts - (opening.ts % 86_400);
+    let statement = zk_audit::DisclosureStatement {
+        op_pred: str_to_field(&event.operation),
+        coll_pred: str_to_field(&event.collection),
+        ts_min: req.ts_min.unwrap_or(day_start),
+        ts_max: req.ts_max.unwrap_or(day_start + 86_399),
+        check_op: req.check_op,
+        check_coll: req.check_coll,
+        check_ts: req.check_ts,
+    };
+    if statement.ts_min > opening.ts || statement.ts_max < opening.ts {
+        return Err(ApiError(AuditError::Validation(format!(
+            "time range [{}, {}] does not contain the event timestamp — the proof would be unsatisfiable",
+            statement.ts_min, statement.ts_max
+        ))));
+    }
+
+    // 5. Prove on a blocking thread with the bundled ceremony proving key,
+    //    so the proof verifies against the disclosure VK registered on-chain.
+    let circuit_dir = state.circuit_dir.as_deref().ok_or_else(|| {
+        ApiError(AuditError::Validation(
+            "circuit directory not configured — use --circuit-dir".to_string(),
+        ))
+    })?;
+    let r1cs = circuit_dir
+        .join("audited_action.r1cs")
+        .to_string_lossy()
+        .to_string();
+    let wasm = circuit_dir
+        .join("audited_action.wasm")
+        .to_string_lossy()
+        .to_string();
+    let pkey = circuit_dir.join("audited_action.pkey");
+    if !pkey.exists() {
+        return Err(ApiError(AuditError::Validation(format!(
+            "disclosure proving key not found at {} — the image was built without the audited_action ceremony artifacts",
+            pkey.display()
+        ))));
+    }
+    let pkey = pkey.to_string_lossy().to_string();
+
+    let statement_clone = statement.clone();
+    let groth16_proof = tokio::task::spawn_blocking(move || {
+        let prover = zk_audit::DisclosureProver::with_proving_key(&r1cs, &wasm, &pkey)?;
+        prover.prove(&opening, &inclusion, &statement_clone)
+    })
+    .await
+    .map_err(|e| ApiError(AuditError::ZkAudit(format!("disclosure proof task: {e}"))))?
+    .map_err(|e| ApiError(AuditError::ZkAudit(e.to_string())))?;
+
+    let soroban_args = zk_audit::AuditProver::serialize_for_soroban(&groth16_proof)
+        .map_err(|e| ApiError(AuditError::ZkAudit(e.to_string())))?;
+
+    let fr_hex = |f: &zk_audit::prover::Fr| {
+        let bytes = f.into_bigint().to_bytes_be();
+        let mut arr = [0u8; 32];
+        arr[32 - bytes.len()..].copy_from_slice(&bytes);
+        hex::encode(arr)
+    };
+
+    let root_hex = fr_hex(&groth16_proof.public_inputs[0]);
+    let leaf_hex = fr_hex(&leaf);
+
+    let claim = crate::audit::stellar_native::DisclosureClaim {
+        op_pred_hex: fr_hex(&statement.op_pred),
+        coll_pred_hex: fr_hex(&statement.coll_pred),
+        ts_min: statement.ts_min,
+        ts_max: statement.ts_max,
+        check_op: req.check_op,
+        check_coll: req.check_coll,
+        check_ts: req.check_ts,
+    };
+
+    let mut clauses: Vec<String> = Vec::new();
+    if req.check_op {
+        clauses.push(format!("operation = \"{}\"", event.operation));
+    }
+    if req.check_coll {
+        clauses.push(format!("collection = \"{}\"", event.collection));
+    }
+    if req.check_ts {
+        clauses.push(format!(
+            "timestamp within [{}, {}] (Unix seconds)",
+            statement.ts_min, statement.ts_max
+        ));
+    }
+    let claim_text = if clauses.is_empty() {
+        "an event exists in the committed audit log (no predicate checks enabled)".to_string()
+    } else {
+        format!(
+            "an event with {} exists in the committed audit log",
+            clauses.join(" AND ")
+        )
+    };
+
+    Ok(Json(DisclosureResponse {
+        root_hex,
+        leaf_hex,
+        leaf_index: index,
+        claim,
+        claim_text,
+        proof: soroban_args.proof,
+        network: state.chain.network.clone(),
+        contract_id: state.chain.contract_id.clone(),
     }))
 }
 

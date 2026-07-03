@@ -329,6 +329,17 @@ impl EpochManager {
     /// index. This updates the current epoch's event count. If the
     /// event threshold is reached, the epoch is auto-closed.
     /// Returns `Some(closed_epoch)` if an epoch was closed.
+    ///
+    /// This is called from a periodic catch-up scan (`auto_commit_loop`)
+    /// that runs concurrently with the change-stream listener that's
+    /// actually inserting new leaves into `audit_log`. Freezing the epoch's
+    /// root via `audit_log.root_hex()` here would be a TOCTOU race: by the
+    /// time this call for index N runs, the concurrent listener may have
+    /// already inserted more leaves past N, so `root_hex()` (the tree's
+    /// *current* root) would silently include events that don't belong to
+    /// this epoch. `audit_log.root_after_at(index)` instead looks up the
+    /// root that was captured atomically at the moment index N itself was
+    /// inserted, which is immune to how far the tree has advanced since.
     pub fn record_event(&self, index: u64, audit_log: &AuditLog) -> AuditResult<Option<Epoch>> {
         let config = self.config.lock().unwrap_or_else(|e| e.into_inner());
         let mut epochs = self.epochs.lock().unwrap_or_else(|e| e.into_inner());
@@ -348,8 +359,15 @@ impl EpochManager {
             config.event_threshold > 0 && current.event_count >= config.event_threshold;
 
         if should_close {
+            let root_hex = audit_log.root_after_at(index).ok_or_else(|| {
+                AuditError::Validation(format!(
+                    "cannot close epoch: no recorded root for index {index} \
+                     (audit log has fewer than {} leaves)",
+                    index + 1
+                ))
+            })?;
             current.end_index = Some(index);
-            current.root_hex = Some(audit_log.root_hex()?);
+            current.root_hex = Some(root_hex);
             let closed = current.clone();
 
             // Start a new epoch.
@@ -384,8 +402,21 @@ impl EpochManager {
         }
 
         let end_index = current.start_index + current.event_count as u64 - 1;
+        // Use the root captured at `end_index`'s own insertion time, not
+        // `audit_log.root_hex()` (the tree's current/latest root). If a
+        // concurrent writer (the change-stream listener) inserts more
+        // leaves between snapshotting `event_count` above and this call,
+        // `root_hex()` could silently include events past `end_index` —
+        // see `record_event`'s doc comment for the full explanation.
+        let root_hex = audit_log.root_after_at(end_index).ok_or_else(|| {
+            AuditError::Validation(format!(
+                "cannot close epoch: no recorded root for index {end_index} \
+                 (audit log has fewer than {} leaves)",
+                end_index + 1
+            ))
+        })?;
         current.end_index = Some(end_index);
-        current.root_hex = Some(audit_log.root_hex()?);
+        current.root_hex = Some(root_hex);
         let closed = current.clone();
 
         // Start a new epoch.
@@ -401,13 +432,23 @@ impl EpochManager {
     }
 
     /// Mark an epoch as committed on-chain.
+    ///
+    /// If the epoch already has a non-empty `tx_hash` recorded, an empty
+    /// `tx_hash` passed here is ignored (the existing real hash is kept).
+    /// This guards against callers that recover from a duplicate/already-
+    /// committed on-chain error (where the original tx hash can't be
+    /// retrieved) from ever clobbering a real hash we already have on file.
     pub fn mark_committed(&self, epoch_number: u64, tx_hash: String) -> AuditResult<()> {
         let mut epochs = self.epochs.lock().unwrap_or_else(|e| e.into_inner());
         for epoch in epochs.iter_mut() {
             if epoch.epoch_number == epoch_number {
+                let keep_existing = tx_hash.is_empty()
+                    && epoch.tx_hash.as_deref().is_some_and(|h| !h.is_empty());
                 epoch.committed = true;
                 epoch.committed_at = Some(chrono::Utc::now().to_rfc3339());
-                epoch.tx_hash = Some(tx_hash);
+                if !keep_existing {
+                    epoch.tx_hash = Some(tx_hash);
+                }
                 drop(epochs);
                 self.save()?;
                 return Ok(());
@@ -465,8 +506,17 @@ impl EpochManager {
             config.event_threshold > 0 && current.event_count >= config.event_threshold;
         if should_close {
             let end_index = current.start_index + current.event_count as u64 - 1;
+            // See `record_event`'s doc comment: use the root captured at
+            // `end_index`'s own insertion, not the tree's current root.
+            let root_hex = audit_log.root_after_at(end_index).ok_or_else(|| {
+                AuditError::Validation(format!(
+                    "cannot close epoch: no recorded root for index {end_index} \
+                     (audit log has fewer than {} leaves)",
+                    end_index + 1
+                ))
+            })?;
             current.end_index = Some(end_index);
-            current.root_hex = Some(audit_log.root_hex()?);
+            current.root_hex = Some(root_hex);
             let closed = current.clone();
 
             let next_number = closed.epoch_number + 1;
@@ -605,6 +655,57 @@ mod tests {
         assert!(current.is_open());
         assert_eq!(current.epoch_number, 1);
         assert_eq!(current.start_index, 3);
+    }
+
+    /// Regression test for a real production bug: a concurrent writer (the
+    /// change-stream listener) can insert leaves into the audit log *after*
+    /// the index that should close an epoch, but *before* the epoch
+    /// manager's (separately scheduled) catch-up scan gets around to
+    /// calling `record_event` for that index. If the epoch's root were
+    /// frozen via `audit_log.root_hex()` (the tree's current/latest root)
+    /// at that point, it would incorrectly absorb those later events into
+    /// an epoch that's only supposed to end earlier — producing two
+    /// different epochs with the *same* frozen root (since neither
+    /// boundary reflects genuinely new tree state), which then makes the
+    /// second epoch's on-chain commit look like a duplicate and permanently
+    /// strands its events outside the on-chain-anchored trail.
+    ///
+    /// This test simulates exactly that: events 0..=2 are inserted, but
+    /// `record_event` for index 0 (which should close a 1-event epoch) is
+    /// only called *after* more events (3, 4) have already landed in the
+    /// tree — mimicking the catch-up scan lagging behind live insertion.
+    #[test]
+    fn epoch_close_is_immune_to_events_inserted_after_its_boundary() {
+        let mgr = EpochManager::new(EpochConfig {
+            event_threshold: 1,
+            time_threshold_secs: 0,
+        });
+        // Insert 5 events up front — simulating a burst that races ahead of
+        // the epoch tracker's per-index catch-up.
+        let audit = make_audit_with_events(5);
+        let root_after_0 = audit.root_after_at(0).unwrap();
+        let root_after_4 = audit.root_after_at(4).unwrap();
+        assert_ne!(
+            root_after_0, root_after_4,
+            "sanity check: later events must actually change the root"
+        );
+
+        // Now catch up epoch tracking for index 0 only. Even though the
+        // tree already has 5 leaves, the epoch closing at index 0 must
+        // freeze the root as it was *right after index 0*, not the tree's
+        // current (more advanced) root.
+        let closed = mgr.record_event(0, &audit).unwrap().unwrap();
+        assert_eq!(closed.end_index, Some(0));
+        assert_eq!(
+            closed.root_hex.as_deref(),
+            Some(root_after_0.as_str()),
+            "epoch must freeze the root at its own boundary index, not the tree's current root"
+        );
+        assert_ne!(
+            closed.root_hex.as_deref(),
+            Some(root_after_4.as_str()),
+            "epoch must NOT absorb events inserted after its boundary"
+        );
     }
 
     #[test]

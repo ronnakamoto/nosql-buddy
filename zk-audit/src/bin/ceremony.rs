@@ -6,9 +6,10 @@
 //! Usage:
 //!   zk-audit-ceremony <r1cs_path> <output_dir>
 //!
-//! Outputs:
-//!   <output_dir>/merkle_inclusion.pkey  — proving key (arkworks binary)
-//!   <output_dir>/merkle_inclusion.vkey  — verifying key (arkworks binary)
+//! Outputs (named after the R1CS file stem, e.g. `merkle_inclusion.r1cs`
+//! → `merkle_inclusion.pkey` / `.vkey`):
+//!   <output_dir>/<stem>.pkey  — proving key (arkworks binary)
+//!   <output_dir>/<stem>.vkey  — verifying key (arkworks binary)
 
 use std::path::Path;
 
@@ -21,9 +22,9 @@ fn main() {
             Usage:\n\
               zk-audit-ceremony <r1cs_path> <output_dir>\n\
             \n\
-            Outputs:\n\
-              <output_dir>/merkle_inclusion.pkey  — proving key\n\
-              <output_dir>/merkle_inclusion.vkey  — verifying key"
+            Outputs (named after the R1CS file stem):\n\
+              <output_dir>/<stem>.pkey  — proving key\n\
+              <output_dir>/<stem>.vkey  — verifying key"
         );
         std::process::exit(1);
     }
@@ -38,8 +39,12 @@ fn main() {
 
     std::fs::create_dir_all(output_dir).expect("failed to create output directory");
 
-    let pkey_path = output_dir.join("merkle_inclusion.pkey");
-    let vkey_path = output_dir.join("merkle_inclusion.vkey");
+    let stem = Path::new(r1cs_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("merkle_inclusion");
+    let pkey_path = output_dir.join(format!("{stem}.pkey"));
+    let vkey_path = output_dir.join(format!("{stem}.vkey"));
 
     println!("zk-audit-ceremony: generating Groth16 parameters from {}", r1cs_path);
     println!("  proving key:  {}", pkey_path.display());

@@ -120,6 +120,25 @@ fn parse_vkey_path(args: &[String], _non_interactive: bool) -> Option<String> {
     std::env::var("VKEY_PATH").ok().filter(|s| !s.is_empty())
 }
 
+/// Parse `--disclosure-vkey-path <path>` from args, falling back to the
+/// `DISCLOSURE_VKEY_PATH` env var. This is the ceremony `.vkey` for the
+/// `audited_action` disclosure circuit, pinned on-chain (write-once) via
+/// `register_disclosure_vk` right after `initialize`. Optional: a contract
+/// deployed without it still verifies inclusion proofs, but
+/// `verify_disclosure` will reject with `DisclosureVkNotSet`.
+fn parse_disclosure_vkey_path(args: &[String]) -> Option<String> {
+    for (i, a) in args.iter().enumerate() {
+        if a == "--disclosure-vkey-path" {
+            return args.get(i + 1).cloned();
+        } else if let Some(val) = a.strip_prefix("--disclosure-vkey-path=") {
+            return Some(val.to_string());
+        }
+    }
+    std::env::var("DISCLOSURE_VKEY_PATH")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
 /// Parse `--role <role>` from args, falling back to the `SETUP_ROLE` env var.
 fn parse_role(args: &[String], non_interactive: bool) -> SetupRole {
     for (i, a) in args.iter().enumerate() {
@@ -366,6 +385,34 @@ async fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             "  Contract initialized. Admin: {}",
             publisher.account_id()
         );
+
+        // Optionally pin the Audited-Action Disclosure circuit's VK so
+        // `verify_disclosure` works on this contract (write-once).
+        if let Some(dvkey_path) = parse_disclosure_vkey_path(args) {
+            let dvk = zk_audit::load_verifying_key_hex(&dvkey_path).map_err(|e| {
+                format!("failed to load disclosure verifying key from {dvkey_path}: {e}")
+            })?;
+            println!("  Registering disclosure verifying key (audited_action circuit)...");
+            audit_service::audit::stellar_native::register_disclosure_vk_native(
+                &contract_id,
+                publisher,
+                &dvk.alpha,
+                &dvk.beta,
+                &dvk.gamma,
+                &dvk.delta,
+                &dvk.ic,
+                &rpc_url,
+                &passphrase,
+            )
+            .await
+            .map_err(|e| format!("register_disclosure_vk: {e}"))?;
+            println!("  Disclosure verifying key registered.");
+        } else {
+            println!(
+                "  Note: no --disclosure-vkey-path given — disclosure proofs \
+                 (verify_disclosure) will not be verifiable on this contract."
+            );
+        }
     }
 
     // ── 8. Attester ed25519 oplog signing key (all / attester) ─────
@@ -419,7 +466,87 @@ async fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // ── 10. Pinata credentials (publisher / all) ───────────────────
+    // ── 10. Age identities + leaf key ──────────────────────────────
+    let (
+        age_operator_secret,
+        age_operator_public,
+        age_attester_secret,
+        age_attester_public,
+        age_recipients,
+        leaf_key_hex,
+    ) = match role {
+        SetupRole::All => {
+            println!();
+            println!("── Age encryption identities (Dev Mode) ──");
+            println!("  These encrypt epoch batches before IPFS pinning.");
+            let (op_secret, op_public) = audit_service::audit::crypto::generate_age_identity();
+            let (at_secret, at_public) = audit_service::audit::crypto::generate_age_identity();
+            println!("  Operator age public key:  {op_public}");
+            println!("  Attester age public key:  {at_public}");
+            let recipients = format!("{},{}", op_public, at_public);
+            let leaf_key = audit_service::audit::crypto::generate_leaf_key();
+            let leaf_hex = hex::encode(&leaf_key);
+            println!("  Audit leaf key (HMAC):    {}...", &leaf_hex[..16]);
+            (
+                op_secret,
+                op_public,
+                at_secret,
+                at_public,
+                recipients,
+                leaf_hex,
+            )
+        }
+        SetupRole::Publisher => {
+            println!();
+            println!("── Age encryption identities (Operator) ──");
+            println!("  These encrypt epoch batches before IPFS pinning.");
+            let (op_secret, op_public) = audit_service::audit::crypto::generate_age_identity();
+            println!("  Operator age public key:  {op_public}");
+            let auditor_keys = ask(
+                "Auditor age public keys (comma-separated, press Enter to skip)",
+                &env_default(non_interactive, "AGE_RECIPIENTS", ""),
+            );
+            let recipients = if auditor_keys.trim().is_empty() {
+                op_public.clone()
+            } else {
+                format!("{},{}", op_public, auditor_keys.trim())
+            };
+            let leaf_key = audit_service::audit::crypto::generate_leaf_key();
+            let leaf_hex = hex::encode(&leaf_key);
+            println!("  Audit leaf key (HMAC):    {}...", &leaf_hex[..16]);
+            (
+                op_secret,
+                op_public,
+                String::new(),
+                String::new(),
+                recipients,
+                leaf_hex,
+            )
+        }
+        SetupRole::Attester => {
+            println!();
+            println!("── Age encryption identity (Auditor) ──");
+            let (at_secret, at_public) = audit_service::audit::crypto::generate_age_identity();
+            println!("  Attester age public key:  {at_public}");
+            println!();
+            println!("  Send this public key to the operator for batch encryption.");
+            let leaf_key_input = ask(
+                "Audit leaf key (from operator, press Enter to skip)",
+                &env_default(non_interactive, "AUDIT_LEAF_KEY", ""),
+            );
+            let leaf_hex = leaf_key_input.trim().to_string();
+            (
+                String::new(),
+                String::new(),
+                at_secret,
+                at_public,
+                String::new(),
+                leaf_hex,
+            )
+        }
+    };
+
+    // ── 11. Pinata credentials (publisher / all) ───────────────────
     let (pinata_api_key, pinata_api_secret, pinata_gateway) = match role {
         SetupRole::Attester => (String::new(), String::new(), "https://gateway.pinata.cloud".to_string()),
         _ => {
@@ -445,7 +572,7 @@ async fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // ── 11. Write .env.audit ───────────────────────────────────────
+    // ── 12. Write .env.audit ───────────────────────────────────────
     println!();
     let env_path = ask(
         "Write .env.audit to (default: .env.audit)",
@@ -459,6 +586,12 @@ async fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         &pinata_api_key,
         &pinata_api_secret,
         &pinata_gateway,
+        &age_operator_secret,
+        &age_operator_public,
+        &age_attester_secret,
+        &age_attester_public,
+        &age_recipients,
+        &leaf_key_hex,
     )?;
     let abs_env_path = absolute_path(&PathBuf::from(&env_path));
     println!("  Wrote {}", abs_env_path.display());
@@ -479,6 +612,15 @@ async fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if !ed25519_pubkey_hex.is_empty() {
         println!("║  Ed25519 key:  {abs_attester:<47}║", abs_attester = abs_attester_key_path.display());
     }
+    if !age_operator_public.is_empty() {
+        println!("║  Age op pub:   {op_pub:<47}║", op_pub = &age_operator_public[..age_operator_public.len().min(44)]);
+    }
+    if !age_attester_public.is_empty() {
+        println!("║  Age at pub:   {at_pub:<47}║", at_pub = &age_attester_public[..age_attester_public.len().min(44)]);
+    }
+    if !leaf_key_hex.is_empty() {
+        println!("║  Leaf key:     {lk:<47}║", lk = format!("{}...", &leaf_key_hex[..16]));
+    }
     println!("║  Env file:     {abs_env:<47}║", abs_env = abs_env_path.display());
     println!("╚══════════════════════════════════════════════════════════════╝");
     println!();
@@ -498,15 +640,16 @@ async fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         SetupRole::Publisher => {
             println!("Next steps for the operator:");
             println!("  1. Share this contract ID with your auditor: {contract_id}");
-            println!("  2. The auditor runs: nosqlbuddy-audit setup --role attester");
-            println!("  3. After the auditor sends their public address + ed25519 pubkey,");
+            println!("  2. Share your age public key and the audit leaf key with the auditor.");
+            println!("  3. The auditor runs: nosqlbuddy-audit setup --role attester");
+            println!("  4. After the auditor sends their public address + ed25519 pubkey + age pub key,");
             println!("     authorize them on-chain:");
             println!("     nosqlbuddy-audit authorize-attester \\");
             println!("       --contract-id {contract_id} \\");
             println!("       --secret-key <publisher S...> \\");
             println!("       --attester-address <auditor G...> \\");
             println!("       --attester-pubkey <auditor ed25519 hex>");
-            println!("  4. Start the publisher:");
+            println!("  5. Start the publisher:");
             println!("     docker compose --profile publisher up -d");
         }
         SetupRole::Attester => {
@@ -514,6 +657,7 @@ async fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             println!("Send these to the operator for on-chain authorization:");
             println!("  Attester Stellar address: {attester_addr}");
             println!("  Attester ed25519 pubkey:  {ed25519_pubkey_hex}");
+            println!("  Attester age public key:  {age_attester_public}");
             println!();
             println!("The operator will run:");
             println!("  nosqlbuddy-audit authorize-attester \\");
@@ -522,6 +666,7 @@ async fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             println!("    --attester-address {attester_addr} \\");
             println!("    --attester-pubkey {ed25519_pubkey_hex}");
             println!();
+            println!("Wait for the operator to send you the AUDIT_LEAF_KEY, then add it to .env.audit.");
             println!("Once authorized, start the attester:");
             println!("  docker compose --profile attester up -d");
         }
@@ -986,21 +1131,59 @@ fn write_env_file(
     pinata_api_key: &str,
     pinata_api_secret: &str,
     pinata_gateway: &str,
+    age_operator_secret: &str,
+    age_operator_public: &str,
+    age_attester_secret: &str,
+    age_attester_public: &str,
+    age_recipients: &str,
+    leaf_key_hex: &str,
 ) -> Result<(), String> {
-    let content = format!(
-        "# ─── Audit stack environment (generated by nosqlbuddy-audit setup) ───\n\n\
-         # Soroban contract ID (deployed by this setup)\n\
-         CONTRACT_ID={contract_id}\n\n\
-         # Publisher's Stellar secret key (operator)\n\
-         STELLAR_SECRET_KEY={publisher_secret}\n\n\
-         # Attester's Stellar secret key (auditor/regulator)\n\
-         ATTESTER_SECRET_KEY={attester_secret}\n\n\
-         # Pinata IPFS credentials\n\
-         PINATA_API_KEY={pinata_api_key}\n\
-         PINATA_API_SECRET={pinata_api_secret}\n\
-         PINATA_GATEWAY_URL={pinata_gateway}\n"
-    );
-    std::fs::write(path, content).map_err(|e| format!("failed to write {path}: {e}"))
+    let mut lines = vec![
+        "# ─── Audit stack environment (generated by nosqlbuddy-audit setup) ───".to_string(),
+        String::new(),
+        "# Soroban contract ID (deployed by this setup)".to_string(),
+        format!("CONTRACT_ID={contract_id}"),
+        String::new(),
+        "# Publisher's Stellar secret key (operator)".to_string(),
+        format!("STELLAR_SECRET_KEY={publisher_secret}"),
+        String::new(),
+        "# Attester's Stellar secret key (auditor/regulator)".to_string(),
+        format!("ATTESTER_SECRET_KEY={attester_secret}"),
+        String::new(),
+        "# Pinata IPFS credentials".to_string(),
+        format!("PINATA_API_KEY={pinata_api_key}"),
+        format!("PINATA_API_SECRET={pinata_api_secret}"),
+        format!("PINATA_GATEWAY_URL={pinata_gateway}"),
+    ];
+
+    if !age_operator_secret.is_empty() || !age_operator_public.is_empty() {
+        lines.push(String::new());
+        lines.push("# Age encryption identities (for encrypted IPFS batches)".to_string());
+    }
+    if !age_operator_public.is_empty() {
+        lines.push(format!("AGE_OPERATOR_PUBLIC_KEY={age_operator_public}"));
+    }
+    if !age_operator_secret.is_empty() {
+        lines.push(format!("AGE_OPERATOR_SECRET={age_operator_secret}"));
+    }
+    if !age_attester_public.is_empty() {
+        lines.push(format!("AGE_ATTESTER_PUBLIC_KEY={age_attester_public}"));
+    }
+    if !age_attester_secret.is_empty() {
+        lines.push(format!("AGE_ATTESTER_SECRET={age_attester_secret}"));
+    }
+    if !age_recipients.is_empty() {
+        lines.push(format!("AGE_RECIPIENTS={age_recipients}"));
+    }
+    if !leaf_key_hex.is_empty() {
+        lines.push(String::new());
+        lines.push("# HMAC key for v2 audit leaf derivation (32 bytes, hex)".to_string());
+        lines.push(format!("AUDIT_LEAF_KEY_HEX={leaf_key_hex}"));
+        lines.push(format!("AUDIT_LEAF_KEY={leaf_key_hex}"));
+    }
+
+    std::fs::write(path, lines.join("\n") + "\n")
+        .map_err(|e| format!("failed to write {path}: {e}"))
 }
 
 /// Prompt for input with a default value. Returns the user's input or the default.
@@ -1053,6 +1236,27 @@ async fn cmd_start(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize the audit log with persistence.
     let audit_log = Arc::new(AuditLog::new()?);
+
+    // Set the leaf key BEFORE replay so v2 events (HMAC leaves) can be
+    // verified during persistence restoration. If set after replay, any
+    // existing v2 events in the log will fail with "v2 event requires leaf
+    // key, but none is configured".
+    if let Some(leaf_key_hex) = &config.leaf_key_hex {
+        let leaf_key = hex::decode(leaf_key_hex)
+            .map_err(|e| format!("invalid AUDIT_LEAF_KEY hex: {e}"))?;
+        if leaf_key.len() != 32 {
+            return Err(format!(
+                "AUDIT_LEAF_KEY must be 32 bytes, got {}",
+                leaf_key.len()
+            )
+            .into());
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&leaf_key);
+        audit_log.set_leaf_key(key);
+        log::info!("audit log: v2 leaf derivation enabled (HMAC-SHA-256)");
+    }
+
     audit_log.set_persistence_dir(&config.data_dir)?;
     log::info!(
         "audit log initialized: {} events, root: {}",
@@ -1265,6 +1469,9 @@ async fn cmd_start(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         signing_keypair,
         attester_stellar_keypair,
         chain: config.chain.clone(),
+        age_recipients: config.age_recipients.clone(),
+        age_operator_identity: config.age_operator_identity.clone(),
+        age_attester_identity: config.age_attester_identity.clone(),
     });
 
     // Set up cleanup to remove the PID file on exit.
@@ -1442,6 +1649,34 @@ fn parse_start_args(args: &[String]) -> DaemonConfig {
                     config.chain.horizon_url = args[i].clone();
                 }
             }
+            "--age-recipients" => {
+                i += 1;
+                if i < args.len() {
+                    config.age_recipients = args[i]
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                }
+            }
+            "--age-operator-identity" => {
+                i += 1;
+                if i < args.len() {
+                    config.age_operator_identity = Some(args[i].clone());
+                }
+            }
+            "--age-attester-identity" => {
+                i += 1;
+                if i < args.len() {
+                    config.age_attester_identity = Some(args[i].clone());
+                }
+            }
+            "--leaf-key" => {
+                i += 1;
+                if i < args.len() {
+                    config.leaf_key_hex = Some(args[i].clone());
+                }
+            }
             "--oplog-hash-required" => {
                 config.oplog_hash_required = true;
             }
@@ -1480,6 +1715,32 @@ fn parse_start_args(args: &[String]) -> DaemonConfig {
             pc.gateway_url = gateway;
         }
         config.pinata_config = Some(pc);
+    }
+
+    // Read age and leaf key config from environment if not provided via CLI.
+    if config.age_recipients.is_empty() {
+        if let Ok(recipients) = std::env::var("AGE_RECIPIENTS") {
+            config.age_recipients = recipients
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+    }
+    if config.age_operator_identity.is_none() {
+        if let Ok(identity) = std::env::var("AGE_OPERATOR_SECRET") {
+            config.age_operator_identity = Some(identity);
+        }
+    }
+    if config.age_attester_identity.is_none() {
+        if let Ok(identity) = std::env::var("AGE_ATTESTER_SECRET") {
+            config.age_attester_identity = Some(identity);
+        }
+    }
+    if config.leaf_key_hex.is_none() {
+        if let Ok(key) = std::env::var("AUDIT_LEAF_KEY") {
+            config.leaf_key_hex = Some(key);
+        }
     }
 
     // Validate: publisher and attester modes require --mongo-uri.

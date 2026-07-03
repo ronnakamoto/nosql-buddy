@@ -6,34 +6,47 @@ import { AuditDevFlow } from "./AuditDevFlow";
 import { AuditProductionFlow } from "./AuditProductionFlow";
 import { AuditSettings } from "./AuditSettings";
 import { AuditSurface } from "./AuditSurface";
+import AuditorMode from "./AuditorMode";
 import { injectAuditKeyframes, Spinner } from "./AuditUi";
 
 /**
  * ZK Audit Log panel — state is owned by the App tab so it survives tab
- * switches. The parent passes the current mode/view and notifies us when
- * either changes.
+ * switches. The parent passes the current mode/view/role and notifies us
+ * when any of them change.
  *
  * Routing logic:
  *   - "chooser"    → AuditModeChooser landing (first run)
  *   - "settings"   → AuditSettings
- *   - "dev"/"production" with stack not configured → DevFlow/ProductionFlow setup
- *   - "dev"/"production" configured → AuditSurface (unified surface)
+ *   - "dev" + operator role → AuditDevFlow (stack control, seal → commit)
+ *   - "dev" + auditor role  → AuditorMode (independent verification)
+ *   - "production" with keypair → AuditSurface (unified surface)
+ *   - "production" without keypair → ProductionFlow setup
+ *
+ * The Dev role defaults from the active connection's privileges (write →
+ * operator, read-only → auditor) and is always switchable — the server
+ * enforces the real permissions, this only picks the right surface.
  */
 type View = "chooser" | "dev" | "production" | "settings";
+export type AuditRole = "operator" | "auditor";
 
 export interface AuditPanelProps {
   mode: AuditMode;
   view: View;
+  /** Explicit role override chosen by the user; null = auto-detect. */
+  role: AuditRole | null;
   connectionId?: string | null;
   onModeChange: (mode: AuditMode) => void;
   onViewChange: (view: View) => void;
+  onRoleChange: (role: AuditRole) => void;
 }
 
 export default function AuditPanel({
   view,
+  role,
   connectionId,
   onModeChange,
   onViewChange,
+  onRoleChange,
 }: AuditPanelProps) {
   injectAuditKeyframes();
 
@@ -58,6 +71,49 @@ export default function AuditPanel({
     loadConfig();
   }, [loadConfig]);
 
+  // ─── Role detection ──────────────────────────────────────────────────
+  // Classify the active connection's privileges once per connection. A
+  // read-only credential can't operate the audit stack, so it defaults to
+  // the auditor surface; write access defaults to operator. The user can
+  // override either way — this is a UX default, not a permission gate.
+  const [detectedRole, setDetectedRole] = useState<AuditRole | null>(null);
+  const [detecting, setDetecting] = useState(false);
+
+  useEffect(() => {
+    if (!connectionId) {
+      setDetectedRole(null);
+      return;
+    }
+    let cancelled = false;
+    setDetecting(true);
+    commands
+      .connectionAccessLevel(connectionId)
+      .then((access) => {
+        if (cancelled) return;
+        setDetectedRole(
+          access.level === "read"
+            ? "auditor"
+            : access.level === "write"
+              ? "operator"
+              : null,
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setDetectedRole(null);
+      })
+      .finally(() => {
+        if (!cancelled) setDetecting(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [connectionId]);
+
+  // Effective role: explicit choice wins, then detection, then operator
+  // (the dev-mode demo works without any MongoDB connection open).
+  const effectiveRole: AuditRole = role ?? detectedRole ?? "operator";
+  const roleAutoDetected = role === null && detectedRole !== null;
+
   const loadDevPrereqs = useCallback(async () => {
     setDevPrereqsLoading(true);
     try {
@@ -71,11 +127,11 @@ export default function AuditPanel({
   }, []);
 
   useEffect(() => {
-    if (view !== "dev") return;
+    if (view !== "dev" || effectiveRole !== "operator") return;
     loadDevPrereqs();
     const interval = window.setInterval(loadDevPrereqs, 2000);
     return () => window.clearInterval(interval);
-  }, [view, loadDevPrereqs]);
+  }, [view, effectiveRole, loadDevPrereqs]);
 
   const showSettings = useCallback(() => onViewChange("settings"), [onViewChange]);
 
@@ -121,7 +177,16 @@ export default function AuditPanel({
   // ─── Body ─────────────────────────────────────────────────────────────
   let body: React.ReactNode;
 
-  if (configLoading || (view === "dev" && devPrereqsLoading && !devPrereqs)) {
+  const waitingForRole = view === "dev" && role === null && detecting;
+
+  if (
+    configLoading ||
+    waitingForRole ||
+    (view === "dev" &&
+      effectiveRole === "operator" &&
+      devPrereqsLoading &&
+      !devPrereqs)
+  ) {
     body = (
       <div style={{ display: "flex", justifyContent: "center", padding: "var(--space-8)" }}>
         <Spinner size={22} />
@@ -145,8 +210,19 @@ export default function AuditPanel({
         onShowSettings={showSettings}
       />
     );
+  } else if (view === "dev" && effectiveRole === "auditor") {
+    // Auditor role → independent verification. No MongoDB required.
+    body = (
+      <AuditorMode
+        roleNotice={
+          roleAutoDetected
+            ? "Your MongoDB connection is read-only, so the auditor tools are shown. Use the role switch above if you operate the audit stack."
+            : null
+        }
+      />
+    );
   } else if (view === "dev") {
-    // Dev mode → Docker stack flow (Set up / Start Stack / live view).
+    // Operator role → Docker stack flow (Set up / Start Stack / live view).
     body = (
       <AuditDevFlow
         onShowSettings={showSettings}
@@ -169,6 +245,7 @@ export default function AuditPanel({
   // sticky header. We still show the pane chrome title so it's consistent with
   // other tabs — but we hide the mode tabs (they live in Settings now).
   const showModeTabs = view !== "chooser" && view !== "settings" && !isUnifiedSurface;
+  const showRoleSwitch = view === "dev" && !waitingForRole;
 
   return (
     <div
@@ -184,7 +261,9 @@ export default function AuditPanel({
               {view === "settings"
                 ? "Settings"
                 : view === "dev"
-                  ? "Local Docker stack"
+                  ? effectiveRole === "auditor"
+                    ? "Independent verification"
+                    : "Local Docker stack"
                   : view === "production"
                     ? "Production pipeline"
                     : "Choose a mode"}
@@ -212,6 +291,29 @@ export default function AuditPanel({
           )}
 
           <div className="pane__actions">
+            {showRoleSwitch && (
+              <div
+                className="audit-role-switch"
+                role="group"
+                aria-label="Audit role"
+              >
+                <span className="audit-role-switch__label">Role</span>
+                <button
+                  className={`audit-mode-tab ${effectiveRole === "operator" ? "is-active" : ""}`}
+                  onClick={() => onRoleChange("operator")}
+                  title="Run the audit stack, seal epochs, and commit roots to Stellar"
+                >
+                  Operator
+                </button>
+                <button
+                  className={`audit-mode-tab ${effectiveRole === "auditor" ? "is-active" : ""}`}
+                  onClick={() => onRoleChange("auditor")}
+                  title="Independently verify the audit trail — no MongoDB access needed"
+                >
+                  Auditor
+                </button>
+              </div>
+            )}
             {view !== "chooser" && (
               <button
                 className={`audit-mode-tab ${view === "settings" ? "is-active" : ""}`}
@@ -240,5 +342,3 @@ export default function AuditPanel({
     </div>
   );
 }
-
-

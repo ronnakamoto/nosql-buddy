@@ -131,6 +131,39 @@ pub struct OplogAttestation {
     pub timestamp: u64,
 }
 
+/// A recorded, verifier-attributable disclosure verification.
+///
+/// Written by `verify_and_record_disclosure` after (and only after) the
+/// Groth16 pairing check passes. The record is self-describing: it carries
+/// the full public claim so anyone enumerating the log can see exactly what
+/// was proven, by whom, against which committed root, and when — without
+/// contacting either party.
+#[derive(Clone)]
+#[contracttype]
+pub struct DisclosureRecord {
+    /// Monotonic 1-based record id.
+    pub record_id: u64,
+    /// The account that submitted (and signed) the verification.
+    pub verifier: Address,
+    /// The committed Merkle root the claim was proven against.
+    pub root: Bytes,
+    /// The event's leaf commitment.
+    pub leaf: Bytes,
+    /// Claimed operation (field-encoded, 32 bytes).
+    pub op_pred: Bytes,
+    /// Claimed collection (field-encoded, 32 bytes).
+    pub coll_pred: Bytes,
+    /// Claimed time range (Unix seconds, inclusive).
+    pub ts_min: u64,
+    pub ts_max: u64,
+    /// Which predicate checks were enabled in the claim.
+    pub check_op: bool,
+    pub check_coll: bool,
+    pub check_ts: bool,
+    /// Ledger timestamp when the verification was recorded.
+    pub timestamp: u64,
+}
+
 /// Result of verifying oplog attestations for a sequence.
 ///
 /// Reports how many attestations exist, how many are from currently-authorized
@@ -183,6 +216,8 @@ pub enum CommitmentError {
     InvalidOplogRoot = 14,
     InvalidTimestampRange = 15,
     InvalidThreshold = 16,
+    DisclosureVkAlreadySet = 17,
+    DisclosureVkNotSet = 18,
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +238,13 @@ pub enum InstanceKey {
     /// always uses this key; callers cannot supply their own, which would
     /// let anyone verify proofs against a VK of their own choosing.
     VerifyingKey,
+    /// The Groth16 verifying key for the `audited_action` disclosure
+    /// circuit (leaf v3). Pinned once via `register_disclosure_vk` (admin,
+    /// write-once) and immutable thereafter, for the same reason as
+    /// `VerifyingKey`.
+    DisclosureVk,
+    /// Count of recorded disclosure verifications (monotonic, 1-based ids).
+    DisclosureRecordCount,
 }
 
 #[contracttype]
@@ -215,6 +257,8 @@ pub enum PersistentKey {
     OplogCommitment(u64),
     /// (sequence: u64) -> Vec<OplogAttestation>
     OplogAttestations(u64),
+    /// (record_id: u64) -> DisclosureRecord
+    DisclosureRecord(u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -701,80 +745,242 @@ impl ZkAuditCommitment {
             .get(&InstanceKey::VerifyingKey)
             .ok_or(CommitmentError::NotInitialized)?;
 
-        // 3. Validate byte lengths.
-        if proof.a.len() != 64 || proof.c.len() != 64 {
-            return Err(CommitmentError::InvalidProofEncoding);
-        }
-        if proof.b.len() != 128 {
-            return Err(CommitmentError::InvalidProofEncoding);
-        }
-        if leaf.len() != 32 {
-            return Err(CommitmentError::InvalidProofEncoding);
-        }
-        if vk.alpha.len() != 64 {
-            return Err(CommitmentError::InvalidProofEncoding);
-        }
-        if vk.beta.len() != 128 || vk.gamma.len() != 128 || vk.delta.len() != 128 {
-            return Err(CommitmentError::InvalidProofEncoding);
-        }
-        for ic_point in vk.ic.iter() {
-            if ic_point.len() != 64 {
-                return Err(CommitmentError::InvalidProofEncoding);
-            }
-        }
-
-        // 4. Convert bytes to BN254 affine points.
-        let bn254 = env.crypto().bn254();
-
-        let a = g1_from_bytes(&env, &proof.a);
-        let b = g2_from_bytes(&env, &proof.b);
-        let c = g1_from_bytes(&env, &proof.c);
-
-        let alpha = g1_from_bytes(&env, &vk.alpha);
-        let beta = g2_from_bytes(&env, &vk.beta);
-        let gamma = g2_from_bytes(&env, &vk.gamma);
-        let delta = g2_from_bytes(&env, &vk.delta);
-
-        // 5. Construct public inputs: [root, leaf], matching the witness
+        // 3. Construct public inputs: [root, leaf], matching the witness
         //    order produced by Circom (`main`'s outputs — here `root` —
         //    come before its `public` inputs — here `leaf`).
-        let root_n32: BytesN<32> = BytesN::<32>::try_from_val(&env, &root.to_val())
-            .map_err(|_| CommitmentError::InvalidProofEncoding)?;
-        let leaf_n32: BytesN<32> = BytesN::<32>::try_from_val(&env, &leaf.to_val())
-            .map_err(|_| CommitmentError::InvalidProofEncoding)?;
-        let root_fr = Fr::from_bytes(root_n32);
-        let leaf_fr = Fr::from_bytes(leaf_n32);
+        let root_fr = fr_from_bytes32(&env, &root)?;
+        let leaf_fr = fr_from_bytes32(&env, &leaf)?;
 
         let pub_signals = vec![&env, root_fr, leaf_fr];
 
-        // ic.len() must be pub_signals.len() + 1.
-        if vk.ic.len() != pub_signals.len() as u32 + 1 {
-            return Err(CommitmentError::MalformedVerifyingKey);
-        }
-
-        // 6. Compute vk_x = ic[0] + sum(pub_signals[i] * ic[i+1])
-        let ic0_bytes = vk.ic.get(0).unwrap();
-        let mut vk_x = g1_from_bytes(&env, &ic0_bytes);
-
-        for (i, signal) in pub_signals.iter().enumerate() {
-            let ic_bytes = vk.ic.get((i + 1) as u32).unwrap();
-            let ic_point = g1_from_bytes(&env, &ic_bytes);
-            let prod = bn254.g1_mul(&ic_point, &signal);
-            vk_x = bn254.g1_add(&vk_x, &prod);
-        }
-
-        // 7. Pairing check: e(-A, B) * e(alpha, beta) * e(vk_x, gamma) * e(C, delta) == 1
-        let neg_a = -a;
-        let vp1 = vec![&env, neg_a, alpha, vk_x, c];
-        let vp2 = vec![&env, b, beta, gamma, delta];
-
-        let verified = bn254.pairing_check(vp1, vp2);
-
-        if !verified {
-            return Err(CommitmentError::VerificationFailed);
-        }
+        // 4. Groth16 pairing check against the pinned VK.
+        groth16_verify(&env, &vk, &proof, &pub_signals)?;
 
         Ok(true)
+    }
+
+    /// Pin the Groth16 verifying key for the `audited_action` disclosure
+    /// circuit. Admin-only and **write-once**: like the inclusion VK, it can
+    /// never be changed afterwards, so a compromised admin cannot swap in a
+    /// VK for a weaker circuit and forge disclosure verdicts.
+    pub fn register_disclosure_vk(env: Env, vk: VerifyingKey) -> Result<(), CommitmentError> {
+        let admin = Self::get_admin_or_err(&env)?;
+        admin.require_auth();
+        if env.storage().instance().has(&InstanceKey::DisclosureVk) {
+            return Err(CommitmentError::DisclosureVkAlreadySet);
+        }
+        env.storage().instance().set(&InstanceKey::DisclosureVk, &vk);
+        Ok(())
+    }
+
+    /// Get the pinned disclosure verifying key.
+    pub fn get_disclosure_vk(env: Env) -> Result<VerifyingKey, CommitmentError> {
+        env.storage()
+            .instance()
+            .get(&InstanceKey::DisclosureVk)
+            .ok_or(CommitmentError::DisclosureVkNotSet)
+    }
+
+    /// Verify an **Audited-Action Disclosure** proof (leaf v3): a Groth16
+    /// proof that the event committed by `leaf` — included in the tree
+    /// anchored at the committed `root` — satisfies the enabled predicate
+    /// checks, without revealing the event.
+    ///
+    /// Public signals, in circuit witness order:
+    /// `[root, leaf, op_pred, coll_pred, ts_min, ts_max, check_op,
+    /// check_coll, check_ts]`. Every predicate parameter is folded into
+    /// `vk_x`, so a valid proof is bound to this exact claim and cannot be
+    /// replayed against a different one.
+    ///
+    /// Permissionless, like `verify_inclusion`: any third party can verify
+    /// a disclosure with only public data (typically via a read-only
+    /// `simulateTransaction`, requiring no account at all).
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_disclosure(
+        env: Env,
+        root: Bytes,
+        leaf: Bytes,
+        op_pred: Bytes,
+        coll_pred: Bytes,
+        ts_min: u64,
+        ts_max: u64,
+        check_op: bool,
+        check_coll: bool,
+        check_ts: bool,
+        proof: Proof,
+    ) -> Result<bool, CommitmentError> {
+        Self::check_disclosure(
+            &env, &root, &leaf, &op_pred, &coll_pred, ts_min, ts_max, check_op, check_coll,
+            check_ts, &proof,
+        )?;
+        Ok(true)
+    }
+
+    /// Verify an Audited-Action Disclosure proof **and record the
+    /// verification on-chain** as a permanent, verifier-attributable fact.
+    ///
+    /// This is the "attestation" form of `verify_disclosure`: the same
+    /// pairing check runs, but on success the contract appends a
+    /// [`DisclosureRecord`] — who verified, the full claim, against which
+    /// root, at what ledger time — to an append-only log and emits a
+    /// `disclosure` event. `verifier.require_auth()` binds the record to
+    /// the submitting account's signature, so the record is evidence that
+    /// **that party** checked **that claim** (citable by tx hash in audit
+    /// reports, dispute resolution, or compliance filings).
+    ///
+    /// Failed proofs record nothing and return `VerificationFailed` — the
+    /// log contains only successful verifications.
+    ///
+    /// Returns the new record's id (1-based, monotonic).
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_and_record_disclosure(
+        env: Env,
+        verifier: Address,
+        root: Bytes,
+        leaf: Bytes,
+        op_pred: Bytes,
+        coll_pred: Bytes,
+        ts_min: u64,
+        ts_max: u64,
+        check_op: bool,
+        check_coll: bool,
+        check_ts: bool,
+        proof: Proof,
+    ) -> Result<u64, CommitmentError> {
+        verifier.require_auth();
+
+        Self::check_disclosure(
+            &env, &root, &leaf, &op_pred, &coll_pred, ts_min, ts_max, check_op, check_coll,
+            check_ts, &proof,
+        )?;
+
+        // Append the record (1-based, monotonic id).
+        let record_id: u64 = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DisclosureRecordCount)
+            .unwrap_or(0)
+            + 1;
+
+        let record = DisclosureRecord {
+            record_id,
+            verifier: verifier.clone(),
+            root: root.clone(),
+            leaf,
+            op_pred,
+            coll_pred,
+            ts_min,
+            ts_max,
+            check_op,
+            check_coll,
+            check_ts,
+            timestamp: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&PersistentKey::DisclosureRecord(record_id), &record);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::DisclosureRecordCount, &record_id);
+
+        env.events().publish(
+            (soroban_sdk::symbol_short!("disclose"), verifier),
+            (record_id, root),
+        );
+
+        Ok(record_id)
+    }
+
+    /// Get recorded disclosure verifications (most recent first, paginated).
+    pub fn get_disclosure_records(
+        env: Env,
+        limit: u32,
+    ) -> Result<Vec<DisclosureRecord>, CommitmentError> {
+        if limit == 0 || limit > 100 {
+            return Err(CommitmentError::InvalidPageSize);
+        }
+
+        let current: u64 = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DisclosureRecordCount)
+            .unwrap_or(0);
+
+        let mut result = Vec::new(&env);
+        if current == 0 {
+            return Ok(result);
+        }
+
+        let start = if current >= limit as u64 {
+            current - limit as u64 + 1
+        } else {
+            1
+        };
+
+        for id in (start..=current).rev() {
+            if let Some(record) = env
+                .storage()
+                .persistent()
+                .get::<PersistentKey, DisclosureRecord>(&PersistentKey::DisclosureRecord(id))
+            {
+                result.push_back(record);
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Shared disclosure verification: committed-root check, pinned-VK
+    /// load, public-signal construction, and the Groth16 pairing check.
+    #[allow(clippy::too_many_arguments)]
+    fn check_disclosure(
+        env: &Env,
+        root: &Bytes,
+        leaf: &Bytes,
+        op_pred: &Bytes,
+        coll_pred: &Bytes,
+        ts_min: u64,
+        ts_max: u64,
+        check_op: bool,
+        check_coll: bool,
+        check_ts: bool,
+        proof: &Proof,
+    ) -> Result<(), CommitmentError> {
+        // 1. The root must be committed on-chain.
+        let root_index: Map<Bytes, u64> = env
+            .storage()
+            .persistent()
+            .get(&PersistentKey::RootIndex)
+            .unwrap_or_else(|| Map::new(env));
+
+        if !root_index.contains_key(root.clone()) {
+            return Err(CommitmentError::RootNotCommitted);
+        }
+
+        // 2. Load the pinned disclosure verifying key.
+        let vk: VerifyingKey = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DisclosureVk)
+            .ok_or(CommitmentError::DisclosureVkNotSet)?;
+
+        // 3. Build the public signal vector in circuit witness order.
+        let pub_signals = vec![
+            env,
+            fr_from_bytes32(env, root)?,
+            fr_from_bytes32(env, leaf)?,
+            fr_from_bytes32(env, op_pred)?,
+            fr_from_bytes32(env, coll_pred)?,
+            fr_from_u64(env, ts_min),
+            fr_from_u64(env, ts_max),
+            fr_from_u64(env, u64::from(check_op)),
+            fr_from_u64(env, u64::from(check_coll)),
+            fr_from_u64(env, u64::from(check_ts)),
+        ];
+
+        // 4. Groth16 pairing check against the pinned disclosure VK.
+        groth16_verify(env, &vk, proof, &pub_signals)
     }
 
     /// Get the latest committed root and its sequence number.
@@ -836,6 +1042,93 @@ impl ZkAuditCommitment {
     fn get_admin_or_panic(env: &Env) -> Address {
         Self::get_admin_or_err(env).expect("contract not initialized")
     }
+}
+
+/// Convert a 32-byte `Bytes` to a BN254 scalar field element.
+fn fr_from_bytes32(env: &Env, bytes: &Bytes) -> Result<Fr, CommitmentError> {
+    if bytes.len() != 32 {
+        return Err(CommitmentError::InvalidProofEncoding);
+    }
+    let n32: BytesN<32> = BytesN::<32>::try_from_val(env, &bytes.to_val())
+        .map_err(|_| CommitmentError::InvalidProofEncoding)?;
+    Ok(Fr::from_bytes(n32))
+}
+
+/// Convert a u64 to a BN254 scalar field element (big-endian, zero-padded).
+fn fr_from_u64(env: &Env, value: u64) -> Fr {
+    let mut arr = [0u8; 32];
+    arr[24..].copy_from_slice(&value.to_be_bytes());
+    Fr::from_bytes(BytesN::<32>::from_array(env, &arr))
+}
+
+/// Groth16 verification: validate encodings, compute
+/// `vk_x = ic[0] + Σ pub_signals[i]·ic[i+1]`, and run the pairing check
+/// `e(-A, B) · e(α, β) · e(vk_x, γ) · e(C, δ) == 1` via Soroban's BN254
+/// host functions. Returns `Err(VerificationFailed)` when the pairing does
+/// not hold.
+fn groth16_verify(
+    env: &Env,
+    vk: &VerifyingKey,
+    proof: &Proof,
+    pub_signals: &Vec<Fr>,
+) -> Result<(), CommitmentError> {
+    // Validate byte lengths.
+    if proof.a.len() != 64 || proof.c.len() != 64 {
+        return Err(CommitmentError::InvalidProofEncoding);
+    }
+    if proof.b.len() != 128 {
+        return Err(CommitmentError::InvalidProofEncoding);
+    }
+    if vk.alpha.len() != 64 {
+        return Err(CommitmentError::InvalidProofEncoding);
+    }
+    if vk.beta.len() != 128 || vk.gamma.len() != 128 || vk.delta.len() != 128 {
+        return Err(CommitmentError::InvalidProofEncoding);
+    }
+    for ic_point in vk.ic.iter() {
+        if ic_point.len() != 64 {
+            return Err(CommitmentError::InvalidProofEncoding);
+        }
+    }
+
+    // ic.len() must be pub_signals.len() + 1.
+    if vk.ic.len() != pub_signals.len() + 1 {
+        return Err(CommitmentError::MalformedVerifyingKey);
+    }
+
+    // Convert bytes to BN254 affine points.
+    let bn254 = env.crypto().bn254();
+
+    let a = g1_from_bytes(env, &proof.a);
+    let b = g2_from_bytes(env, &proof.b);
+    let c = g1_from_bytes(env, &proof.c);
+
+    let alpha = g1_from_bytes(env, &vk.alpha);
+    let beta = g2_from_bytes(env, &vk.beta);
+    let gamma = g2_from_bytes(env, &vk.gamma);
+    let delta = g2_from_bytes(env, &vk.delta);
+
+    // vk_x = ic[0] + sum(pub_signals[i] * ic[i+1])
+    let ic0_bytes = vk.ic.get(0).unwrap();
+    let mut vk_x = g1_from_bytes(env, &ic0_bytes);
+
+    for (i, signal) in pub_signals.iter().enumerate() {
+        let ic_bytes = vk.ic.get((i + 1) as u32).unwrap();
+        let ic_point = g1_from_bytes(env, &ic_bytes);
+        let prod = bn254.g1_mul(&ic_point, &signal);
+        vk_x = bn254.g1_add(&vk_x, &prod);
+    }
+
+    // Pairing check: e(-A, B) * e(alpha, beta) * e(vk_x, gamma) * e(C, delta) == 1
+    let neg_a = -a;
+    let vp1 = vec![env, neg_a, alpha, vk_x, c];
+    let vp2 = vec![env, b, beta, gamma, delta];
+
+    if !bn254.pairing_check(vp1, vp2) {
+        return Err(CommitmentError::VerificationFailed);
+    }
+
+    Ok(())
 }
 
 /// Convert a 64-byte `Bytes` to a `Bn254G1Affine`.

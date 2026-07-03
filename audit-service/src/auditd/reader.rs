@@ -75,20 +75,198 @@ pub async fn onchain_root(
 
 /// Rebuild the local audit log from on-chain commitments + IPFS batches.
 ///
-/// This is a placeholder for the full rebuild flow. The current implementation
-/// verifies the local log against the on-chain root (same as `verify`), which
-/// is the core of the reader mode. A full rebuild would:
-/// 1. Read all committed roots from Stellar.
-/// 2. For each root, fetch the IPFS batch by CID.
-/// 3. Replay the batch into the local Merkle tree.
-/// 4. Verify each batch's root matches the on-chain commitment.
+/// 1. Queries the on-chain root history from Stellar.
+/// 2. For each committed root, parses the metadata to extract the IPFS CID.
+/// 3. Fetches the batch bytes from IPFS (Pinata preferred, local daemon fallback).
+/// 4. Decrypts the batch with the auditor's age identity if available.
+/// 5. Replays all batches into the local Merkle tree.
+/// 6. Verifies the final root matches the latest on-chain commitment.
+///
+/// Returns a verification report showing how many events were rebuilt.
 pub async fn rebuild(
     state: State<Arc<DaemonState>>,
 ) -> ApiResult<VerificationReport> {
-    // For now, rebuild = verify. The local log is already rebuilt from
-    // JSONL + sled on startup. This endpoint confirms the local state
-    // matches the on-chain anchor.
-    verify(state).await
+    let local_root_hex = state.audit_log.root_hex().map_err(ApiError::from)?;
+
+    // Query on-chain root history.
+    let kp = stellar_native::generate_keypair();
+    let history = stellar_native::get_root_history_native(
+        &kp,
+        &state.rpc_url,
+        &state.chain.contract_id,
+        100,
+    )
+    .await
+    .map_err(ApiError::from)?;
+
+    if history.is_empty() {
+        return Ok(Json(VerificationReport {
+            onchain_root_found: false,
+            onchain_root: None,
+            local_root_hex,
+            commitment_event_index: None,
+            total_events: 0,
+            verified_events: 0,
+            events_after_commitment: 0,
+            chain_intact: true,
+            tamper_detected: false,
+            summary: "No on-chain roots committed yet. Nothing to rebuild.".to_string(),
+        }));
+    }
+
+    // Gather all batch JSONL lines from IPFS.
+    let mut all_lines: Vec<String> = Vec::new();
+    let mut fetched_batches = 0usize;
+    let mut failed_batches = 0usize;
+
+    for root in &history {
+        let Some(cid) = extract_cid_from_metadata(&root.metadata) else {
+            continue;
+        };
+
+        let raw_bytes = match fetch_cid(&state, &cid).await {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!("rebuild: failed to fetch CID {} for seq {}: {e}", cid, root.sequence);
+                failed_batches += 1;
+                continue;
+            }
+        };
+
+        let decrypted = if let Some(identity) = &state.age_attester_identity {
+            match crate::audit::crypto::decrypt_batch(&raw_bytes, identity) {
+                Ok(plaintext) => {
+                    log::info!("rebuild: decrypted batch {} (seq {})", cid, root.sequence);
+                    plaintext.into_bytes()
+                }
+                Err(e) => {
+                    log::warn!(
+                        "rebuild: age decrypt failed for CID {} (seq {}): {e} — treating as plaintext",
+                        cid,
+                        root.sequence
+                    );
+                    raw_bytes
+                }
+            }
+        } else {
+            String::from_utf8(raw_bytes).unwrap_or_default().into_bytes()
+        };
+
+        let text = match String::from_utf8(decrypted) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("rebuild: CID {} (seq {}) is not valid UTF-8: {e}", cid, root.sequence);
+                failed_batches += 1;
+                continue;
+            }
+        };
+
+        for line in text.lines() {
+            let line = line.trim();
+            if !line.is_empty() {
+                all_lines.push(line.to_string());
+            }
+        }
+        fetched_batches += 1;
+    }
+
+    if all_lines.is_empty() {
+        return Ok(Json(VerificationReport {
+            onchain_root_found: false,
+            onchain_root: history.last().cloned(),
+            local_root_hex,
+            commitment_event_index: None,
+            total_events: 0,
+            verified_events: 0,
+            events_after_commitment: 0,
+            chain_intact: true,
+            tamper_detected: false,
+            summary: format!(
+                "Found {} on-chain root(s), but no batches could be fetched/decrypted.",
+                history.len()
+            ),
+        }));
+    }
+
+    // Write the reconstructed JSONL to disk and replay.
+    let events_path = state.data_dir.join("audit").join("events.jsonl");
+    let jsonl_content = all_lines.join("\n") + "\n";
+
+    // Clear local state (tree, events, sled) before replay.
+    state
+        .audit_log
+        .clear()
+        .map_err(ApiError::from)?;
+
+    std::fs::write(&events_path, &jsonl_content)
+        .map_err(|e| ApiError(AuditError::Io(format!("write events.jsonl: {e}"))))?;
+
+    state
+        .audit_log
+        .set_persistence_dir(&state.data_dir)
+        .map_err(ApiError::from)?;
+
+    let rebuilt_root_hex = state.audit_log.root_hex().map_err(ApiError::from)?;
+    let total_events = state.audit_log.event_count() as u64;
+
+    let latest_onchain = history.last().cloned();
+    let root_matches = latest_onchain
+        .as_ref()
+        .map_or(false, |r| r.root_hex == rebuilt_root_hex);
+
+    let summary = if root_matches {
+        format!(
+            "Rebuilt {} event(s) from {} batch(es). Final root matches on-chain commitment (seq {}).",
+            total_events,
+            fetched_batches,
+            latest_onchain.as_ref().unwrap().sequence
+        )
+    } else {
+        format!(
+            "Rebuilt {} event(s) from {} batch(es). Root mismatch: local {} vs on-chain {} (seq {}). {} batch(es) failed to fetch.",
+            total_events,
+            fetched_batches,
+            &rebuilt_root_hex[..rebuilt_root_hex.len().min(16)],
+            latest_onchain.as_ref().map_or("?".to_string(), |r| r.root_hex.clone()),
+            latest_onchain.as_ref().map_or(0, |r| r.sequence),
+            failed_batches
+        )
+    };
+
+    Ok(Json(VerificationReport {
+        onchain_root_found: true,
+        onchain_root: latest_onchain,
+        local_root_hex: rebuilt_root_hex,
+        commitment_event_index: Some(total_events.saturating_sub(1)),
+        total_events,
+        verified_events: total_events,
+        events_after_commitment: 0,
+        chain_intact: root_matches,
+        tamper_detected: !root_matches,
+        summary,
+    }))
+}
+
+/// Fetch raw bytes for a CID, preferring Pinata when configured.
+async fn fetch_cid(state: &DaemonState, cid: &str) -> Result<Vec<u8>, AuditError> {
+    if let Some(pinata) = &state.pinata_config {
+        if !pinata.api_key.is_empty() || !pinata.api_secret.is_empty() {
+            return crate::audit::pinata::fetch_batch(pinata, cid).await;
+        }
+    }
+    crate::audit::ipfs::fetch_batch(&state.ipfs_config, cid).await
+}
+
+/// Extract an IPFS CID from on-chain metadata string.
+///
+/// Metadata format: `epoch=N cid=CID ...` or `epoch=N` (no CID).
+fn extract_cid_from_metadata(metadata: &str) -> Option<String> {
+    for part in metadata.split_whitespace() {
+        if let Some(val) = part.strip_prefix("cid=") {
+            return Some(val.to_string());
+        }
+    }
+    None
 }
 
 // ─── Oplog integrity verification (three-way compare) ─────────────────

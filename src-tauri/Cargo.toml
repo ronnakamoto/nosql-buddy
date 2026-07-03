@@ -59,6 +59,7 @@ mongo-uri = { path = "../mongo-uri" }
 zk-audit = { path = "../zk-audit" }
 ark-ff = "0.5"
 hex = "0.4"
+base64 = "0.22"
 
 [features]
 # This feature is used for production builds where `devUrl` is not used.

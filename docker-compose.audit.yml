@@ -44,7 +44,7 @@ services:
       - "--mode"
       - "publish"
       - "--mongo-uri"
-      - "${PUBLISHER_MONGO_URI:-mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0}"
+      - "${PUBLISHER_MONGO_URI:-mongodb://root:nosqlbuddy-dev-root-pw@mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0&authSource=admin}"
       - "--port"
       - "9173"
       - "--data-dir"
@@ -59,6 +59,8 @@ services:
       - "/opt/circuits"
       - "--proving-key"
       - "/opt/circuits/merkle_inclusion.pkey"
+      - "--ipfs-api"
+      - "http://host.docker.internal:5001"
     volumes:
       - audit-publisher-data:/data/publisher
     env_file:
@@ -87,7 +89,7 @@ services:
       - "--mode"
       - "attest"
       - "--mongo-uri"
-      - "${ATTESTER_MONGO_URI:-mongodb://mongo3:27017}"
+      - "${ATTESTER_MONGO_URI:-mongodb://auditor:nosqlbuddy-dev-auditor-pw@mongo3:27017/?authSource=admin}"
       - "--port"
       - "9174"
       - "--data-dir"
@@ -124,13 +126,15 @@ services:
       - "--mode"
       - "read"
       - "--mongo-uri"
-      - "${READER_MONGO_URI:-mongodb://mongo3:27017}"
+      - "${READER_MONGO_URI:-mongodb://auditor:nosqlbuddy-dev-auditor-pw@mongo3:27017/?authSource=admin}"
       - "--port"
       - "9175"
       - "--data-dir"
       - "/data/reader"
       - "--rpc-url"
       - "https://soroban-testnet.stellar.org:443"
+      - "--ipfs-api"
+      - "http://host.docker.internal:5001"
     volumes:
       - audit-reader-data:/data/reader
     env_file:
@@ -175,6 +179,10 @@ services:
       - .:/work
     environment:
       VKEY_PATH: /opt/circuits/merkle_inclusion.vkey
+      # Registers the audited_action (disclosure) circuit's VK right after
+      # initialize, so `verify_disclosure` works on dev contracts. Write-once,
+      # same env-over-command reasoning as VKEY_PATH above.
+      DISCLOSURE_VKEY_PATH: /opt/circuits/audited_action.vkey
     # The desktop "Set up" flow writes a temporary .setup.env (Stellar network,
     # optional operator secret keys, Pinata creds) into the stack dir before
     # running this service, then deletes it afterward. Loaded here so the keys
@@ -184,7 +192,7 @@ services:
     env_file:
       - path: .setup.env
         required: false
-    command: ["setup", "--vkey-path", "/opt/circuits/merkle_inclusion.vkey"]
+    command: ["setup", "--vkey-path", "/opt/circuits/merkle_inclusion.vkey", "--disclosure-vkey-path", "/opt/circuits/audited_action.vkey"]
 
 volumes:
   audit-publisher-data:

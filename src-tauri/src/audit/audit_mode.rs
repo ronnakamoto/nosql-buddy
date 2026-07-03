@@ -170,6 +170,25 @@ pub fn save_production_network(
     Ok(())
 }
 
+/// Persist the testnet contract ID (used by both Dev Mode and Production
+/// when network == Testnet) so in-app Stellar commands know which contract
+/// to query after a fresh Dev Mode setup deploys one.
+pub fn save_testnet_contract_id(app: &AppHandle, contract_id: String) -> AppResult<()> {
+    let store = app
+        .store(STORE_FILE)
+        .map_err(|e| AppError::Internal(format!("settings store open: {e}")))?;
+    if !contract_id.is_empty() {
+        store.set(
+            AUDIT_TESTNET_CONTRACT_KEY,
+            serde_json::json!(contract_id),
+        );
+    }
+    store
+        .save()
+        .map_err(|e| AppError::Internal(format!("settings store save: {e}")))?;
+    Ok(())
+}
+
 // ─── Production keypair (keychain) ─────────────────────────────────────
 
 /// Load the production mainnet keypair from the keychain, if saved.

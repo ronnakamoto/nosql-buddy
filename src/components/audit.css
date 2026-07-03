@@ -66,6 +66,25 @@
   color: var(--ink-faint);
 }
 
+/* Role switcher (Operator / Auditor) — same pill vocabulary as mode tabs,
+   with a quiet leading label so it reads as a role, not a third mode. */
+.audit-role-switch {
+  display: inline-flex;
+  align-items: center;
+  background: var(--surface-2);
+  border-radius: var(--radius-md);
+  padding: 2px;
+  flex-shrink: 0;
+}
+
+.audit-role-switch__label {
+  padding: 0 8px 0 10px;
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  color: var(--ink-faint);
+  user-select: none;
+}
+
 .audit-mode-tab__soon {
   margin-left: 6px;
   padding: 1px 5px;
@@ -531,6 +550,10 @@
 
 .audit-event-row-grid--with-action {
   grid-template-columns: auto 1fr 1fr auto auto;
+}
+
+.audit-event-row-grid--with-actions {
+  grid-template-columns: auto 1fr 1fr auto auto auto;
 }
 
 .audit-event-row--proven {

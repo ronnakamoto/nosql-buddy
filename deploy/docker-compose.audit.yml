@@ -33,6 +33,10 @@ x-secrets: &secrets
   PINATA_API_KEY: ${PINATA_API_KEY:-}
   PINATA_API_SECRET: ${PINATA_API_SECRET:-}
   PINATA_GATEWAY_URL: ${PINATA_GATEWAY_URL:-https://gateway.pinata.cloud}
+  AGE_OPERATOR_SECRET: ${AGE_OPERATOR_SECRET:-}
+  AGE_ATTESTER_SECRET: ${AGE_ATTESTER_SECRET:-}
+  AGE_RECIPIENTS: ${AGE_RECIPIENTS:-}
+  AUDIT_LEAF_KEY: ${AUDIT_LEAF_KEY:-}
 
 services:
   # ─── Publisher (operator) ───────────────────────────────────────────
@@ -170,9 +174,13 @@ services:
       - .:/work
     environment:
       VKEY_PATH: /opt/circuits/merkle_inclusion.vkey
+      # Registers the audited_action (disclosure) circuit's VK right after
+      # initialize, so `verify_disclosure` works on this contract. Write-once,
+      # same env-over-command reasoning as VKEY_PATH above.
+      DISCLOSURE_VKEY_PATH: /opt/circuits/audited_action.vkey
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    command: ["setup", "--vkey-path", "/opt/circuits/merkle_inclusion.vkey"]
+    command: ["setup", "--vkey-path", "/opt/circuits/merkle_inclusion.vkey", "--disclosure-vkey-path", "/opt/circuits/audited_action.vkey"]
 
 volumes:
   audit-publisher-data:

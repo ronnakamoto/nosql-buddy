@@ -44,6 +44,7 @@
 
 pub mod attestation;
 pub mod change_stream;
+pub mod crypto;
 pub mod dev_proxy;
 pub mod dev_setup;
 pub mod epoch;
@@ -72,6 +73,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use base64::Engine;
 use zk_audit::merkle::AuditMerkleTree;
 use zk_audit::InclusionProof;
 
@@ -121,15 +123,36 @@ struct PersistedEvent {
     /// is recomputed on replay from event ordering.
     #[serde(default)]
     sequence: u64,
-    /// The canonical payload string the leaf was derived from
-    /// (`"{op}|{db}|{col}|{args}"`). Stored verbatim so the leaf can be
-    /// recomputed and checked against `leaf_hex`.
+    /// The canonical payload string the leaf was derived from.
+    ///
+    /// - **v1** (legacy): `"{op}|{db}|{col}|{args}"` — pipe-delimited,
+    ///   leaf derived via `SHA-256(payload)`.
+    /// - **v2** (legacy): base64-encoded canonical bytes
+    ///   (`canonical_payload_bytes(op, db, col, data)`), leaf derived via
+    ///   `HMAC-SHA-256(k_audit, canonical_bytes)`.
+    /// - **v3** (current): base64-encoded canonical bytes, leaf derived via
+    ///   the keyed Poseidon vector commitment over structured fields
+    ///   (`zk_audit::commitment::poseidon_leaf_v3`) — provable in-circuit
+    ///   for ZK disclosure proofs.
     payload: String,
     leaf_hex: String,
     /// Merkle root hex computed *after* this leaf was inserted. Forms a
     /// chain: each event's `root_after` is a function of all prior leaves.
     root_after: String,
     timestamp: String,
+    /// Event format version.
+    ///
+    /// - `1` (or missing, which deserializes to `0`) = legacy pipe-delimited
+    ///   payload + SHA-256 leaf.
+    /// - `2` = canonical binary payload + HMAC leaf.
+    /// - `3` = canonical binary payload + keyed Poseidon vector commitment
+    ///   (ZK-provable structured fields).
+    #[serde(default = "default_event_version")]
+    version: u32,
+}
+
+fn default_event_version() -> u32 {
+    1
 }
 
 /// A retained commitment for a logically pruned audit domain segment.
@@ -177,6 +200,26 @@ pub struct AuditLog {
     legal_holds: Mutex<HashSet<(String, String)>>,
     /// Retained roots for logically pruned domain segments.
     retained_domain_roots: Mutex<HashMap<(String, String), Vec<DomainRetentionRoot>>>,
+    /// HMAC key for v2 leaf derivation (`k_audit`). When `Some`, new events
+    /// are written as **v2** (canonical payload + HMAC leaf). When `None`,
+    /// new events are written as **v1** (pipe-delimited + SHA-256 leaf).
+    /// Replay automatically dispatches on each event's stored `version`.
+    leaf_key: Mutex<Option<[u8; 32]>>,
+    /// The Merkle root (hex) immediately after each leaf was inserted,
+    /// indexed by tree position (`root_after_by_index[i]` is the root right
+    /// after leaf `i` was inserted). Appended atomically under the same
+    /// `tree` lock guard as the insert itself in `record()`.
+    ///
+    /// This lets any caller freeze an epoch boundary at a *specific,
+    /// historical* index by looking up its root here, instead of calling
+    /// `root_hex()` (which always reflects the tree's *current, latest*
+    /// state). The latter is a TOCTOU hazard for out-of-band epoch tracking
+    /// (e.g. a periodic catch-up scan running concurrently with live leaf
+    /// insertion): by the time the scan gets around to processing index N
+    /// and reads `root_hex()`, more leaves may have already been inserted
+    /// by the concurrent writer, silently pulling events past N into the
+    /// "frozen" root for an epoch that's only supposed to end at N.
+    root_after_by_index: Mutex<Vec<String>>,
 }
 
 impl AuditLog {
@@ -191,7 +234,118 @@ impl AuditLog {
             sled_store: Mutex::new(None),
             legal_holds: Mutex::new(HashSet::new()),
             retained_domain_roots: Mutex::new(HashMap::new()),
+            leaf_key: Mutex::new(None),
+            root_after_by_index: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Look up the Merkle root (hex) immediately after the leaf at `index`
+    /// was inserted. Returns `None` if `index` hasn't been inserted yet
+    /// (out of range) — this is a historical, point-in-time value, never
+    /// the tree's current/latest root once other leaves are inserted after
+    /// it. See [`AuditLog::root_after_by_index`] for why this exists.
+    pub fn root_after_at(&self, index: u64) -> Option<String> {
+        self.root_after_by_index
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(index as usize)
+            .cloned()
+    }
+
+    /// Set the HMAC leaf derivation key. After this is called, all new
+    /// events are recorded as **v2** (canonical payload + HMAC leaf).
+    pub fn set_leaf_key(&self, key: [u8; 32]) {
+        *self.leaf_key.lock().unwrap_or_else(|e| e.into_inner()) = Some(key);
+    }
+
+    /// Clear the HMAC leaf derivation key. New events revert to **v1**.
+    #[allow(dead_code)]
+    pub fn clear_leaf_key(&self) {
+        *self.leaf_key.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// Whether a leaf key is configured (v2 mode is active).
+    pub fn has_leaf_key(&self) -> bool {
+        self.leaf_key.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    }
+
+    /// Get the configured leaf key, if any.
+    pub fn leaf_key(&self) -> Option<[u8; 32]> {
+        *self.leaf_key.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Recompute the leaf for a persisted event, dispatching on its
+    /// stored `version`.
+    ///
+    /// - v1 (or missing): uses the legacy `leaf_from_payload` (SHA-256).
+    /// - v2: base64-decodes the payload and computes `HMAC-SHA-256(k_audit,
+    ///   canonical_bytes)`.
+    fn recompute_leaf(&self, event: &PersistedEvent) -> AuditResult<ark_bn254::Fr> {
+        match event.version {
+            1 | 0 => Ok(leaf_from_payload(
+                &event.operation,
+                &event.database,
+                &event.collection,
+                &event.payload,
+            )),
+            2 => {
+                let key = self
+                    .leaf_key
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .ok_or_else(|| {
+                        AuditError::Validation(
+                            "v2 event requires leaf key, but none is configured".to_string(),
+                        )
+                    })?;
+                let canonical = base64::engine::general_purpose::STANDARD.decode(&event.payload).map_err(|e| {
+                    AuditError::Validation(format!(
+                        "v2 event base64 decode failed at index {}: {e}",
+                        event.index
+                    ))
+                })?;
+                Ok(crate::audit::crypto::hmac_leaf(&key, &canonical))
+            }
+            3 => {
+                let key = self
+                    .leaf_key
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .ok_or_else(|| {
+                        AuditError::Validation(
+                            "v3 event requires leaf key, but none is configured".to_string(),
+                        )
+                    })?;
+                let canonical = base64::engine::general_purpose::STANDARD.decode(&event.payload).map_err(|e| {
+                    AuditError::Validation(format!(
+                        "v3 event base64 decode failed at index {}: {e}",
+                        event.index
+                    ))
+                })?;
+                let ts_secs = chrono::DateTime::parse_from_rfc3339(&event.timestamp)
+                    .map_err(|e| {
+                        AuditError::Validation(format!(
+                            "v3 event timestamp parse failed at index {}: {e}",
+                            event.index
+                        ))
+                    })?
+                    .timestamp()
+                    .max(0) as u64;
+                let (leaf, _) = zk_audit::commitment::poseidon_leaf_v3(
+                    &key,
+                    &event.operation,
+                    &event.database,
+                    &event.collection,
+                    ts_secs,
+                    &canonical,
+                )?;
+                Ok(leaf)
+            }
+            v => Err(AuditError::Validation(format!(
+                "unknown event version {v} at index {}",
+                event.index
+            ))),
+        }
     }
 
     /// Enable on-disk persistence and replay any existing log.
@@ -406,8 +560,7 @@ impl AuditLog {
         let mut seq_counters: HashMap<(String, String), u64> = HashMap::new();
 
         for ev in &parsed {
-            let recomputed_leaf =
-                leaf_from_payload(&ev.operation, &ev.database, &ev.collection, &ev.payload);
+            let recomputed_leaf = self.recompute_leaf(ev)?;
             let recomputed_hex = fr_to_hex(recomputed_leaf);
             if recomputed_hex != ev.leaf_hex {
                 return Err(AuditError::ZkAudit(format!(
@@ -447,6 +600,15 @@ impl AuditLog {
         }
 
         *self.sequences.lock().unwrap_or_else(|e| e.into_inner()) = seq_counters;
+
+        // Restore the per-index root history from the persisted (and
+        // already leaf/tamper-verified above) `root_after` values, so
+        // `root_after_at()` keeps working across restarts.
+        {
+            let mut roots = self.root_after_by_index.lock().unwrap_or_else(|e| e.into_inner());
+            roots.clear();
+            roots.extend(parsed.iter().map(|ev| ev.root_after.clone()));
+        }
 
         // Verify the final root matches.
         let tree_root_hex = fr_to_hex(tree.root()?);
@@ -538,8 +700,7 @@ impl AuditLog {
             // 1. Recompute the leaf from the stored payload and verify
             //    it matches the stored leaf_hex. Mismatch ⇒ payload was
             //    edited after the fact.
-            let recomputed_leaf =
-                leaf_from_payload(&ev.operation, &ev.database, &ev.collection, &ev.payload);
+            let recomputed_leaf = self.recompute_leaf(ev)?;
             let recomputed_hex = fr_to_hex(recomputed_leaf);
             if recomputed_hex != ev.leaf_hex {
                 return Err(AuditError::ZkAudit(format!(
@@ -566,6 +727,14 @@ impl AuditLog {
                     ev.index, ev.root_after, recomputed_root_hex
                 )));
             }
+
+            // Restore this index's historical root so `root_after_at()`
+            // keeps working after a restart (replay), not just for events
+            // recorded fresh in this process's lifetime.
+            self.root_after_by_index
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(recomputed_root_hex);
 
             let counter = seq_counters
                 .entry((ev.deployment_id.clone(), ev.database.clone()))
@@ -695,6 +864,86 @@ impl AuditLog {
         payload: &str,
         leaf: ark_bn254::Fr,
     ) -> AuditResult<u64> {
+        // Determine event version from the configured leaf key.
+        let version = if self.has_leaf_key() { 2 } else { 1 };
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        self.record_inner(
+            deployment_id,
+            operation,
+            database,
+            collection,
+            payload,
+            leaf,
+            version,
+            &timestamp,
+        )
+    }
+
+    /// Record an audit event with a **v3 leaf**: a keyed Poseidon vector
+    /// commitment over the event's structured fields (see
+    /// [`zk_audit::commitment`]). Returns the leaf index.
+    ///
+    /// Unlike [`record`](Self::record), the leaf is derived *inside* this
+    /// method because it commits to the event timestamp, which must be the
+    /// same instant that is persisted — replay recomputes the leaf from the
+    /// stored RFC 3339 timestamp's Unix seconds.
+    ///
+    /// `canonical_payload` must be the canonical byte encoding from
+    /// [`crypto::canonical_payload_bytes`]; it is persisted base64-encoded,
+    /// like v2.
+    pub fn record_v3(
+        &self,
+        deployment_id: &str,
+        operation: &str,
+        database: &str,
+        collection: &str,
+        canonical_payload: &[u8],
+    ) -> AuditResult<u64> {
+        let key = self.leaf_key().ok_or_else(|| {
+            AuditError::Validation(
+                "v3 events require a leaf key, but none is configured".to_string(),
+            )
+        })?;
+
+        let now = chrono::Utc::now();
+        let timestamp = now.to_rfc3339();
+        let ts_secs = now.timestamp().max(0) as u64;
+
+        let (leaf, _opening) = zk_audit::commitment::poseidon_leaf_v3(
+            &key,
+            operation,
+            database,
+            collection,
+            ts_secs,
+            canonical_payload,
+        )?;
+
+        let payload_b64 = base64::engine::general_purpose::STANDARD.encode(canonical_payload);
+
+        self.record_inner(
+            deployment_id,
+            operation,
+            database,
+            collection,
+            &payload_b64,
+            leaf,
+            3,
+            &timestamp,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_inner(
+        &self,
+        deployment_id: &str,
+        operation: &str,
+        database: &str,
+        collection: &str,
+        payload: &str,
+        leaf: ark_bn254::Fr,
+        version: u32,
+        timestamp: &str,
+    ) -> AuditResult<u64> {
         // Assign a monotonic, per-`(deploymentId, database)` sequence number.
         // Acquired and released before the tree lock to avoid holding two
         // locks at once.
@@ -721,7 +970,17 @@ impl AuditLog {
         // reordering / deletion.
         let root_after = fr_to_hex(tree.root()?);
 
-        let timestamp = chrono::Utc::now().to_rfc3339();
+        // Record this index's root atomically while still holding the tree
+        // lock, so `root_after_by_index[index]` can never observe a root
+        // more advanced than "immediately after this exact insert" — see
+        // `root_after_at()` for why this matters.
+        {
+            let mut roots = self.root_after_by_index.lock().unwrap_or_else(|e| e.into_inner());
+            debug_assert_eq!(roots.len() as u64, index, "root_after_by_index must stay index-aligned with the tree");
+            roots.push(root_after.clone());
+        }
+
+        let timestamp = timestamp.to_string();
 
         let mut events = self.events.lock().unwrap_or_else(|e| e.into_inner());
         events.push(AuditEvent {
@@ -751,6 +1010,7 @@ impl AuditLog {
                 leaf_hex: leaf_hex.clone(),
                 root_after: root_after.clone(),
                 timestamp: timestamp.clone(),
+                version,
             };
             let line = serde_json::to_string(&persisted)?;
             writeln!(state.file, "{line}")?;
@@ -771,6 +1031,84 @@ impl AuditLog {
         }
 
         Ok(index)
+    }
+
+    /// The private opening of a **v3** event's leaf commitment, needed to
+    /// generate an Audited-Action Disclosure proof for it.
+    ///
+    /// Reads the persisted JSONL record for `index` (the in-memory
+    /// [`AuditEvent`] doesn't carry the payload), re-derives the keyed
+    /// Poseidon commitment, and cross-checks it against the stored leaf.
+    /// Errors for v1/v2 events (their opaque hash leaves have no provable
+    /// opening) and when persistence or the leaf key isn't configured.
+    pub fn disclosure_opening(
+        &self,
+        index: u64,
+    ) -> AuditResult<(zk_audit::LeafOpening, ark_bn254::Fr)> {
+        let key = self.leaf_key().ok_or_else(|| {
+            AuditError::Validation("disclosure proofs require a leaf key".to_string())
+        })?;
+
+        let events_path = {
+            let persistence = self.persistence.lock().unwrap_or_else(|e| e.into_inner());
+            persistence
+                .as_ref()
+                .map(|p| p.events_path.clone())
+                .ok_or_else(|| {
+                    AuditError::Validation(
+                        "disclosure proofs require persistence to be configured".to_string(),
+                    )
+                })?
+        };
+
+        let content = std::fs::read_to_string(&events_path)?;
+        let event = content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str::<PersistedEvent>(l).ok())
+            .find(|e| e.index == index)
+            .ok_or_else(|| {
+                AuditError::Validation(format!("no persisted event at index {index}"))
+            })?;
+
+        if event.version != 3 {
+            return Err(AuditError::Validation(format!(
+                "event at index {index} is v{} — disclosure proofs require v3 leaves \
+                 (keyed Poseidon commitment). Events recorded before the v3 upgrade \
+                 cannot be disclosed this way.",
+                event.version
+            )));
+        }
+
+        let canonical = base64::engine::general_purpose::STANDARD
+            .decode(&event.payload)
+            .map_err(|e| {
+                AuditError::Validation(format!("v3 payload base64 decode at {index}: {e}"))
+            })?;
+        let ts_secs = chrono::DateTime::parse_from_rfc3339(&event.timestamp)
+            .map_err(|e| {
+                AuditError::Validation(format!("v3 timestamp parse at {index}: {e}"))
+            })?
+            .timestamp()
+            .max(0) as u64;
+
+        let (leaf, opening) = zk_audit::commitment::poseidon_leaf_v3(
+            &key,
+            &event.operation,
+            &event.database,
+            &event.collection,
+            ts_secs,
+            &canonical,
+        )?;
+
+        if fr_to_hex(leaf) != event.leaf_hex {
+            return Err(AuditError::Validation(format!(
+                "recomputed v3 leaf does not match stored leaf at index {index} — \
+                 wrong leaf key or tampered log"
+            )));
+        }
+
+        Ok((opening, leaf))
     }
 
     /// Get the current Merkle root as a hex string.
@@ -1281,6 +1619,49 @@ mod tests {
             // Root must be non-trivial (not the empty-tree root).
             let empty_root = AuditLog::new().unwrap().root_hex().unwrap();
             assert_ne!(audit.root_hex().unwrap(), empty_root);
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// v3 leaves (keyed Poseidon vector commitment) round-trip through
+    /// persistence: record with a leaf key, replay with the same key, and
+    /// verify the leaf/root chain reproduces. Replay without the key must
+    /// fail (v3 events are unverifiable keyless), proving the leaf actually
+    /// depends on the key.
+    #[test]
+    fn v3_leaf_persistence_round_trip() {
+        let dir = tempfile_dir();
+        let key = [0x42u8; 32];
+        let root_hex = {
+            let audit = AuditLog::new().unwrap();
+            audit.set_leaf_key(key);
+            audit.set_persistence_dir(&dir).unwrap();
+            let a = std::sync::Arc::new(audit);
+            interceptor::record_insert(&a, "rs:rs0", "shop", "orders", r#"{"total":42}"#)
+                .unwrap();
+            interceptor::record_delete(&a, "rs:rs0", "shop", "orders", r#"{"_id":1}"#).unwrap();
+            a.root_hex().unwrap()
+        };
+
+        // Replay with the same key: leaves recompute, root matches.
+        {
+            let audit = AuditLog::new().unwrap();
+            audit.set_leaf_key(key);
+            audit.set_persistence_dir(&dir).unwrap();
+            assert_eq!(audit.event_count(), 2);
+            assert_eq!(audit.root_hex().unwrap(), root_hex);
+        }
+
+        // Replay without the key: must fail, not silently accept.
+        {
+            let audit = AuditLog::new().unwrap();
+            // Remove sled fast-path so replay actually recomputes leaves.
+            let _ = fs::remove_dir_all(dir.join("audit").join("tree.sled"));
+            let err = audit.set_persistence_dir(&dir).unwrap_err();
+            assert!(
+                err.to_string().contains("leaf key"),
+                "expected leaf-key error, got: {err}"
+            );
         }
         let _ = fs::remove_dir_all(&dir);
     }

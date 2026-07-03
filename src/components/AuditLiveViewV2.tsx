@@ -75,6 +75,7 @@ export function AuditLiveViewV2({
   const [proofIndex, setProofIndex] = useState<number | null>(null);
   const [proofLoading, setProofLoading] = useState(false);
   const [proofResult, setProofResult] = useState<string | null>(null);
+  const [proofClaimText, setProofClaimText] = useState<string | null>(null);
 
   const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -205,20 +206,42 @@ export function AuditLiveViewV2({
     }
   };
 
-  const handleProof = async (index: number) => {
+  /**
+   * Generate an Audited-Action Disclosure proof: a ZK proof that this event
+   * (operation + collection + day) exists in the committed log, revealing
+   * nothing else. The resulting bundle is self-contained — an auditor
+   * verifies it on-chain from their own machine, no trust in this app.
+   */
+  const handleDisclose = async (index: number) => {
     setProofIndex(index);
     setProofLoading(true);
     setProofResult(null);
+    setProofClaimText(null);
 
     try {
-      const result = await commands.auditGenerateProof(index);
+      const result = await commands.auditGenerateDisclosureProof({
+        index,
+        checkOp: true,
+        checkColl: true,
+        checkTs: true,
+      });
+      setProofClaimText(result.claimText);
       setProofResult(
         JSON.stringify(
-          { rootHex: result.rootHex, leafIndex: result.leafIndex, proofLength: result.proof.a.length },
+          {
+            rootHex: result.rootHex,
+            leafHex: result.leafHex,
+            claim: result.claim,
+            claimText: result.claimText,
+            proof: result.proof,
+            network: result.network,
+            contractId: result.contractId,
+          },
           null,
           2,
         ),
       );
+      toast.push("Disclosure proof generated — share the bundle with the auditor", "success");
     } catch (err) {
       toast.push(formatError(err), "error");
     } finally {
@@ -393,7 +416,7 @@ export function AuditLiveViewV2({
                 {pinataResult && (
                   <KeyValue
                     label="IPFS CID"
-                    value={<IpfsCidLink cid={pinataResult.cid} gatewayUrl={pinataResult.gatewayUrl} />}
+                    value={<IpfsCidLink cid={pinataResult.cid} gatewayUrl={pinataResult.gatewayUrl} encrypted={pinataResult.encrypted} />}
                   />
                 )}
               </div>
@@ -483,7 +506,7 @@ export function AuditLiveViewV2({
       {/* ─── Event feed ─────────────────────────────────────────────── */}
       <Card>
         <CardHeader
-          title={<>Change Feed<InfoPopover label="Help: Change Feed" title="Change Feed"><p>Real-time stream of audited MongoDB operations. Click an event to generate a cryptographic proof, or use filters to narrow by operation type.</p></InfoPopover></>}
+          title={<>Change Feed<InfoPopover label="Help: Change Feed" title="Change Feed"><p>Real-time stream of audited MongoDB operations. Click Disclose on an event to generate a zero-knowledge disclosure proof — it shows the operation, collection, and day of the event without revealing the document, and any third party can verify it on-chain.</p></InfoPopover></>}
           subtitle={`${events.length} event${events.length === 1 ? "" : "s"} captured`}
         />
         {events.length === 0 ? (
@@ -511,28 +534,48 @@ export function AuditLiveViewV2({
                   key={ev.index}
                   event={ev}
                   proofLoading={proofLoading && proofIndex === ev.index}
-                  onProof={() => handleProof(ev.index)}
+                  onProof={() => handleDisclose(ev.index)}
                 />
               ))}
           </div>
         )}
         {proofResult && (
-          <pre
-            style={{
-              marginTop: "var(--space-3)",
-              padding: "var(--space-3)",
-              background: "var(--surface-2)",
-              borderRadius: "var(--radius-md)",
-              fontSize: "var(--font-size-xs)",
-              fontFamily: "var(--font-mono)",
-              color: "var(--ink-muted)",
-              overflow: "auto",
-              maxHeight: "180px",
-              margin: 0,
-            }}
-          >
-            {proofResult}
-          </pre>
+          <div style={{ marginTop: "var(--space-3)" }}>
+            {proofClaimText && (
+              <Alert tone="success" compact>
+                Proves: <b>{proofClaimText}</b> — and nothing else. Send this
+                bundle to the auditor; they verify it on-chain themselves
+                (Auditor Mode → Verify Proof Bundle).
+              </Alert>
+            )}
+            <div style={{ display: "flex", justifyContent: "flex-end", margin: "var(--space-2) 0" }}>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  navigator.clipboard.writeText(proofResult);
+                  toast.push("Proof bundle copied", "success");
+                }}
+              >
+                Copy bundle
+              </Button>
+            </div>
+            <pre
+              style={{
+                padding: "var(--space-3)",
+                background: "var(--surface-2)",
+                borderRadius: "var(--radius-md)",
+                fontSize: "var(--font-size-xs)",
+                fontFamily: "var(--font-mono)",
+                color: "var(--ink-muted)",
+                overflow: "auto",
+                maxHeight: "180px",
+                margin: 0,
+              }}
+            >
+              {proofResult}
+            </pre>
+          </div>
         )}
       </Card>
 
@@ -550,7 +593,7 @@ export function AuditLiveViewV2({
           {pinataResult && (
             <KeyValue
               label="IPFS CID (full)"
-              value={<IpfsCidLink cid={pinataResult.cid} gatewayUrl={pinataResult.gatewayUrl} showExternalIcon={true} />}
+              value={<IpfsCidLink cid={pinataResult.cid} gatewayUrl={pinataResult.gatewayUrl} showExternalIcon={true} encrypted={pinataResult.encrypted} />}
             />
           )}
         </Card>
@@ -590,8 +633,14 @@ function EventRow({
       <span style={{ fontSize: "var(--font-size-xs)", color: "var(--ink-faint)" }}>
         {new Date(event.timestamp).toLocaleTimeString()}
       </span>
-      <Button variant="ghost" size="sm" loading={proofLoading} onClick={onProof}>
-        Proof
+      <Button
+        variant="ghost"
+        size="sm"
+        loading={proofLoading}
+        onClick={onProof}
+        title="Generate a zero-knowledge disclosure proof: shows this operation/collection/day exists in the committed log without revealing the document"
+      >
+        Disclose
       </Button>
     </div>
   );

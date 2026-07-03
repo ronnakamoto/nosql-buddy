@@ -264,6 +264,324 @@ pub async fn audit_verify_proof_onchain(
     .map_err(AppError::from)
 }
 
+/// Verify a Groth16 inclusion proof via a **read-only simulation** — no
+/// transaction, no fee, no signing key. This is the auditor-side verification
+/// path: the pairing check runs inside the Soroban runtime against the
+/// contract's pinned verifying key and committed-root index, but the caller
+/// needs only the public RPC URL and contract ID.
+///
+/// `rpc_url` / `contract_id` are explicit (the auditor may be pointing at the
+/// operator's contract from a different machine); empty values fall back to
+/// the app's active audit-mode chain config.
+#[tauri::command]
+pub async fn audit_verify_proof_readonly(
+    app: tauri::AppHandle,
+    root_hex: String,
+    leaf_hex: String,
+    proof_a: String,
+    proof_b: String,
+    proof_c: String,
+    rpc_url: Option<String>,
+    contract_id: Option<String>,
+) -> AppResult<crate::audit::stellar::ReadonlyVerifyResult> {
+    let chain = chain_config(&app)?;
+    let rpc = rpc_url
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| chain.rpc_url.clone());
+    let contract = contract_id
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| chain.contract_id.clone());
+
+    stellar_native::verify_inclusion_readonly_native(
+        &root_hex,
+        &leaf_hex,
+        &proof_a,
+        &proof_b,
+        &proof_c,
+        &rpc,
+        &contract,
+    )
+    .await
+    .map_err(AppError::from)
+}
+
+/// Verify a disclosure proof **and record the verification on-chain** as a
+/// signed transaction from the auditor's own Stellar account.
+///
+/// This is the attestation form: on success the contract appends a
+/// verifier-attributed record (who verified, the full claim, when) to an
+/// append-only on-chain log and emits an event — citable evidence, by tx
+/// hash, that this party checked this claim. The `secret_key` is the
+/// auditor's own S... key; it never belongs to the operator.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn audit_verify_disclosure_record(
+    app: tauri::AppHandle,
+    root_hex: String,
+    leaf_hex: String,
+    claim: crate::audit::stellar_native::DisclosureClaim,
+    proof_a: String,
+    proof_b: String,
+    proof_c: String,
+    secret_key: String,
+    rpc_url: Option<String>,
+    contract_id: Option<String>,
+) -> AppResult<crate::audit::stellar_native::RecordedVerifyResult> {
+    let kp = audit_service::auditd::load_keypair_from_secret_key(secret_key.trim())
+        .map_err(AppError::Validation)?;
+
+    let chain = chain_config(&app)?;
+    let rpc = rpc_url
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| chain.rpc_url.clone());
+    let contract = contract_id
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| chain.contract_id.clone());
+
+    stellar_native::verify_and_record_disclosure_native(
+        &root_hex,
+        &leaf_hex,
+        &claim,
+        &proof_a,
+        &proof_b,
+        &proof_c,
+        &kp,
+        &rpc,
+        &contract,
+        &chain.passphrase,
+    )
+    .await
+    .map_err(AppError::from)
+}
+
+/// List recorded disclosure verifications from the contract (most recent
+/// first) via a read-only simulation — no keys or fees needed.
+#[tauri::command]
+pub async fn audit_list_disclosure_records(
+    app: tauri::AppHandle,
+    limit: Option<u32>,
+    rpc_url: Option<String>,
+    contract_id: Option<String>,
+) -> AppResult<Vec<crate::audit::stellar_native::OnChainDisclosureRecord>> {
+    let chain = chain_config(&app)?;
+    let rpc = rpc_url
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| chain.rpc_url.clone());
+    let contract = contract_id
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| chain.contract_id.clone());
+
+    stellar_native::get_disclosure_records_native(&rpc, &contract, limit.unwrap_or(20).clamp(1, 100))
+        .await
+        .map_err(AppError::from)
+}
+
+/// Resolve a bundled circuit resource path.
+fn resolve_circuit_resource(app: &tauri::AppHandle, name: &str) -> AppResult<String> {
+    use tauri::Manager;
+    let resource = app
+        .path()
+        .resolve(
+            format!("resources/circuits/{name}"),
+            tauri::path::BaseDirectory::Resource,
+        )
+        .map_err(|e| AppError::Validation(format!("resolve {name} resource: {e}")))?;
+    Ok(resource.to_string_lossy().to_string())
+}
+
+/// The result of Audited-Action Disclosure proof generation: a
+/// self-contained bundle an auditor can verify on-chain with zero trust in
+/// the operator (via `audit_verify_disclosure_readonly` or any Soroban RPC
+/// client).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisclosureProofResult {
+    pub root_hex: String,
+    pub leaf_hex: String,
+    pub leaf_index: u64,
+    /// The public claim: predicate parameters exactly as passed on-chain.
+    pub claim: crate::audit::stellar_native::DisclosureClaim,
+    /// Human-readable restatement of the claim (what the proof shows).
+    pub claim_text: String,
+    pub proof: zk_audit::serialize::SorobanProof,
+    pub network: String,
+    pub contract_id: String,
+}
+
+/// Generate an **Audited-Action Disclosure** proof for the v3 event at
+/// `index`: a Groth16 proof that an event with the claimed operation /
+/// collection / time-range exists in the committed tree, revealing nothing
+/// else about it (not the document, database, or exact timestamp).
+///
+/// The claim is derived from the event itself: `op_pred` / `coll_pred` are
+/// the event's own operation and collection (they are only *revealed* if
+/// the corresponding check is enabled), and the time range defaults to the
+/// surrounding UTC day — coarse enough not to fingerprint the exact write
+/// time.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn audit_generate_disclosure_proof(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    index: u64,
+    check_op: bool,
+    check_coll: bool,
+    check_ts: bool,
+    ts_min: Option<u64>,
+    ts_max: Option<u64>,
+) -> AppResult<DisclosureProofResult> {
+    use ark_ff::{BigInteger, PrimeField};
+    use zk_audit::commitment::str_to_field;
+
+    // 1. The private opening (validated against the stored leaf).
+    let (opening, leaf) = state.audit_log.disclosure_opening(index)?;
+
+    // 2. The event metadata for the public claim parameters.
+    let event = state
+        .audit_log
+        .list_events()
+        .into_iter()
+        .find(|e| e.index == index)
+        .ok_or_else(|| AppError::Validation(format!("no event at index {index}")))?;
+
+    // 3. Merkle path for the leaf against the current tree.
+    let inclusion = state.audit_log.prove_inclusion(index)?;
+    if inclusion.leaf != leaf {
+        return Err(AppError::Internal(format!(
+            "tree leaf at {index} does not match the recomputed v3 commitment"
+        )));
+    }
+
+    // 4. Build the statement. Default time range: the surrounding UTC day.
+    let day_start = opening.ts - (opening.ts % 86_400);
+    let statement = zk_audit::DisclosureStatement {
+        op_pred: str_to_field(&event.operation),
+        coll_pred: str_to_field(&event.collection),
+        ts_min: ts_min.unwrap_or(day_start),
+        ts_max: ts_max.unwrap_or(day_start + 86_399),
+        check_op,
+        check_coll,
+        check_ts,
+    };
+    if statement.ts_min > opening.ts || statement.ts_max < opening.ts {
+        return Err(AppError::Validation(format!(
+            "time range [{}, {}] does not contain the event timestamp — the proof would be unsatisfiable",
+            statement.ts_min, statement.ts_max
+        )));
+    }
+
+    // 5. Prove on a blocking thread with the bundled ceremony proving key,
+    //    so the proof verifies against the disclosure VK registered on-chain.
+    let r1cs = resolve_circuit_resource(&app, "audited_action.r1cs")?;
+    let wasm = resolve_circuit_resource(&app, "audited_action.wasm")?;
+    let pkey = resolve_circuit_resource(&app, "audited_action.pkey")?;
+
+    let statement_clone = statement.clone();
+    let groth16_proof = tokio::task::spawn_blocking(move || {
+        let prover = zk_audit::DisclosureProver::with_proving_key(&r1cs, &wasm, &pkey)?;
+        prover.prove(&opening, &inclusion, &statement_clone)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("disclosure proof task: {e}")))?
+    .map_err(AppError::from)?;
+
+    let soroban_args = zk_audit::AuditProver::serialize_for_soroban(&groth16_proof)?;
+
+    let fr_hex = |f: &zk_audit::prover::Fr| {
+        let bytes = f.into_bigint().to_bytes_be();
+        let mut arr = [0u8; 32];
+        arr[32 - bytes.len()..].copy_from_slice(&bytes);
+        hex::encode(arr)
+    };
+
+    let root_hex = fr_hex(&groth16_proof.public_inputs[0]);
+    let leaf_hex = fr_hex(&leaf);
+
+    let claim = crate::audit::stellar_native::DisclosureClaim {
+        op_pred_hex: fr_hex(&statement.op_pred),
+        coll_pred_hex: fr_hex(&statement.coll_pred),
+        ts_min: statement.ts_min,
+        ts_max: statement.ts_max,
+        check_op,
+        check_coll,
+        check_ts,
+    };
+
+    let mut clauses: Vec<String> = Vec::new();
+    if check_op {
+        clauses.push(format!("operation = \"{}\"", event.operation));
+    }
+    if check_coll {
+        clauses.push(format!("collection = \"{}\"", event.collection));
+    }
+    if check_ts {
+        clauses.push(format!(
+            "timestamp within [{}, {}] (Unix seconds)",
+            statement.ts_min, statement.ts_max
+        ));
+    }
+    let claim_text = if clauses.is_empty() {
+        "an event exists in the committed audit log (no predicate checks enabled)".to_string()
+    } else {
+        format!(
+            "an event with {} exists in the committed audit log",
+            clauses.join(" AND ")
+        )
+    };
+
+    let mode_config = load_mode_config(&app)?;
+    let chain = chain_config_from_mode(&mode_config);
+
+    Ok(DisclosureProofResult {
+        root_hex,
+        leaf_hex,
+        leaf_index: index,
+        claim,
+        claim_text,
+        proof: soroban_args.proof,
+        network: chain.network,
+        contract_id: chain.contract_id,
+    })
+}
+
+/// Verify an Audited-Action Disclosure proof via a **read-only simulation**
+/// — the auditor-side counterpart of `audit_generate_disclosure_proof`.
+/// No transaction, no fee, no keys; see `audit_verify_proof_readonly`.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn audit_verify_disclosure_readonly(
+    app: tauri::AppHandle,
+    root_hex: String,
+    leaf_hex: String,
+    claim: crate::audit::stellar_native::DisclosureClaim,
+    proof_a: String,
+    proof_b: String,
+    proof_c: String,
+    rpc_url: Option<String>,
+    contract_id: Option<String>,
+) -> AppResult<crate::audit::stellar::ReadonlyVerifyResult> {
+    let chain = chain_config(&app)?;
+    let rpc = rpc_url
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| chain.rpc_url.clone());
+    let contract = contract_id
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| chain.contract_id.clone());
+
+    stellar_native::verify_disclosure_readonly_native(
+        &root_hex,
+        &leaf_hex,
+        &claim,
+        &proof_a,
+        &proof_b,
+        &proof_c,
+        &rpc,
+        &contract,
+    )
+    .await
+    .map_err(AppError::from)
+}
+
 /// Resolve circuit artifact paths, falling back to bundled resources.
 fn resolve_circuit_paths(
     app: &tauri::AppHandle,
@@ -352,18 +670,31 @@ pub async fn audit_record_event(
     deployment_id: Option<String>,
     payload: String,
 ) -> AppResult<u64> {
-    // The leaf is derived from the raw payload string. The same payload
-    // is stored on disk so replay can recompute and verify the leaf.
-    let leaf = crate::audit::leaf_from_payload(&operation, &database, &collection, &payload);
-
-    let index = state.audit_log.record(
-        deployment_id.as_deref().unwrap_or(""),
-        &operation,
-        &database,
-        &collection,
-        &payload,
-        leaf,
-    )?;
+    // When keyed leaf derivation is active, treat the user-supplied payload
+    // as the `data` field of a canonical payload and record a v3 leaf
+    // (keyed Poseidon vector commitment — ZK-provable structured fields).
+    let index = if state.audit_log.has_leaf_key() {
+        let canonical = crate::audit::crypto::canonical_payload_bytes(
+            &operation, &database, &collection, &payload,
+        );
+        state.audit_log.record_v3(
+            deployment_id.as_deref().unwrap_or(""),
+            &operation,
+            &database,
+            &collection,
+            &canonical,
+        )?
+    } else {
+        let leaf = crate::audit::leaf_from_payload(&operation, &database, &collection, &payload);
+        state.audit_log.record(
+            deployment_id.as_deref().unwrap_or(""),
+            &operation,
+            &database,
+            &collection,
+            &payload,
+            leaf,
+        )?
+    };
 
     // Advance the open batch (epoch) so the UI's "Batch · filling" counter
     // tracks recorded events and the on-disk epoch state stays in sync.
@@ -808,6 +1139,285 @@ pub async fn audit_list_verification_history(
     Ok(state.verification_store.list())
 }
 
+/// Rebuild the audit log from on-chain commitments + IPFS batches.
+///
+/// This is the auditor's primary verification tool. It:
+/// 1. Queries the on-chain root history from the Soroban contract.
+/// 2. For each committed root, extracts the IPFS CID from metadata.
+/// 3. Fetches the (age-encrypted) batch from IPFS/Pinata.
+/// 4. Decrypts the batch with the auditor's age identity.
+/// 5. Replays all events into a fresh, isolated Merkle tree.
+/// 6. Verifies the rebuilt root matches the latest on-chain commitment.
+///
+/// The reconstructed tree lives in a completely isolated directory
+/// (`<app_data_dir>/audit/auditor-rebuild/`) so running this on the
+/// same machine as the operator never touches the operator's own log.
+#[tauri::command]
+pub async fn audit_rebuild_from_chain(
+    app: tauri::AppHandle,
+    age_identity: String,
+    pinata_api_key: Option<String>,
+    pinata_api_secret: Option<String>,
+    pinata_gateway_url: Option<String>,
+    audit_leaf_key_hex: Option<String>,
+) -> AppResult<crate::audit::reader::VerificationReport> {
+    use tauri::Manager;
+
+    if age_identity.trim().is_empty() {
+        return Err(AppError::Validation(
+            "age_identity is required for decryption".to_string(),
+        ));
+    }
+
+    // Resolve chain config (contract + RPC) from the app's settings store.
+    let config = crate::audit::audit_mode::load_mode_config(&app)?;
+    let chain = chain_config_from_mode(&config);
+    if chain.contract_id.is_empty() {
+        return Err(AppError::Validation(
+            "No Soroban contract ID configured. Run Dev Mode setup first.".to_string(),
+        ));
+    }
+
+    // Auditor isolation: use a dedicated subdirectory so we never collide
+    // with the operator's own audit state on the same machine.
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::Validation(format!("resolve app data dir: {e}")))?
+        .join("audit")
+        .join("auditor-rebuild");
+    std::fs::create_dir_all(&data_dir)
+        .map_err(|e| AppError::Io(format!("create auditor-rebuild dir: {e}")))?;
+
+    // 1. Query on-chain root history.
+    let kp = stellar_native::generate_keypair();
+    let history = stellar_native::get_root_history_native(&kp, &chain.rpc_url, &chain.contract_id, 100)
+        .await
+        .map_err(|e| AppError::Internal(format!("get_root_history: {e}")))?;
+
+    if history.is_empty() {
+        return Ok(crate::audit::reader::VerificationReport {
+            onchain_root_found: false,
+            onchain_root: None,
+            local_root_hex: crate::audit::AuditLog::new()
+                .map_err(|e| AppError::Internal(format!("{e}")))?
+                .root_hex()
+                .map_err(|e| AppError::Internal(format!("{e}")))?,
+            commitment_event_index: None,
+            total_events: 0,
+            verified_events: 0,
+            events_after_commitment: 0,
+            chain_intact: true,
+            tamper_detected: false,
+            summary: "No on-chain roots committed yet. Nothing to rebuild.".to_string(),
+        });
+    }
+
+    // 2. Build Pinata config if credentials provided.
+    let pinata_config = match (pinata_api_key, pinata_api_secret, pinata_gateway_url) {
+        (Some(key), Some(secret), Some(gateway)) if !key.is_empty() && !secret.is_empty() => {
+            Some(crate::audit::pinata::PinataConfig {
+                api_key: key,
+                api_secret: secret,
+                gateway_url: gateway,
+            })
+        }
+        _ => None,
+    };
+    let ipfs_config = crate::audit::ipfs::IpfsConfig::default();
+
+    // 3. Fetch + decrypt all batches.
+    let mut all_lines: Vec<String> = Vec::new();
+    let mut fetched_batches = 0usize;
+    let mut failed_batches = 0usize;
+
+    for root in &history {
+        let Some(cid) = extract_cid_from_metadata(&root.metadata) else {
+            continue;
+        };
+
+        let raw_bytes = match fetch_cid(&ipfs_config, pinata_config.as_ref(), &cid).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("rebuild: failed to fetch CID {} for seq {}: {e}", cid, root.sequence);
+                failed_batches += 1;
+                continue;
+            }
+        };
+
+        let decrypted = match crate::audit::crypto::decrypt_batch(&raw_bytes, &age_identity) {
+            Ok(plaintext) => {
+                tracing::info!("rebuild: decrypted batch {} (seq {})", cid, root.sequence);
+                plaintext.into_bytes()
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "rebuild: age decrypt failed for CID {} (seq {}): {e} — treating as plaintext",
+                    cid,
+                    root.sequence
+                );
+                raw_bytes
+            }
+        };
+
+        let text = match String::from_utf8(decrypted) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    "rebuild: CID {} (seq {}) is not valid UTF-8: {e}",
+                    cid,
+                    root.sequence
+                );
+                failed_batches += 1;
+                continue;
+            }
+        };
+
+        for line in text.lines() {
+            let line = line.trim();
+            if !line.is_empty() {
+                all_lines.push(line.to_string());
+            }
+        }
+        fetched_batches += 1;
+    }
+
+    // `get_root_history_native` returns entries most-recent-first, and
+    // fetched batches are appended in that same order — so `all_lines` at
+    // this point is generally NOT in ascending event-index order (e.g. a
+    // newer, smaller batch can be fetched before an older, larger one).
+    // Replay is strictly sequential (the Merkle tree is append-only and
+    // asserts each event's stored `index` matches its actual insertion
+    // position), so the reconstructed log must be sorted by index before
+    // being written and replayed — otherwise the very first insertion
+    // fails with a false "tamper detected: index mismatch" even though
+    // every batch decrypted and verified correctly on its own.
+    all_lines.sort_by_key(|line| {
+        serde_json::from_str::<serde_json::Value>(line)
+            .ok()
+            .and_then(|v| v.get("index").and_then(|i| i.as_u64()))
+            .unwrap_or(u64::MAX)
+    });
+
+    if all_lines.is_empty() {
+        return Ok(crate::audit::reader::VerificationReport {
+            onchain_root_found: false,
+            onchain_root: history.last().cloned(),
+            local_root_hex: crate::audit::AuditLog::new()
+                .map_err(|e| AppError::Internal(format!("{e}")))?
+                .root_hex()
+                .map_err(|e| AppError::Internal(format!("{e}")))?,
+            commitment_event_index: None,
+            total_events: 0,
+            verified_events: 0,
+            events_after_commitment: 0,
+            chain_intact: true,
+            tamper_detected: false,
+            summary: format!(
+                "Found {} on-chain root(s), but no batches could be fetched/decrypted.",
+                history.len()
+            ),
+        });
+    }
+
+    // 4. Write reconstructed JSONL and replay into a fresh tree.
+    let audit_dir = data_dir.join("audit");
+    std::fs::create_dir_all(&audit_dir)
+        .map_err(|e| AppError::Io(format!("create audit dir: {e}")))?;
+    let events_path = audit_dir.join("events.jsonl");
+    let jsonl_content = all_lines.join("\n") + "\n";
+    std::fs::write(&events_path, &jsonl_content)
+        .map_err(|e| AppError::Io(format!("write events.jsonl: {e}")))?;
+
+    let fresh_log = crate::audit::AuditLog::new()
+        .map_err(|e| AppError::Internal(format!("create audit log: {e}")))?;
+
+    if let Some(hex) = audit_leaf_key_hex.as_ref().filter(|s| !s.is_empty()) {
+        let bytes = hex::decode(hex.trim())
+            .map_err(|e| AppError::Validation(format!("invalid audit_leaf_key_hex: {e}")))?;
+        let key: [u8; 32] = bytes.try_into().map_err(|_| {
+            AppError::Validation("audit_leaf_key_hex must be exactly 64 hex chars (32 bytes)".to_string())
+        })?;
+        fresh_log.set_leaf_key(key);
+    }
+
+    fresh_log
+        .set_persistence_dir(&data_dir)
+        .map_err(|e| AppError::Internal(format!("replay events: {e}")))?;
+
+    let rebuilt_root_hex = fresh_log
+        .root_hex()
+        .map_err(|e| AppError::Internal(format!("compute root: {e}")))?;
+    let total_events = fresh_log.event_count() as u64;
+
+    let latest_onchain = history.last().cloned();
+    let root_matches = latest_onchain
+        .as_ref()
+        .map_or(false, |r| r.root_hex == rebuilt_root_hex);
+
+    let summary = if root_matches {
+        format!(
+            "Rebuilt {} event(s) from {} batch(es). Final root matches on-chain commitment (seq {}).",
+            total_events,
+            fetched_batches,
+            latest_onchain.as_ref().unwrap().sequence
+        )
+    } else {
+        format!(
+            "Rebuilt {} event(s) from {} batch(es). Root mismatch: local {} vs on-chain {} (seq {}). {} batch(es) failed to fetch.",
+            total_events,
+            fetched_batches,
+            &rebuilt_root_hex[..rebuilt_root_hex.len().min(16)],
+            latest_onchain.as_ref().map_or("?".to_string(), |r| r.root_hex.clone()),
+            latest_onchain.as_ref().map_or(0, |r| r.sequence),
+            failed_batches
+        )
+    };
+
+    Ok(crate::audit::reader::VerificationReport {
+        onchain_root_found: true,
+        onchain_root: latest_onchain,
+        local_root_hex: rebuilt_root_hex,
+        commitment_event_index: Some(total_events.saturating_sub(1)),
+        total_events,
+        verified_events: total_events,
+        events_after_commitment: 0,
+        chain_intact: root_matches,
+        tamper_detected: !root_matches,
+        summary,
+    })
+}
+
+/// Fetch raw bytes for a CID, preferring Pinata when configured.
+async fn fetch_cid(
+    ipfs_config: &crate::audit::ipfs::IpfsConfig,
+    pinata_config: Option<&crate::audit::pinata::PinataConfig>,
+    cid: &str,
+) -> Result<Vec<u8>, crate::error::AppError> {
+    if let Some(pinata) = pinata_config {
+        if !pinata.api_key.is_empty() || !pinata.api_secret.is_empty() {
+            return crate::audit::pinata::fetch_batch(pinata, cid)
+                .await
+                .map_err(|e| crate::error::AppError::Internal(format!("pinata fetch: {e}")));
+        }
+    }
+    crate::audit::ipfs::fetch_batch(ipfs_config, cid)
+        .await
+        .map_err(|e| crate::error::AppError::Internal(format!("ipfs fetch: {e}")))
+}
+
+/// Extract an IPFS CID from on-chain metadata string.
+///
+/// Metadata format: `epoch=N cid=CID ...` or `epoch=N` (no CID).
+fn extract_cid_from_metadata(metadata: &str) -> Option<String> {
+    for part in metadata.split_whitespace() {
+        if let Some(val) = part.strip_prefix("cid=") {
+            return Some(val.to_string());
+        }
+    }
+    None
+}
+
 // ─── IPFS batch publishing commands ───────────────────────────────────
 
 /// Publish an epoch's event batch to IPFS.
@@ -869,7 +1479,7 @@ pub async fn audit_publish_epoch_to_ipfs(
 
     // Publish to IPFS.
     let result =
-        crate::audit::ipfs::publish_epoch_batch(&config, epoch_number, &batch_content).await?;
+        crate::audit::ipfs::publish_epoch_batch(&config, epoch_number, batch_content.as_bytes()).await?;
 
     // Save the CID to sled.
     state.audit_log.save_ipfs_cid(epoch_number, &result.cid)?;
@@ -1110,6 +1720,39 @@ pub async fn audit_provision_testnet_contract(
         &chain.passphrase,
     )
     .await?;
+
+    // Also pin the Audited-Action Disclosure circuit's VK (write-once, like
+    // the inclusion VK) so disclosure proofs can be verified on this
+    // contract. Best-effort: an older bundle without the disclosure
+    // artifacts still provisions a working inclusion-only contract.
+    match app.path().resolve(
+        "resources/circuits/audited_action.vkey",
+        tauri::path::BaseDirectory::Resource,
+    ) {
+        Ok(disclosure_vkey) if disclosure_vkey.exists() => {
+            let dvk = zk_audit::load_verifying_key_hex(&disclosure_vkey.to_string_lossy())
+                .map_err(|e| {
+                    AppError::Validation(format!("load disclosure verifying key: {e}"))
+                })?;
+            stellar_native::register_disclosure_vk_native(
+                &deployed.contract_id,
+                &kp,
+                &dvk.alpha,
+                &dvk.beta,
+                &dvk.gamma,
+                &dvk.delta,
+                &dvk.ic,
+                &chain.rpc_url,
+                &chain.passphrase,
+            )
+            .await?;
+        }
+        _ => {
+            tracing::warn!(
+                "audited_action.vkey resource not found — disclosure proofs will not verify on this contract"
+            );
+        }
+    }
 
     save_production_network(
         &app,
@@ -1437,7 +2080,7 @@ pub async fn audit_publish_epoch_to_pinata(
 
     // Publish to Pinata.
     let result =
-        crate::audit::pinata::publish_epoch_batch(&pinata_config, epoch_number, &batch_content)
+        crate::audit::pinata::publish_epoch_batch(&pinata_config, epoch_number, batch_content.as_bytes())
             .await?;
 
     // Save the CID to sled.
@@ -2358,6 +3001,29 @@ mod tests {
         assert!(
             rebuilt.verify().unwrap(),
             "reconstructed super-proof must verify against the super-root"
+        );
+    }
+
+    #[test]
+    fn extract_cid_from_metadata_parses_various_formats() {
+        // CID present in standard format
+        assert_eq!(
+            extract_cid_from_metadata("epoch=0 cid=QmAbCdEf123"),
+            Some("QmAbCdEf123".to_string())
+        );
+        // CID at start
+        assert_eq!(
+            extract_cid_from_metadata("cid=bafybeifoo epoch=1"),
+            Some("bafybeifoo".to_string())
+        );
+        // No CID
+        assert_eq!(extract_cid_from_metadata("epoch=0 oplog_entries=5"), None);
+        // Empty metadata
+        assert_eq!(extract_cid_from_metadata(""), None);
+        // CID with empty value (edge case)
+        assert_eq!(
+            extract_cid_from_metadata("epoch=0 cid="),
+            Some("".to_string())
         );
     }
 }
