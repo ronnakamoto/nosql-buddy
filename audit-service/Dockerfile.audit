@@ -8,7 +8,13 @@
 # the STELLAR_SECRET_KEY / ATTESTER_SECRET_KEY env vars.
 
 # ─── Build stage ────────────────────────────────────────────────────────
-FROM rust:1.89-bookworm AS builder
+# Pinned below 1.89: that version mangles the `__rust_probestack` symbol
+# that `wasmer_vm` (pulled in transitively via `ark-circom`) still depends
+# on unmangled, which breaks the link step with "undefined reference to
+# `__rust_probestack`". See .github/workflows/release.yml for the same
+# issue on the desktop app build. Bump once ark-circom/wasmer are upgraded
+# past the fix (wasmer >= 6, see https://github.com/wasmerio/wasmer/pull/5690).
+FROM rust:1.88-bookworm AS builder
 
 # Build dependencies first (cached layer). We copy the manifests and a
 # dummy src so cargo fetches/builds deps without rebuilding on every code
@@ -52,10 +58,14 @@ RUN touch audit-service/src/lib.rs audit-service/src/bin/nosqlbuddy-audit.rs && 
 # WASM. Build it here (the builder has the Rust toolchain) so the slim runtime
 # can ship it without a compiler. The contract is a standalone crate (its own
 # workspace), so a plain cargo wasm build is sufficient for deployment.
-RUN rustup target add wasm32v1-none
+# It requires rustc >= 1.89 (soroban-sdk 25.x), which conflicts with the
+# 1.88 pin above (see the FROM line), so it's built with its own `stable`
+# toolchain rather than the image's default.
+RUN rustup toolchain install stable --profile minimal
+RUN rustup target add wasm32v1-none --toolchain stable
 COPY zk-audit/soroban-contract/Cargo.toml zk-audit/soroban-contract/Cargo.lock ./zk-audit/soroban-contract/
 COPY zk-audit/soroban-contract/src ./zk-audit/soroban-contract/src
-RUN cargo build --release --locked --target wasm32v1-none \
+RUN cargo +stable build --release --locked --target wasm32v1-none \
         --manifest-path zk-audit/soroban-contract/Cargo.toml
 
 # ─── Runtime stage ──────────────────────────────────────────────────────
